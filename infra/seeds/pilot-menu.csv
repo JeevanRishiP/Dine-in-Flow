@@ -1,0 +1,21 @@
+category,item_name,description,price_rupees,veg_type,allergens,spice_level,calories,prep_time_min
+Starters,Paneer Tikka,Cubes of cottage cheese marinated in spiced yogurt and grilled in tandoor,320,VEG,DAIRY,2,380,15
+Starters,Chicken Tikka,Boneless chicken chunks marinated in aromatic spices and mustard oil,380,NON_VEG,DAIRY,2,420,18
+Starters,Crispy Corn,Golden sweet corn tossed with bell peppers and tangy chaat masala,260,VEGAN,,1,290,12
+Starters,Hara Bhara Kebab,Pan-fried spiced spinach and green pea patties with cashew crust,280,VEG,NUTS,1,310,14
+Main Course,Butter Chicken,Slow-cooked tender chicken in a velvety butter tomato gravy,460,NON_VEG,"DAIRY,NUTS",1,580,20
+Main Course,Paneer Butter Masala,Rich cottage cheese simmered in buttery makhani gravy with fenugreek,390,VEG,"DAIRY,NUTS",1,520,15
+Main Course,Dal Makhani,Black lentils slow-cooked overnight with churned butter and cream,320,VEG,DAIRY,1,410,12
+Main Course,Kashmiri Mutton Rogan Josh,Tender mutton pieces braised in aromatic Kashmiri chili and saffron gravy,540,NON_VEG,,2,620,25
+Biryani,Hyderabadi Chicken Biryani,Fragrant basmati rice layered with spiced marinated chicken and fried onions,420,NON_VEG,DAIRY,2,650,22
+Biryani,Royal Veg Dum Biryani,Assorted vegetables and saffron basmati rice dum cooked with fresh mint,340,VEG,DAIRY,1,510,18
+Biryani,Jeera Rice,Steamed long-grain basmati rice tempered with cumin seeds and ghee,190,VEG,DAIRY,0,280,10
+Breads,Butter Naan,Tandoor-baked leavened flatbread brushed with fresh butter,70,VEG,"DAIRY,GLUTEN",0,210,8
+Breads,Garlic Naan,Clay oven naan topped with minced garlic and coriander leaves,90,VEG,"DAIRY,GLUTEN",1,230,8
+Breads,Tandoori Roti,Whole wheat unleavened bread baked in traditional clay oven,45,VEGAN,GLUTEN,0,140,6
+Desserts,Gulab Jamun,Warm reduced milk dumplings soaked in cardamom rose syrup,160,VEG,"DAIRY,GLUTEN",0,320,5
+Desserts,Rasmalai,Soft spongy cottage cheese patties steeped in saffron-infused milk,190,VEG,"DAIRY,NUTS",0,280,5
+Desserts,Mango Kulfi,Traditional Indian dense milk ice cream flavored with Alphonso mango pulp,150,VEG,"DAIRY,NUTS",0,240,5
+Beverages,Mango Lassi,Chilled sweet churned yogurt smoothie blended with ripe mango puree,140,VEG,DAIRY,0,260,5
+Beverages,Masala Chaas,Refreshing spiced buttermilk tempered with roasted cumin and mint,90,VEG,DAIRY,1,80,5
+Beverages,Fresh Lime Soda,Classic fizzy lemon cooler served sweet or salted,110,VEGAN,,0,60,5
