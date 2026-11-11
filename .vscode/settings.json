@@ -1,0 +1,25 @@
+{
+  "npm.packageManager": "pnpm",
+  "jshint.enable": false,
+  "npm.fetchOnlinePackageInfo": false,
+  "json.schemaDownload.enable": false,
+  "json.schemas": [
+    {
+      "fileMatch": ["package.json", "**/package.json"],
+      "schema": {}
+    }
+  ],
+  "css.lint.unknownProperties": "ignore",
+  "css.lint.vendorPrefix": "ignore",
+  "css.lint.compatibleVendorPrefixes": "ignore",
+  "css.lint.validProperties": [
+    "-webkit-tap-highlight-color",
+    "-webkit-font-smoothing",
+    "-moz-osx-font-smoothing",
+    "-webkit-text-fill-color",
+    "-webkit-overflow-scrolling",
+    "-webkit-box-orient",
+    "-webkit-line-clamp",
+    "line-clamp"
+  ]
+}

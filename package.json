@@ -1,0 +1,30 @@
+{
+  "name": "dineflow",
+  "version": "0.0.0",
+  "private": true,
+  "packageManager": "pnpm@12.14.0",
+  "engines": {
+    "node": ">=26.0.0",
+    "pnpm": ">=12.0.0"
+  },
+  "scripts": {
+    "dev": "docker compose -f infra/docker/docker-compose.dev.yml up -d && turbo dev",
+    "build": "turbo build",
+    "test": "turbo test",
+    "test:int": "turbo test:int",
+    "test:e2e": "turbo test:e2e",
+    "lint": "turbo lint",
+    "typecheck": "turbo typecheck",
+    "format": "prettier --write \"**/*.{ts,tsx,json,md}\" --ignore-path .prettierignore",
+    "db:migrate": "pnpm --filter @dineflow/api db:migrate",
+    "db:studio": "pnpm --filter @dineflow/api db:studio",
+    "seed:pilot": "pnpm --filter @dineflow/api seed:pilot",
+    "tunnel": "bash scripts/tunnel.sh",
+    "tunnel:api": "bash scripts/tunnel.sh"
+  },
+  "devDependencies": {
+    "turbo": "^2.5.3",
+    "prettier": "^3.5.3",
+    "@prettier/plugin-xml": "^3.4.1"
+  }
+}

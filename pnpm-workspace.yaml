@@ -1,0 +1,12 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+allowBuilds:
+  '@scarf/scarf': true
+  argon2: true
+  cpu-features: true
+  esbuild: true
+  msgpackr-extract: true
+
+  protobufjs: true
+  ssh2: true

@@ -1,0 +1,22 @@
+# pnpm 12 settings file
+# Reference: https://pnpm.io/settings
+# allowBuilds: explicitly permit packages to run install scripts.
+# Each entry must be verified as legitimate (see AGENTS §2 rule 12).
+#
+# Rationale:
+#   esbuild       — required by drizzle-kit, tsx (dev transpiler), vitest
+#   protobufjs    — required by @grpc/proto-loader (testcontainers transitive dep)
+#   cpu-features  — required by ssh2 (testcontainers transitive dep)
+#   ssh2          — required by testcontainers (SSH tunnel to Docker daemon)
+#   @scarf/scarf  — analytics in drizzle-kit; harmless, disable with SCARF_ANALYTICS=false
+#   argon2        — native bindings for password hashing (Phase 1)
+#   sharp         — native image processing bindings (Phase 2)
+allowBuilds:
+  "@scarf/scarf": true
+  argon2: true
+  better-sqlite3: true
+  cpu-features: true
+  esbuild: true
+  protobufjs: true
+  sharp: true
+  ssh2: true
