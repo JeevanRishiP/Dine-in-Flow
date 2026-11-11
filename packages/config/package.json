@@ -1,0 +1,11 @@
+{
+  "name": "@dineflow/config",
+  "version": "0.0.0",
+  "private": true,
+  "exports": {
+    "./tsconfig": "./tsconfig.base.json",
+    "./tsconfig-nestjs": "./tsconfig.nestjs.json",
+    "./tsconfig-next": "./tsconfig.next.json",
+    "./eslint": "./eslint.config.mjs"
+  }
+}
