@@ -1,25 +1,34 @@
-import { Injectable, UnauthorizedException } from '@nestjs/common';
-import { Pool } from 'pg';
+import { Injectable, Inject, Optional } from '@nestjs/common';
+import crypto from 'node:crypto';
+import type Redis from 'ioredis';
 import { verifySync, NobleCryptoPlugin, ScureBase32Plugin } from 'otplib';
-import { getPool, withTenantContext } from '../../db/client.js';
+import { withTenantContextRaw } from '../../db/client.js';
 import { getConfig } from '../../config/config.js';
 import {
-  hashPassword,
   verifyPassword,
   generateRefreshToken,
   hashRefreshToken,
-  generateRecoveryCode,
   hashRecoveryCode,
   timingSafeEqual,
 } from './crypto.js';
 import { TokenService, StaffJwtPayload } from './token.service.js';
+import { REDIS_CLIENT } from './customer-otp.service.js';
+import { encryptToken, decryptToken } from '../feedback/token-cipher.js';
 import { ErrorCode } from '@dineflow/contracts';
-import type { DomainError } from '../../common/errors/domain-error.js';
+import { domainError, type DomainError } from '../../common/errors/domain-error.js';
+
+const LOGIN_MAX_FAILS = 10;
+const LOGIN_IP_LIMIT = 30;
+const LOGIN_WINDOW_SEC = 900; // 15 minutes
+const MFA_MAX_FAILS = 5;
+const MFA_WINDOW_SEC = 300; // 5 minutes
+const TOTP_REPLAY_TTL_SEC = 90;
 
 export interface StaffLoginResult {
   accessToken: string;
   refreshToken: string;
   requiresMfa: boolean;
+  preMfaToken?: string;
   userId: string;
 }
 
@@ -30,52 +39,103 @@ export interface StaffTokenRefreshResult {
 
 /**
  * Staff authentication service.
- * Handles: login (with MFA check), refresh token rotation with reuse detection,
- * session list, session revocation, and password reset.
+ * Handles: login (with MFA enforcement & pre-MFA token), TOTP replay/rate-limits,
+ * AES-256-GCM TOTP decryption, transactional RLS, and atomic refresh token rotation.
  *
  * NEEDS_HUMAN_REVIEW: token rotation, MFA enforcement, refresh reuse detection
  * Reference: ARCH §12, AGENTS §3
  */
 @Injectable()
 export class StaffAuthService {
-  private readonly pool: Pool;
+  constructor(
+    private readonly tokenService: TokenService,
+    @Optional() @Inject(REDIS_CLIENT) private readonly redis?: Redis,
+  ) {}
 
-  constructor(private readonly tokenService: TokenService) {
-    this.pool = getPool();
+  private mfaEncryptionKey(): string {
+    return process.env['MFA_ENCRYPTION_KEY'] || getConfig().JWT_SECRET;
+  }
+
+  encryptTotpSecret(plainSecret: string): string {
+    return encryptToken(plainSecret, this.mfaEncryptionKey());
+  }
+
+  private decryptTotpSecret(stored: string): string {
+    if (stored.split(':').length === 3) {
+      return decryptToken(stored, this.mfaEncryptionKey());
+    }
+    if (process.env['NODE_ENV'] === 'production') {
+      throw domainError(
+        ErrorCode.MFA_INVALID,
+        'TOTP secret must be encrypted at rest in production.',
+        500,
+      );
+    }
+    return stored;
+  }
+
+  private hashKeyPart(value: string): string {
+    return crypto.createHash('sha256').update(value).digest('hex').slice(0, 16);
+  }
+
+  private async enforceSlidingFailureCap(key: string, max: number): Promise<void> {
+    if (!this.redis) return;
+    const raw = await this.redis.get(key);
+    const count = raw ? Number(raw) : 0;
+    if (count >= max) {
+      throw domainError(ErrorCode.RATE_LIMITED, 'Too many authentication attempts. Try again later.', 429);
+    }
+  }
+
+  private async incrementFailureCounter(key: string, windowSec: number): Promise<void> {
+    if (!this.redis) return;
+    const count = await this.redis.incr(key);
+    if (count === 1) {
+      await this.redis.expire(key, windowSec);
+    }
+  }
+
+  private async clearFailureCounter(key: string): Promise<void> {
+    if (!this.redis) return;
+    await this.redis.del(key);
   }
 
   /**
    * Authenticate a staff member with email + password.
    * - Timing-safe password comparison
-   * - If TOTP is enrolled, returns requiresMfa=true; caller must then call verifyMfa()
-   * - Access token issued only after MFA pass (if enrolled)
-   * Reference: ARCH §12
+   * - Enforces MFA for OWNER/MANAGER in production/when configured
+   * - Returns short-lived preMfaToken when requiresMfa=true; caller must call verifyMfa()
    */
   async login(
     orgId: string,
     email: string,
     password: string,
+    clientIp = 'unknown',
   ): Promise<StaffLoginResult> {
-    const user = await withTenantContext(orgId, async (db) => {
-      // Must be raw SQL for constant-time safety (no ORM short-circuit)
-      const client = await this.pool.connect();
-      try {
-        await client.query(`SELECT set_config('app.org_id', $1, true)`, [orgId]);
-        const r = await client.query<{
-          id: string;
-          password_hash: string;
-          is_active: boolean;
-          totp_secret_enc: string | null;
-          totp_enrolled_at: Date | null;
-        }>(
-          `SELECT id, password_hash, is_active, totp_secret_enc, totp_enrolled_at
-           FROM staff_users WHERE org_id = $1 AND email = $2 LIMIT 1`,
-          [orgId, email.toLowerCase()],
-        );
-        return r.rows[0] ?? null;
-      } finally {
-        client.release();
-      }
+    if (!orgId) {
+      throw domainError(ErrorCode.UNAUTHORIZED, 'Tenant context required.', 401);
+    }
+
+    const normalizedEmail = email.trim().toLowerCase();
+    const failKey = `staff:login:fail:${orgId}:${this.hashKeyPart(normalizedEmail)}`;
+    const ipKey = `staff:login:ip:${this.hashKeyPart(clientIp)}`;
+
+    await this.enforceSlidingFailureCap(ipKey, LOGIN_IP_LIMIT);
+    await this.enforceSlidingFailureCap(failKey, LOGIN_MAX_FAILS);
+
+    const user = await withTenantContextRaw(orgId, async (client) => {
+      const r = await client.query<{
+        id: string;
+        password_hash: string;
+        is_active: boolean;
+        totp_secret_enc: string | null;
+        totp_enrolled_at: Date | null;
+      }>(
+        `SELECT id, password_hash, is_active, totp_secret_enc, totp_enrolled_at
+         FROM staff_users WHERE org_id = $1 AND email = $2 LIMIT 1`,
+        [orgId, normalizedEmail],
+      );
+      return r.rows[0] ?? null;
     });
 
     // Always run password comparison to prevent username enumeration via timing
@@ -84,6 +144,8 @@ export class StaffAuthService {
     const valid = await verifyPassword(hashToVerify, password);
 
     if (!user || !valid || !user.is_active) {
+      await this.incrementFailureCounter(ipKey, LOGIN_WINDOW_SEC);
+      await this.incrementFailureCounter(failKey, LOGIN_WINDOW_SEC);
       const err: DomainError = {
         code: ErrorCode.INVALID_CREDENTIALS,
         message: 'Invalid email or password.',
@@ -92,20 +154,39 @@ export class StaffAuthService {
       throw err;
     }
 
-    const hasMfa = !!user.totp_enrolled_at;
-
-    // Get the user's primary membership to determine role
     const membership = await this._getMembership(orgId, user.id);
+    if (!membership) {
+      throw domainError(ErrorCode.FORBIDDEN, 'No active staff membership found for this organization.', 403);
+    }
 
-    // If MFA enrolled, do NOT issue full token yet — caller must verify TOTP
+    await this.clearFailureCounter(failKey);
+
+    const hasMfa = !!user.totp_enrolled_at;
+    const mfaRequiredForRole =
+      (membership.role === 'OWNER' || membership.role === 'MANAGER') &&
+      (process.env['NODE_ENV'] === 'production' || process.env['ENFORCE_ADMIN_MFA'] === 'true');
+
     if (hasMfa) {
-      // Issue a limited pre-MFA token (short-lived, no refresh)
+      const preMfaToken = this.tokenService.signPreMfaToken({
+        sub: user.id,
+        org: orgId,
+        role: membership.role,
+      });
       return {
-        accessToken: '', // No access token until MFA passes
+        accessToken: '',
         refreshToken: '',
         requiresMfa: true,
+        preMfaToken,
         userId: user.id,
       };
+    }
+
+    if (mfaRequiredForRole) {
+      throw domainError(
+        ErrorCode.MFA_REQUIRED,
+        'MFA enrollment is required for OWNER and MANAGER accounts.',
+        403,
+      );
     }
 
     const { accessToken, refreshToken } = await this._issueTokenPair(orgId, user.id, membership.role, membership.outlet_id);
@@ -113,115 +194,226 @@ export class StaffAuthService {
   }
 
   /**
-   * Verify TOTP code after initial password check.
-   * Also handles recovery code verification.
+   * Verify TOTP or recovery code using the cryptographic preMfaToken from login().
    */
   async verifyMfa(
-    orgId: string,
-    userId: string,
+    preMfaToken: string,
     code: string,
+    clientIp = 'unknown',
   ): Promise<StaffLoginResult> {
+    const preMfa = this.tokenService.verifyPreMfaToken(preMfaToken);
+    if (!preMfa) {
+      throw domainError(ErrorCode.TOKEN_INVALID, 'Invalid or expired pre-MFA session.', 401);
+    }
+    const { org: orgId, sub: userId } = preMfa;
+
+    const failKey = `staff:mfa:fail:${orgId}:${userId}`;
+    const ipFailKey = `staff:mfa:ip:${this.hashKeyPart(clientIp)}`;
+    await this.enforceSlidingFailureCap(ipFailKey, LOGIN_IP_LIMIT);
+    await this.enforceSlidingFailureCap(failKey, MFA_MAX_FAILS);
+
     const user = await this._getStaffUser(orgId, userId);
     if (!user.totp_secret_enc) {
-      const err: DomainError = { code: ErrorCode.MFA_INVALID, message: 'MFA not enrolled.', status: 400 };
-      throw err;
+      throw domainError(ErrorCode.MFA_INVALID, 'MFA not enrolled.', 400);
     }
 
-    // Decrypt TOTP secret (encryption handled separately — stored AES-256-GCM)
-    // For Phase 1, the secret is stored base32 encoded (encryption added in Phase 11)
-    const validTotp = verifySync({
-      secret: user.totp_secret_enc,
-      token: code,
-      crypto: new NobleCryptoPlugin(),
-      base32: new ScureBase32Plugin(),
-    });
-
-    if (!validTotp) {
-      // Try recovery codes
-      const codes: string[] = (user.recovery_codes as string[]) ?? [];
-      const codeHash = hashRecoveryCode(code);
-      const matchIdx = codes.findIndex((h) => timingSafeEqual(h, codeHash));
-
-      if (matchIdx === -1) {
-        const err: DomainError = { code: ErrorCode.MFA_INVALID, message: 'Invalid MFA code.', status: 401 };
-        throw err;
-      }
-
-      // Burn the recovery code — remove it from the list
-      codes.splice(matchIdx, 1);
-      await withTenantContext(orgId, async () => {
-        const client = await this.pool.connect();
-        try {
-          await client.query(`SELECT set_config('app.org_id', $1, true)`, [orgId]);
-          await client.query(
-            `UPDATE staff_users SET recovery_codes = $1::jsonb, updated_at = now() WHERE id = $2 AND org_id = $3`,
-            [JSON.stringify(codes), userId, orgId],
-          );
-        } finally {
-          client.release();
-        }
+    const secret = this.decryptTotpSecret(user.totp_secret_enc);
+    let validTotp = false;
+    try {
+      const totpRes = verifySync({
+        secret,
+        token: code,
+        crypto: new NobleCryptoPlugin(),
+        base32: new ScureBase32Plugin(),
       });
+      validTotp = (totpRes as { valid?: boolean } | boolean) === true ||
+        (typeof totpRes === 'object' && totpRes !== null && totpRes.valid === true);
+    } catch {
+      validTotp = false;
     }
+
+    if (validTotp) {
+      if (this.redis) {
+        const replayKey = `staff:mfa:used:${orgId}:${userId}:${this.hashKeyPart(code)}`;
+        const setRes = await this.redis.set(replayKey, '1', 'EX', TOTP_REPLAY_TTL_SEC, 'NX');
+        if (setRes !== 'OK') {
+          await this.incrementFailureCounter(failKey, MFA_WINDOW_SEC);
+          throw domainError(ErrorCode.MFA_INVALID, 'TOTP code has already been used.', 401);
+        }
+      }
+    } else {
+      // Check one-time hashed recovery codes inside committed tenant TX
+      const recoveryMatched = await withTenantContextRaw(orgId, async (client) => {
+        const r = await client.query<{ recovery_codes: unknown }>(
+          `SELECT recovery_codes FROM staff_users WHERE id = $1 AND org_id = $2 FOR UPDATE`,
+          [userId, orgId],
+        );
+        const codes: string[] = (r.rows[0]?.recovery_codes as string[]) ?? [];
+        const codeHash = hashRecoveryCode(code);
+        const matchIdx = codes.findIndex((h) => timingSafeEqual(h, codeHash));
+        if (matchIdx === -1) return false;
+
+        codes.splice(matchIdx, 1);
+        await client.query(
+          `UPDATE staff_users SET recovery_codes = $1::jsonb, updated_at = now() WHERE id = $2 AND org_id = $3`,
+          [JSON.stringify(codes), userId, orgId],
+        );
+        return true;
+      });
+
+      if (!recoveryMatched) {
+        await this.incrementFailureCounter(ipFailKey, LOGIN_WINDOW_SEC);
+        await this.incrementFailureCounter(failKey, MFA_WINDOW_SEC);
+        throw domainError(ErrorCode.MFA_INVALID, 'Invalid MFA code.', 401);
+      }
+    }
+
+    await this.clearFailureCounter(failKey);
 
     const membership = await this._getMembership(orgId, userId);
+    if (!membership) {
+      throw domainError(ErrorCode.FORBIDDEN, 'No active staff membership found for this organization.', 403);
+    }
+
     const { accessToken, refreshToken } = await this._issueTokenPair(orgId, userId, membership.role, membership.outlet_id);
     return { accessToken, refreshToken, requiresMfa: false, userId };
   }
 
   /**
-   * Rotating refresh token with reuse detection (token family revocation).
-   * If a revoked token is replayed → revoke entire family.
-   * Reference: ARCH §12
+   * Atomic rotating refresh token with reuse detection (token family revocation).
+   * Commits family revocation even on error paths before throwing TOKEN_REUSE_DETECTED.
    */
   async refreshTokens(orgId: string, rawToken: string): Promise<StaffTokenRefreshResult> {
+    if (!orgId) {
+      throw domainError(ErrorCode.UNAUTHORIZED, 'Tenant context required.', 401);
+    }
     const tokenHash = hashRefreshToken(rawToken);
+    const rawRefresh = generateRefreshToken();
+    const newHash = hashRefreshToken(rawRefresh);
+    const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
-    const stored = await this._findRefreshToken(orgId, tokenHash);
-    if (!stored) {
-      const err: DomainError = { code: ErrorCode.TOKEN_INVALID, message: 'Invalid refresh token.', status: 401 };
-      throw err;
-    }
-
-    if (stored.is_revoked || new Date(stored.expires_at) < new Date()) {
-      if (stored.is_revoked) {
-        // Reuse detected — revoke entire family
-        await this._revokeFamilyTokens(orgId, stored.family_id);
+    const outcome = await withTenantContextRaw(orgId, async (client) => {
+      const r = await client.query<{
+        id: string;
+        user_id: string;
+        family_id: string;
+        is_revoked: boolean;
+        expires_at: string;
+      }>(
+        `SELECT id, user_id, family_id, is_revoked, expires_at
+         FROM staff_refresh_tokens WHERE token_hash = $1 AND org_id = $2
+         FOR UPDATE`,
+        [tokenHash, orgId],
+      );
+      const stored = r.rows[0];
+      if (!stored) {
+        return { status: 'INVALID' as const };
       }
-      const err: DomainError = { code: ErrorCode.TOKEN_REUSE_DETECTED, message: 'Token reuse detected. All sessions revoked.', status: 401 };
-      throw err;
-    }
 
-    // Revoke the used token and issue a new pair
-    await this._revokeToken(orgId, stored.id);
-    const membership = await this._getMembership(orgId, stored.user_id);
-    return this._issueTokenPair(orgId, stored.user_id, membership.role, membership.outlet_id, stored.family_id);
+      if (stored.is_revoked) {
+        await client.query(
+          `UPDATE staff_refresh_tokens SET is_revoked = true WHERE family_id = $1 AND org_id = $2`,
+          [stored.family_id, orgId],
+        );
+        return { status: 'REUSED' as const };
+      }
+
+      if (new Date(stored.expires_at) < new Date()) {
+        return { status: 'EXPIRED' as const };
+      }
+
+      const claimed = await client.query<{ id: string }>(
+        `UPDATE staff_refresh_tokens
+         SET is_revoked = true
+         WHERE id = $1 AND org_id = $2 AND is_revoked = false
+         RETURNING id`,
+        [stored.id, orgId],
+      );
+      if (claimed.rowCount === 0) {
+        await client.query(
+          `UPDATE staff_refresh_tokens SET is_revoked = true WHERE family_id = $1 AND org_id = $2`,
+          [stored.family_id, orgId],
+        );
+        return { status: 'REUSED' as const };
+      }
+
+      const mRes = await client.query<{ role: string; outlet_id: string | null }>(
+        `SELECT role, outlet_id FROM staff_memberships
+         WHERE org_id = $1 AND user_id = $2 AND is_active = true
+         ORDER BY (outlet_id IS NULL) DESC LIMIT 1`,
+        [orgId, stored.user_id],
+      );
+      const membership = mRes.rows[0];
+      if (!membership) {
+        return { status: 'NO_MEMBERSHIP' as const };
+      }
+
+      await client.query(
+        `INSERT INTO staff_refresh_tokens (org_id, user_id, token_hash, family_id, expires_at)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [orgId, stored.user_id, newHash, stored.family_id, expiresAt],
+      );
+      await client.query(
+        `UPDATE staff_users SET last_login_at = now(), updated_at = now() WHERE id = $1 AND org_id = $2`,
+        [stored.user_id, orgId],
+      );
+
+      const payload: StaffJwtPayload = {
+        sub: stored.user_id,
+        org: orgId,
+        role: membership.role,
+        ...(membership.outlet_id ? { outletId: membership.outlet_id } : {}),
+        type: 'staff_access',
+      };
+      const accessToken = this.tokenService.signAccessToken(payload);
+      return { status: 'OK' as const, accessToken, refreshToken: rawRefresh };
+    });
+
+    if (outcome.status === 'INVALID') {
+      throw domainError(ErrorCode.TOKEN_INVALID, 'Invalid refresh token.', 401);
+    }
+    if (outcome.status === 'REUSED' || outcome.status === 'EXPIRED') {
+      throw domainError(
+        ErrorCode.TOKEN_REUSE_DETECTED,
+        'Token reuse detected or expired. All sessions revoked.',
+        401,
+      );
+    }
+    if (outcome.status === 'NO_MEMBERSHIP') {
+      throw domainError(ErrorCode.FORBIDDEN, 'No active staff membership found.', 403);
+    }
+    return { accessToken: outcome.accessToken, refreshToken: outcome.refreshToken };
   }
 
   /**
    * Revoke a single session by refreshToken.
    */
   async revokeSession(orgId: string, rawToken: string): Promise<void> {
-    const tokenHash = hashRefreshToken(rawToken);
-    const stored = await this._findRefreshToken(orgId, tokenHash);
-    if (stored) {
-      await this._revokeToken(orgId, stored.id);
+    if (!orgId) {
+      throw domainError(ErrorCode.UNAUTHORIZED, 'Tenant context required.', 401);
     }
+    const tokenHash = hashRefreshToken(rawToken);
+    await withTenantContextRaw(orgId, async (client) => {
+      await client.query(
+        `UPDATE staff_refresh_tokens SET is_revoked = true WHERE token_hash = $1 AND org_id = $2`,
+        [tokenHash, orgId],
+      );
+    });
   }
 
   /**
    * Revoke all sessions for a user (logout everywhere).
    */
   async revokeAllSessions(orgId: string, userId: string): Promise<void> {
-    const client = await this.pool.connect();
-    try {
-      await client.query(`SELECT set_config('app.org_id', $1, true)`, [orgId]);
+    if (!orgId) {
+      throw domainError(ErrorCode.UNAUTHORIZED, 'Tenant context required.', 401);
+    }
+    await withTenantContextRaw(orgId, async (client) => {
       await client.query(
         `UPDATE staff_refresh_tokens SET is_revoked = true WHERE org_id = $1 AND user_id = $2 AND is_revoked = false`,
         [orgId, userId],
       );
-    } finally {
-      client.release();
-    }
+    });
   }
 
   // ─── Private helpers ───────────────────────────────────────────────────────
@@ -233,7 +425,6 @@ export class StaffAuthService {
     outletId: string | null,
     familyId?: string,
   ): Promise<{ accessToken: string; refreshToken: string }> {
-    const config = getConfig();
     const payload: StaffJwtPayload = {
       sub: userId,
       org: orgId,
@@ -245,11 +436,9 @@ export class StaffAuthService {
     const rawRefresh = generateRefreshToken();
     const tokenHash = hashRefreshToken(rawRefresh);
     const newFamilyId = familyId ?? crypto.randomUUID();
-    const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
+    const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
-    const client = await this.pool.connect();
-    try {
-      await client.query(`SELECT set_config('app.org_id', $1, true)`, [orgId]);
+    await withTenantContextRaw(orgId, async (client) => {
       await client.query(
         `INSERT INTO staff_refresh_tokens (org_id, user_id, token_hash, family_id, expires_at)
          VALUES ($1, $2, $3, $4, $5)`,
@@ -259,93 +448,41 @@ export class StaffAuthService {
         `UPDATE staff_users SET last_login_at = now(), updated_at = now() WHERE id = $1 AND org_id = $2`,
         [userId, orgId],
       );
-    } finally {
-      client.release();
-    }
+    });
     return { accessToken, refreshToken: rawRefresh };
   }
 
-  private async _getMembership(orgId: string, userId: string): Promise<{ role: string; outlet_id: string | null }> {
-    const client = await this.pool.connect();
-    try {
-      await client.query(`SELECT set_config('app.org_id', $1, true)`, [orgId]);
+  private async _getMembership(
+    orgId: string,
+    userId: string,
+  ): Promise<{ role: string; outlet_id: string | null } | null> {
+    return withTenantContextRaw(orgId, async (client) => {
       const r = await client.query<{ role: string; outlet_id: string | null }>(
         `SELECT role, outlet_id FROM staff_memberships
          WHERE org_id = $1 AND user_id = $2 AND is_active = true
          ORDER BY (outlet_id IS NULL) DESC LIMIT 1`,
         [orgId, userId],
       );
-      return r.rows[0] ?? { role: 'WAITER', outlet_id: null };
-    } finally {
-      client.release();
-    }
+      return r.rows[0] ?? null;
+    });
   }
 
-  private async _getStaffUser(orgId: string, userId: string): Promise<{
+  private async _getStaffUser(
+    orgId: string,
+    userId: string,
+  ): Promise<{
     totp_secret_enc: string | null;
     recovery_codes: unknown;
   }> {
-    const client = await this.pool.connect();
-    try {
-      await client.query(`SELECT set_config('app.org_id', $1, true)`, [orgId]);
+    return withTenantContextRaw(orgId, async (client) => {
       const r = await client.query<{ totp_secret_enc: string | null; recovery_codes: unknown }>(
         `SELECT totp_secret_enc, recovery_codes FROM staff_users WHERE id = $1 AND org_id = $2`,
         [userId, orgId],
       );
       if (!r.rows[0]) {
-        const err: DomainError = { code: ErrorCode.NOT_FOUND, message: 'User not found.', status: 404 };
-        throw err;
+        throw domainError(ErrorCode.NOT_FOUND, 'User not found.', 404);
       }
       return r.rows[0];
-    } finally {
-      client.release();
-    }
-  }
-
-  private async _findRefreshToken(orgId: string, tokenHash: string) {
-    const client = await this.pool.connect();
-    try {
-      await client.query(`SELECT set_config('app.org_id', $1, true)`, [orgId]);
-      const r = await client.query<{
-        id: string;
-        user_id: string;
-        family_id: string;
-        is_revoked: boolean;
-        expires_at: string;
-      }>(
-        `SELECT id, user_id, family_id, is_revoked, expires_at
-         FROM staff_refresh_tokens WHERE token_hash = $1 AND org_id = $2`,
-        [tokenHash, orgId],
-      );
-      return r.rows[0] ?? null;
-    } finally {
-      client.release();
-    }
-  }
-
-  private async _revokeToken(orgId: string, tokenId: string): Promise<void> {
-    const client = await this.pool.connect();
-    try {
-      await client.query(`SELECT set_config('app.org_id', $1, true)`, [orgId]);
-      await client.query(
-        `UPDATE staff_refresh_tokens SET is_revoked = true WHERE id = $1 AND org_id = $2`,
-        [tokenId, orgId],
-      );
-    } finally {
-      client.release();
-    }
-  }
-
-  private async _revokeFamilyTokens(orgId: string, familyId: string): Promise<void> {
-    const client = await this.pool.connect();
-    try {
-      await client.query(`SELECT set_config('app.org_id', $1, true)`, [orgId]);
-      await client.query(
-        `UPDATE staff_refresh_tokens SET is_revoked = true WHERE family_id = $1 AND org_id = $2`,
-        [familyId, orgId],
-      );
-    } finally {
-      client.release();
-    }
+    });
   }
 }
