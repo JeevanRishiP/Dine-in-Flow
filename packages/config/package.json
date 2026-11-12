@@ -6,6 +6,6 @@
     "./tsconfig": "./tsconfig.base.json",
     "./tsconfig-nestjs": "./tsconfig.nestjs.json",
     "./tsconfig-next": "./tsconfig.next.json",
-    "./eslint": "./eslint.config.mjs"
+    "./lint-script": "./scripts/lint-workspace.mjs"
   }
 }

@@ -14,7 +14,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "lint": "echo 'contracts lint passed'"
+    "lint": "node ../../packages/config/scripts/lint-workspace.mjs --package ."
   },
   "devDependencies": {
     "typescript": "^5.8.3"

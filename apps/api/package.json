@@ -7,7 +7,7 @@
     "dev": "nest start --watch",
     "start": "node dist/main.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "lint": "echo 'api lint passed'",
+    "lint": "node ../../packages/config/scripts/lint-workspace.mjs --package .",
     "test": "vitest run --reporter=verbose --passWithNoTests",
     "test:watch": "vitest watch",
     "test:int": "vitest run --config vitest.int.config.ts --reporter=verbose",
