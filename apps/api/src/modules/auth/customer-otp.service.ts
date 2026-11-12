@@ -1,6 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { parsePhoneNumber, isValidPhoneNumber } from 'libphonenumber-js';
-import { Pool } from 'pg';
 import crypto from 'node:crypto';
 import { getPool, withTenantContextRaw } from '../../db/client.js';
 import { getConfig } from '../../config/config.js';
@@ -43,15 +42,11 @@ export interface OtpVerifyResult {
  */
 @Injectable()
 export class CustomerOtpService {
-  private readonly pool: Pool;
-
   constructor(
     private readonly tokenService: TokenService,
     @Inject(MESSAGING_PROVIDER) private readonly messaging: MessagingProvider,
     @Inject(REDIS_CLIENT) private readonly redis: Redis,
-  ) {
-    this.pool = getPool();
-  }
+  ) {}
 
   /**
    * Normalize phone to E.164. Throws VALIDATION_ERROR if invalid.
@@ -66,14 +61,17 @@ export class CustomerOtpService {
   /**
    * Request an OTP for a phone number.
    * Enforces per-phone + per-IP rate limits via Redis token bucket.
-   * Stores HMAC of code in Postgres.
+   * Stores HMAC of code in Postgres inside transactional RLS context.
    */
   async requestOtp(
     orgId: string,
     rawPhone: string,
     clientIp: string,
   ): Promise<OtpRequestResult> {
-    const targetOrgId = orgId || '7762b6af-d052-4e74-b917-39e3c56e7914';
+    if (!orgId) {
+      throw domainError(ErrorCode.UNAUTHORIZED, 'Tenant context required.', 401);
+    }
+    const targetOrgId = orgId;
     const phone = this.normalizePhone(rawPhone);
     const config = getConfig();
 
@@ -94,17 +92,13 @@ export class CustomerOtpService {
     const expiresAt = new Date(Date.now() + OTP_TTL_SEC * 1000);
     const ipHash = this._hashIp(clientIp);
 
-    const client = await this.pool.connect();
-    try {
-      await client.query(`SELECT set_config('app.org_id', $1, true)`, [targetOrgId]);
+    await withTenantContextRaw(targetOrgId, async (client) => {
       await client.query(
         `INSERT INTO customer_otp_codes (org_id, phone_e164, code_hash, expires_at, ip_hash)
          VALUES ($1, $2, $3, $4, $5)`,
         [targetOrgId, phone, codeHash, expiresAt, ipHash],
       );
-    } finally {
-      client.release();
-    }
+    });
 
     // Set resend cooldown
     await this.redis.set(cooldownKey, '1', 'EX', OTP_RESEND_COOLDOWN_SEC);
@@ -112,13 +106,14 @@ export class CustomerOtpService {
     // Send OTP (mock in dev, real provider in prod)
     await this.messaging.sendOtp(phone, code, targetOrgId);
 
-    return process.env['NODE_ENV'] !== 'production' ? { devCode: code } : {};
+    const env = process.env['NODE_ENV'];
+    return env === 'development' || env === 'test' ? { devCode: code } : {};
   }
 
   /**
    * Verify OTP code and issue tokens.
+   * - Row-locked atomic attempt increment committed even on invalid guess
    * - Constant-time comparison
-   * - Increments attempt counter; locks after max attempts
    * - Creates customer record on first verify (upsert)
    */
   async verifyOtp(
@@ -126,15 +121,15 @@ export class CustomerOtpService {
     rawPhone: string,
     code: string,
   ): Promise<OtpVerifyResult> {
-    const targetOrgId = orgId || '7762b6af-d052-4e74-b917-39e3c56e7914';
+    if (!orgId) {
+      throw domainError(ErrorCode.UNAUTHORIZED, 'Tenant context required.', 401);
+    }
+    const targetOrgId = orgId;
     const phone = this.normalizePhone(rawPhone);
     const config = getConfig();
 
-    const client = await this.pool.connect();
-    try {
-      await client.query(`SELECT set_config('app.org_id', $1, true)`, [targetOrgId]);
-
-      // Find the most recent unverified, non-expired OTP
+    const outcome = await withTenantContextRaw(targetOrgId, async (client) => {
+      // Lock the most recent unverified OTP row so parallel guesses serialize cleanly
       const r = await client.query<{
         id: string;
         code_hash: string;
@@ -146,44 +141,48 @@ export class CustomerOtpService {
          FROM customer_otp_codes
          WHERE org_id = $1 AND phone_e164 = $2
            AND verified_at IS NULL
-         ORDER BY sent_at DESC LIMIT 1`,
+         ORDER BY sent_at DESC LIMIT 1
+         FOR UPDATE`,
         [targetOrgId, phone],
       );
 
       const otp = r.rows[0];
-
       if (!otp) {
-        throw domainError(ErrorCode.OTP_INVALID, 'No pending OTP found. Request a new code.', 401);
+        return { status: 'MISSING' as const };
       }
       if (new Date(otp.expires_at) < new Date()) {
-        throw domainError(ErrorCode.OTP_EXPIRED, 'OTP has expired. Request a new code.', 401);
-      }
-      if (otp.attempts >= OTP_MAX_ATTEMPTS) {
-        throw domainError(ErrorCode.OTP_MAX_ATTEMPTS, 'Too many attempts. Request a new code.', 429);
+        return { status: 'EXPIRED' as const };
       }
 
-      // Increment attempts before comparison (prevents racing)
-      await client.query(
-        `UPDATE customer_otp_codes SET attempts = attempts + 1 WHERE id = $1`,
-        [otp.id],
+      const incRes = await client.query<{ attempts: number }>(
+        `UPDATE customer_otp_codes
+         SET attempts = attempts + 1
+         WHERE id = $1 AND org_id = $2 AND attempts < $3 AND verified_at IS NULL
+         RETURNING attempts`,
+        [otp.id, targetOrgId, OTP_MAX_ATTEMPTS],
       );
+      if (!incRes.rows[0]) {
+        return { status: 'MAX_ATTEMPTS' as const };
+      }
 
       const incomingHash = hmacOtp(code, config.OTP_HMAC_PEPPER);
       if (!timingSafeEqual(incomingHash, otp.code_hash)) {
-        const remaining = OTP_MAX_ATTEMPTS - (otp.attempts + 1);
-        throw domainError(
-          ErrorCode.OTP_INVALID,
-          `Invalid code. ${remaining} attempt(s) remaining.`,
-          401,
-          { attemptsRemaining: remaining },
-        );
+        const remaining = Math.max(0, OTP_MAX_ATTEMPTS - incRes.rows[0].attempts);
+        // Return instead of throwing inside TX so attempts + 1 commits to Postgres
+        return { status: 'INVALID' as const, remaining };
       }
 
-      // Mark as verified
-      await client.query(
-        `UPDATE customer_otp_codes SET verified_at = now() WHERE id = $1`,
-        [otp.id],
+      // Mark as verified atomically
+      const verifiedRes = await client.query<{ id: string }>(
+        `UPDATE customer_otp_codes
+         SET verified_at = now()
+         WHERE id = $1 AND org_id = $2 AND verified_at IS NULL
+         RETURNING id`,
+        [otp.id, targetOrgId],
       );
+      if (!verifiedRes.rows[0]) {
+        return { status: 'MISSING' as const };
+      }
 
       // Upsert customer
       const custResult = await client.query<{ id: string; is_new: boolean }>(
@@ -219,8 +218,8 @@ export class CustomerOtpService {
 
       // Fetch customer display_name
       const profileRes = await client.query<{ display_name: string | null }>(
-        `SELECT display_name FROM customers WHERE id = $1`,
-        [customerId]
+        `SELECT display_name FROM customers WHERE org_id = $1 AND id = $2`,
+        [targetOrgId, customerId],
       );
       const displayName = profileRes.rows[0]?.display_name || null;
 
@@ -228,22 +227,42 @@ export class CustomerOtpService {
       const loyaltyRes = await client.query<{ balance: string }>(
         `SELECT COALESCE(SUM(CASE WHEN entry_type = 'EARN' THEN amount_paise ELSE -amount_paise END), 0) as balance
          FROM loyalty_ledger WHERE org_id = $1 AND customer_id = $2`,
-        [targetOrgId, customerId]
+        [targetOrgId, customerId],
       );
       const loyaltyPoints = Number(loyaltyRes.rows[0]?.balance || 0);
 
       return {
-        accessToken,
-        refreshToken: rawRefresh,
-        customerId,
-        isNewCustomer,
-        phone,
-        displayName,
-        loyaltyPoints,
+        status: 'OK' as const,
+        result: {
+          accessToken,
+          refreshToken: rawRefresh,
+          customerId,
+          isNewCustomer,
+          phone,
+          displayName,
+          loyaltyPoints,
+        },
       };
-    } finally {
-      client.release();
+    });
+
+    if (outcome.status === 'MISSING') {
+      throw domainError(ErrorCode.OTP_INVALID, 'No pending OTP found. Request a new code.', 401);
     }
+    if (outcome.status === 'EXPIRED') {
+      throw domainError(ErrorCode.OTP_EXPIRED, 'OTP has expired. Request a new code.', 401);
+    }
+    if (outcome.status === 'MAX_ATTEMPTS') {
+      throw domainError(ErrorCode.OTP_MAX_ATTEMPTS, 'Too many attempts. Request a new code.', 429);
+    }
+    if (outcome.status === 'INVALID') {
+      throw domainError(
+        ErrorCode.OTP_INVALID,
+        `Invalid code. ${outcome.remaining} attempt(s) remaining.`,
+        401,
+        { attemptsRemaining: outcome.remaining },
+      );
+    }
+    return outcome.result;
   }
 
   async getProfile(orgId: string, customerId: string) {
@@ -440,13 +459,18 @@ export class CustomerOtpService {
   }
 
   /**
-   * Rotate customer refresh token with reuse detection.
+   * Rotate customer refresh token with atomic claim + reuse detection.
    */
   async refreshTokens(orgId: string, rawToken: string): Promise<{ accessToken: string; refreshToken: string }> {
+    if (!orgId) {
+      throw domainError(ErrorCode.UNAUTHORIZED, 'Tenant context required.', 401);
+    }
     const tokenHash = hashRefreshToken(rawToken);
-    const client = await this.pool.connect();
-    try {
-      await client.query(`SELECT set_config('app.org_id', $1, true)`, [orgId]);
+    const rawRefresh = generateRefreshToken();
+    const newHash = hashRefreshToken(rawRefresh);
+    const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+
+    const outcome = await withTenantContextRaw(orgId, async (client) => {
       const r = await client.query<{
         id: string;
         customer_id: string;
@@ -455,38 +479,46 @@ export class CustomerOtpService {
         expires_at: string;
       }>(
         `SELECT id, customer_id, family_id, is_revoked, expires_at
-         FROM customer_refresh_tokens WHERE token_hash = $1 AND org_id = $2`,
+         FROM customer_refresh_tokens WHERE token_hash = $1 AND org_id = $2
+         FOR UPDATE`,
         [tokenHash, orgId],
       );
       const stored = r.rows[0];
       if (!stored) {
-        throw domainError(ErrorCode.TOKEN_INVALID, 'Invalid refresh token.', 401);
+        return { status: 'INVALID' as const };
       }
-      if (stored.is_revoked || new Date(stored.expires_at) < new Date()) {
-        if (stored.is_revoked) {
-          // Reuse — revoke entire family
-          await client.query(
-            `UPDATE customer_refresh_tokens SET is_revoked = true WHERE family_id = $1 AND org_id = $2`,
-            [stored.family_id, orgId],
-          );
-        }
-        throw domainError(ErrorCode.TOKEN_REUSE_DETECTED, 'Token reuse detected. All sessions revoked.', 401);
+      if (stored.is_revoked) {
+        await client.query(
+          `UPDATE customer_refresh_tokens SET is_revoked = true WHERE family_id = $1 AND org_id = $2`,
+          [stored.family_id, orgId],
+        );
+        return { status: 'REUSED' as const };
+      }
+      if (new Date(stored.expires_at) < new Date()) {
+        return { status: 'EXPIRED' as const };
       }
 
-      // Revoke old
-      await client.query(`UPDATE customer_refresh_tokens SET is_revoked = true WHERE id = $1`, [stored.id]);
+      const claimed = await client.query<{ id: string }>(
+        `UPDATE customer_refresh_tokens
+         SET is_revoked = true
+         WHERE id = $1 AND org_id = $2 AND is_revoked = false
+         RETURNING id`,
+        [stored.id, orgId],
+      );
+      if (claimed.rowCount === 0) {
+        await client.query(
+          `UPDATE customer_refresh_tokens SET is_revoked = true WHERE family_id = $1 AND org_id = $2`,
+          [stored.family_id, orgId],
+        );
+        return { status: 'REUSED' as const };
+      }
 
-      // Get customer phone for new token
       const custR = await client.query<{ phone_e164: string }>(
         `SELECT phone_e164 FROM customers WHERE id = $1 AND org_id = $2`,
         [stored.customer_id, orgId],
       );
       const phone = custR.rows[0]?.phone_e164 ?? '';
 
-      // Issue new pair
-      const rawRefresh = generateRefreshToken();
-      const newHash = hashRefreshToken(rawRefresh);
-      const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
       await client.query(
         `INSERT INTO customer_refresh_tokens (org_id, customer_id, token_hash, family_id, expires_at)
          VALUES ($1, $2, $3, $4, $5)`,
@@ -499,10 +531,20 @@ export class CustomerOtpService {
         phone,
         type: 'customer_access',
       };
-      return { accessToken: this.tokenService.signAccessToken(payload), refreshToken: rawRefresh };
-    } finally {
-      client.release();
+      return {
+        status: 'OK' as const,
+        accessToken: this.tokenService.signAccessToken(payload),
+        refreshToken: rawRefresh,
+      };
+    });
+
+    if (outcome.status === 'INVALID') {
+      throw domainError(ErrorCode.TOKEN_INVALID, 'Invalid refresh token.', 401);
     }
+    if (outcome.status === 'REUSED' || outcome.status === 'EXPIRED') {
+      throw domainError(ErrorCode.TOKEN_REUSE_DETECTED, 'Token reuse detected. All sessions revoked.', 401);
+    }
+    return { accessToken: outcome.accessToken, refreshToken: outcome.refreshToken };
   }
 
   // ─── Private helpers ───────────────────────────────────────────────────────
