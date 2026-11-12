@@ -56,7 +56,7 @@ export class GeminiAdapter implements AiProvider {
       throw new Error('GEMINI_API_KEY is not configured');
     }
 
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${this.embeddingModel}:embedContent?key=${this.apiKey}`;
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${this.embeddingModel}:embedContent`;
     const payload = {
       model: `models/${this.embeddingModel}`,
       content: {
@@ -67,7 +67,10 @@ export class GeminiAdapter implements AiProvider {
 
     const res = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': this.apiKey,
+      },
       body: JSON.stringify(payload),
       signal: AbortSignal.timeout(this.timeoutMs),
     });
@@ -113,7 +116,7 @@ ${query}
 </user_query>
 `;
 
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${this.model}:generateContent?key=${this.apiKey}`;
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${this.model}:generateContent`;
     const payload = {
       contents: [
         {
@@ -134,7 +137,10 @@ ${query}
     try {
       const res = await fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': this.apiKey,
+        },
         body: JSON.stringify(payload),
         signal: AbortSignal.timeout(this.timeoutMs),
       });

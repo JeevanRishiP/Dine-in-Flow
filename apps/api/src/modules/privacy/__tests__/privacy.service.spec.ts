@@ -63,28 +63,30 @@ describe('PrivacyService (Phase 11 — DPDP Compliance ARCH §23)', () => {
         ],
       });
 
-      // 3. Loyalty ledger
+      // 3. Loyalty ledger (real schema columns)
       mockClient.query.mockResolvedValueOnce({
         rowCount: 1,
         rows: [
           {
-            entry_type: 'ORDER_REWARD',
+            entry_type: 'EARN',
             amount_paise: '1500',
-            balance_after_paise: '1500',
-            description: 'Reward for Order #1',
+            reason: 'Reward for Order #1',
+            ref_type: 'ORDER',
+            ref_id: 'order-1',
+            expires_at: null,
             created_at: new Date('2026-01-15T11:00:00Z'),
           },
         ],
       });
 
-      // 4. Orders
+      // 4. Orders (real orders.status column)
       mockClient.query.mockResolvedValueOnce({
         rowCount: 1,
         rows: [
           {
             id: 'order-1',
             outlet_id: 'outlet-1',
-            state: 'COMPLETED',
+            status: 'BILLED',
             subtotal_paise: 30000,
             total_paise: 31500,
             created_at: new Date('2026-01-15T10:30:00Z'),

@@ -154,6 +154,8 @@ export class MenuRetrievalService {
 
   /**
    * Reindexes embeddings for an outlet's menu items using the provided AiProvider.
+   * Reads items in short TX 1, calls external embedding API outside DB TX,
+   * and writes updated vectors in short TX 2 to avoid pool starvation.
    * Reference: ARCH §21
    */
   async reindexOutlet(
@@ -161,7 +163,7 @@ export class MenuRetrievalService {
     outletId: string,
     provider: AiProvider,
   ): Promise<{ itemsIndexed: number }> {
-    return withTenantContextRaw(orgId, async (client: PoolClient) => {
+    const items = await withTenantContextRaw(orgId, async (client: PoolClient) => {
       const selectRes = await client.query(
         `SELECT id, name, description_i18n, veg_type, allergens, spice_level
          FROM menu_items
@@ -171,7 +173,7 @@ export class MenuRetrievalService {
         [orgId, outletId],
       );
 
-      const items = selectRes.rows as Array<{
+      return selectRes.rows as Array<{
         id: string;
         name: string;
         description_i18n: Record<string, string> | null;
@@ -179,30 +181,37 @@ export class MenuRetrievalService {
         allergens: string[] | null;
         spice_level: number;
       }>;
-
-      let count = 0;
-      for (const item of items) {
-        const desc = item.description_i18n?.['en'] || '';
-        const allergens = (item.allergens || []).join(', ');
-        const textToEmbed = `${item.name}. ${desc}. Veg Type: ${item.veg_type}. Allergens: ${allergens}. Spice Level: ${item.spice_level}/3.`;
-
-        try {
-          const embedding = await provider.generateEmbedding(textToEmbed);
-          const vectorLiteral = `[${embedding.join(',')}]`;
-
-          await client.query(
-            `UPDATE menu_items
-             SET embedding = $1::vector, updated_at = now()
-             WHERE id = $2 AND org_id = $3;`,
-            [vectorLiteral, item.id, orgId],
-          );
-          count++;
-        } catch (err) {
-          this.logger.error(`[AI] Failed to index embedding for item ${item.id}: ${err instanceof Error ? err.message : String(err)}`);
-        }
-      }
-
-      return { itemsIndexed: count };
     });
+
+    const updates: Array<{ id: string; vectorLiteral: string }> = [];
+    for (const item of items) {
+      const desc = item.description_i18n?.['en'] || '';
+      const allergens = (item.allergens || []).join(', ');
+      const textToEmbed = `${item.name}. ${desc}. Veg Type: ${item.veg_type}. Allergens: ${allergens}. Spice Level: ${item.spice_level}/3.`;
+
+      try {
+        const embedding = await provider.generateEmbedding(textToEmbed);
+        updates.push({ id: item.id, vectorLiteral: `[${embedding.join(',')}]` });
+      } catch (err) {
+        this.logger.error(`[AI] Failed to index embedding for item ${item.id}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
+    if (updates.length === 0) {
+      return { itemsIndexed: 0 };
+    }
+
+    await withTenantContextRaw(orgId, async (client: PoolClient) => {
+      for (const u of updates) {
+        await client.query(
+          `UPDATE menu_items
+           SET embedding = $1::vector, updated_at = now()
+           WHERE id = $2 AND org_id = $3;`,
+          [u.vectorLiteral, u.id, orgId],
+        );
+      }
+    });
+
+    return { itemsIndexed: updates.length };
   }
 }

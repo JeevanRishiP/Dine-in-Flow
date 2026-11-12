@@ -27,14 +27,16 @@ export interface CustomerExportData {
   loyaltyLedger: Array<{
     entryType: string;
     amountPaise: number;
-    balanceAfterPaise: number;
-    description: string;
+    reason: string;
+    refType: string;
+    refId: string;
+    expiresAt: string | null;
     createdAt: string;
   }>;
   ordersSummary: Array<{
     id: string;
     outletId: string;
-    state: string;
+    status: string;
     subtotalPaise: number;
     totalPaise: number;
     createdAt: string;
@@ -86,18 +88,18 @@ export class PrivacyService {
         [customerId, orgId],
       );
 
-      // 3. Fetch loyalty ledger history
+      // 3. Fetch loyalty ledger history (actual loyalty_ledger columns)
       const loyaltyRes = await client.query(
-        `SELECT entry_type, amount_paise, balance_after_paise, description, created_at
+        `SELECT entry_type, amount_paise, reason, ref_type, ref_id, expires_at, created_at
          FROM loyalty_ledger
          WHERE customer_id = $1 AND org_id = $2
          ORDER BY created_at DESC;`,
         [customerId, orgId],
       );
 
-      // 4. Fetch orders history
+      // 4. Fetch orders history (actual orders.status column)
       const ordersRes = await client.query(
-        `SELECT id, outlet_id, state, subtotal_paise, total_paise, created_at
+        `SELECT id, outlet_id, status, subtotal_paise, total_paise, created_at
          FROM orders
          WHERE customer_id = $1 AND org_id = $2
          ORDER BY created_at DESC;`,
@@ -148,14 +150,16 @@ export class PrivacyService {
         loyaltyLedger: loyaltyRes.rows.map((r: any) => ({
           entryType: r.entry_type,
           amountPaise: Number(r.amount_paise),
-          balanceAfterPaise: Number(r.balance_after_paise),
-          description: r.description,
+          reason: r.reason,
+          refType: r.ref_type,
+          refId: r.ref_id,
+          expiresAt: r.expires_at ? new Date(r.expires_at).toISOString() : null,
           createdAt: r.created_at.toISOString(),
         })),
         ordersSummary: ordersRes.rows.map((r: any) => ({
           id: r.id,
           outletId: r.outlet_id,
-          state: r.state,
+          status: r.status,
           subtotalPaise: Number(r.subtotal_paise),
           totalPaise: Number(r.total_paise),
           createdAt: r.created_at.toISOString(),
@@ -204,7 +208,7 @@ export class PrivacyService {
         `SELECT count(*)::int as active_count
          FROM orders
          WHERE customer_id = $1 AND org_id = $2
-           AND state IN ('PLACED', 'ACCEPTED', 'PREPARING', 'READY', 'DELIVERED');`,
+           AND status IN ('PENDING', 'CONFIRMED', 'PREPARING', 'READY');`,
         [customerId, orgId],
       );
 
@@ -298,10 +302,10 @@ export class PrivacyService {
         [orgId],
       );
 
-      // 3. Purge processed webhooks older than 30 days
+      // 3. Purge processed webhooks older than 30 days (webhook_inbox uses received_at)
       const webhooksRes = await client.query(
         `DELETE FROM webhook_inbox
-         WHERE created_at < now() - interval '30 days';`,
+         WHERE received_at < now() - interval '30 days';`,
       );
 
       this.logger.log(

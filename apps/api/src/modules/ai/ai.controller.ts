@@ -8,17 +8,19 @@ import {
 import { Permission } from '@dineflow/contracts';
 import {
   Require,
-  Public,
   CurrentUser,
   type StaffJwtPayload,
+  type CustomerJwtPayload,
+  type GuestSessionJwtPayload,
 } from '../../common/decorators/auth.decorators.js';
-import type { CustomerJwtPayload } from '../auth/token.service.js';
+import { resolveScopedOutletId } from '../../common/utils/outlet-scope.utils.js';
 import { AiService } from './ai.service.js';
-import { AiChatSchema, AiReindexSchema, type AiChatDto, type AiReindexDto } from './ai.dto.js';
+import { AiChatSchema, AiReindexSchema, type AiChatDto } from './ai.dto.js';
 
 /**
  * Public & Customer AI Menu Assistant Controller.
  * Enables diners to ask about menu items, allergies, and propose cart additions.
+ * Protected by GuestSession / Customer JWT so unauthenticated traffic cannot drain AI quota.
  * Reference: ARCH §21
  */
 @Controller()
@@ -26,26 +28,32 @@ export class CustomerAiController {
   constructor(private readonly aiService: AiService) {}
 
   /**
-   * Public chat endpoint for guest diners at tables.
+   * Table-session chat endpoint for guest diners at tables.
    */
   @Post('public/ai/chat')
-  @Public()
+  @Require(Permission.GUEST_SESSION)
   @HttpCode(HttpStatus.OK)
-  async chatPublic(@Body() body: Record<string, unknown>) {
+  async chatPublic(
+    @CurrentUser() user: GuestSessionJwtPayload | CustomerJwtPayload,
+    @Body() body: Record<string, unknown>,
+  ) {
     const raw = body || {};
     const normalized: Record<string, unknown> = {
       message: raw['message'],
-      orgId: raw['orgId'] || raw['org_id'],
-      outletId: raw['outletId'] || raw['outlet_id'],
+      orgId: user.org,
+      outletId: user.type === 'guest_session' ? user.outlet : (raw['outletId'] || raw['outlet_id']),
     };
-    if (raw['tableSessionId'] || raw['table_session_id']) {
+    if (user.type === 'guest_session') {
+      normalized['tableSessionId'] = user.sessionId;
+    } else if (raw['tableSessionId'] || raw['table_session_id']) {
       normalized['tableSessionId'] = raw['tableSessionId'] || raw['table_session_id'];
     }
     if (raw['sessionId'] || raw['session_id']) {
       normalized['sessionId'] = raw['sessionId'] || raw['session_id'];
     }
     const dto = AiChatSchema.parse(normalized);
-    return this.aiService.chat(dto, null);
+    const customerId = user.type === 'customer_access' ? user.sub : (user.customerId ?? null);
+    return this.aiService.chat(dto, customerId);
   }
 
   /**
@@ -59,7 +67,6 @@ export class CustomerAiController {
     @Body() body: unknown,
   ) {
     const parsed = AiChatSchema.parse(body);
-    // Ensure orgId matches the customer's authenticated org
     const dto: AiChatDto = { ...parsed, orgId: user.org };
     return this.aiService.chat(dto, user.sub);
   }
@@ -84,6 +91,7 @@ export class ConsoleAiController {
     @Body() body: unknown,
   ) {
     const dto = AiReindexSchema.parse(body);
-    return this.aiService.reindexOutletMenu(user.org, dto.outletId);
+    const scopedOutlet = resolveScopedOutletId(user.outletId, dto.outletId) ?? dto.outletId;
+    return this.aiService.reindexOutletMenu(user.org, scopedOutlet);
   }
 }

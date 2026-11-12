@@ -9,10 +9,12 @@ import { GeminiAdapter } from './gemini.adapter.js';
 import { MockAiAdapter } from './mock-ai.adapter.js';
 import { MenuRetrievalService } from './menu-retrieval.service.js';
 import { redactPii, applyGuardrails, MANDATORY_ALLERGEN_DISCLAIMER } from './ai-guardrails.js';
+import { getRedis } from '../../common/redis/redis.client.js';
 import type { AiChatDto } from './ai.dto.js';
 
 export const MAX_SESSION_MESSAGES = 20;
 export const MAX_SESSION_TOKENS = 8000;
+const ORG_AI_RPM_LIMIT = 120;
 
 interface AiSessionRow {
   id: string;
@@ -58,7 +60,8 @@ export class AiService {
 
   /**
    * Conversational menu assistant chat handler.
-   * Scoped to outlet with strict session rate limits and token budgets.
+   * Split into non-overlapping DB phases so no connection is held during external
+   * Gemini HTTP calls and `hybridSearch` never opens a nested connection.
    * Reference: ARCH §21
    */
   async chat(dto: AiChatDto, customerId?: string | null): Promise<AiChatResponse & { sessionId: string }> {
@@ -70,10 +73,28 @@ export class AiService {
       throw domainError(ErrorCode.AI_INPUT_TOO_LONG, 'Message cannot exceed 500 characters', 400);
     }
 
-    const cleanUserMessage = redactPii(rawMessage);
+    if (process.env['NODE_ENV'] !== 'test') {
+      try {
+        const redis = getRedis();
+        const rlKey = `ai:rl:org:${orgId}`;
+        const count = await redis.incr(rlKey);
+        if (count === 1) await redis.expire(rlKey, 60);
+        if (count > ORG_AI_RPM_LIMIT) {
+          throw domainError(ErrorCode.RATE_LIMITED, 'AI assistant rate limit reached. Please try again shortly.', 429);
+        }
+      } catch (err) {
+        if (typeof err === 'object' && err !== null && 'status' in err && (err as { status: number }).status === 429) {
+          throw err;
+        }
+      }
+    }
 
-    return withTenantContextRaw(orgId, async (client: PoolClient) => {
-      // 1. Session management & Budget check
+    const cleanUserMessage = redactPii(rawMessage);
+    const normalizedQ = cleanUserMessage.toLowerCase().replace(/[^\w\s]/g, '').trim();
+    const questionHash = crypto.createHash('sha256').update(normalizedQ).digest('hex');
+
+    // ── Phase A (Short DB TX 1): Session check, Q&A cache check, history fetch ─
+    const prePhase = await withTenantContextRaw(orgId, async (client: PoolClient) => {
       let sessionId = dto.sessionId;
       let session: AiSessionRow;
 
@@ -109,10 +130,6 @@ export class AiService {
         sessionId = session.id;
       }
 
-      // 2. Q&A Cache Lookup
-      const normalizedQ = cleanUserMessage.toLowerCase().replace(/[^\w\s]/g, '').trim();
-      const questionHash = crypto.createHash('sha256').update(normalizedQ).digest('hex');
-
       const cacheRes = await client.query(
         `SELECT answer, tool_proposals
          FROM ai_qa_cache
@@ -123,21 +140,18 @@ export class AiService {
       if (cacheRes.rowCount && cacheRes.rowCount > 0) {
         const cached = cacheRes.rows[0] as QaCacheRow;
 
-        // Record user query in transcript
         await client.query(
           `INSERT INTO ai_chat_transcripts (org_id, session_id, role, content_redacted)
            VALUES ($1, $2, 'user', $3);`,
           [orgId, sessionId, cleanUserMessage],
         );
 
-        // Record cached model response in transcript
         await client.query(
           `INSERT INTO ai_chat_transcripts (org_id, session_id, role, content_redacted, tool_calls)
            VALUES ($1, $2, 'model', $3, $4);`,
           [orgId, sessionId, cached.answer, cached.tool_proposals ? JSON.stringify(cached.tool_proposals) : null],
         );
 
-        // Increment message count
         await client.query(
           `UPDATE ai_sessions
            SET message_count = message_count + 1, updated_at = now()
@@ -146,31 +160,17 @@ export class AiService {
         );
 
         return {
-          sessionId,
-          answer: cached.answer,
-          proposedCartItems: cached.tool_proposals as any,
-          tokensUsed: 0,
-          callWaiterSuggested: false,
+          hit: true as const,
+          response: {
+            sessionId,
+            answer: cached.answer,
+            proposedCartItems: cached.tool_proposals as AiChatResponse['proposedCartItems'],
+            tokensUsed: 0,
+            callWaiterSuggested: false,
+          },
         };
       }
 
-      // 3. Hybrid search retrieval
-      let queryEmbedding: number[] | undefined;
-      try {
-        queryEmbedding = await this.provider.generateEmbedding(cleanUserMessage);
-      } catch (err) {
-        this.logger.warn(`[AI] Embedding generation failed: ${err instanceof Error ? err.message : String(err)}`);
-      }
-
-      const contextItems = await this.retrievalService.hybridSearch(
-        orgId,
-        outletId,
-        cleanUserMessage,
-        queryEmbedding,
-        8,
-      );
-
-      // 4. Fetch recent conversation history
       const historyRes = await client.query(
         `SELECT role, content_redacted
          FROM ai_chat_transcripts
@@ -186,31 +186,54 @@ export class AiService {
           role: r.role as 'user' | 'model',
           content: r.content_redacted,
         }));
-
       pastMessages.push({ role: 'user', content: cleanUserMessage });
 
-      // 5. Generate AI Response
-      let aiResult: AiChatResponse;
+      return { hit: false as const, sessionId, pastMessages };
+    });
+
+    if (prePhase.hit) {
+      return prePhase.response;
+    }
+
+    const { sessionId, pastMessages } = prePhase;
+
+    // ── Phase B & C (No DB lock held across external HTTP calls!) ──────────────
+    let queryEmbedding: number[] | undefined;
+    try {
+      queryEmbedding = await this.provider.generateEmbedding(cleanUserMessage);
+    } catch (err) {
+      this.logger.warn(`[AI] Embedding generation failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    const contextItems = await this.retrievalService.hybridSearch(
+      orgId,
+      outletId,
+      cleanUserMessage,
+      queryEmbedding,
+      8,
+    );
+
+    let aiResult: AiChatResponse;
+    try {
+      aiResult = await this.provider.chat(pastMessages, contextItems);
+    } catch (err) {
+      this.logger.warn(`[AI] Primary provider chat failed: ${err instanceof Error ? err.message : String(err)}, falling back to grounded mock provider`);
       try {
-        aiResult = await this.provider.chat(pastMessages, contextItems);
-      } catch (err) {
-        this.logger.warn(`[AI] Primary provider chat failed: ${err instanceof Error ? err.message : String(err)}, falling back to grounded mock provider`);
-        try {
-          const fallbackProvider = new MockAiAdapter();
-          aiResult = await fallbackProvider.chat(pastMessages, contextItems);
-        } catch {
-          aiResult = {
-            answer: `Our AI assistant is temporarily unavailable. Please call a waiter for assistance. ${MANDATORY_ALLERGEN_DISCLAIMER}`,
-            callWaiterSuggested: true,
-            tokensUsed: 0,
-          };
-        }
+        const fallbackProvider = new MockAiAdapter();
+        aiResult = await fallbackProvider.chat(pastMessages, contextItems);
+      } catch {
+        aiResult = {
+          answer: `Our AI assistant is temporarily unavailable. Please call a waiter for assistance. ${MANDATORY_ALLERGEN_DISCLAIMER}`,
+          callWaiterSuggested: true,
+          tokensUsed: 0,
+        };
       }
+    }
 
-      // Apply guardrails safety guarantees
-      const finalResult = applyGuardrails(cleanUserMessage, aiResult);
+    const finalResult = applyGuardrails(cleanUserMessage, aiResult);
 
-      // 6. Append to Transcripts (Append-only)
+    // ── Phase D (Short DB TX 3): Persist transcripts, usage & cache ───────────
+    await withTenantContextRaw(orgId, async (client: PoolClient) => {
       await client.query(
         `INSERT INTO ai_chat_transcripts (org_id, session_id, role, content_redacted)
          VALUES ($1, $2, 'user', $3);`,
@@ -228,7 +251,6 @@ export class AiService {
         ],
       );
 
-      // 7. Update Session message and token budget
       await client.query(
         `UPDATE ai_sessions
          SET message_count = message_count + 1,
@@ -238,10 +260,9 @@ export class AiService {
         [finalResult.tokensUsed, sessionId, orgId],
       );
 
-      // 8. Cache response if eligible (not off-topic, not empty)
       if (
         !finalResult.callWaiterSuggested &&
-        !finalResult.answer.includes("I cannot comply") &&
+        !finalResult.answer.includes('I cannot comply') &&
         normalizedQ.length > 3
       ) {
         await client.query(
@@ -261,28 +282,27 @@ export class AiService {
           ],
         );
       }
-
-      return {
-        sessionId,
-        ...finalResult,
-      };
     });
+
+    return {
+      sessionId,
+      ...finalResult,
+    };
   }
 
   /**
    * Reindexes menu embeddings for an outlet and purges stale Q&A cache.
-   * Requires AI_MANAGE permission.
+   * Requires AI_MANAGE permission. Runs cache delete before retrieval reindex (no nested TX).
    * Reference: ARCH §21
    */
   async reindexOutletMenu(orgId: string, outletId: string): Promise<{ itemsIndexed: number }> {
-    return withTenantContextRaw(orgId, async (client: PoolClient) => {
-      // Invalidate existing Q&A cache for this outlet
+    await withTenantContextRaw(orgId, async (client: PoolClient) => {
       await client.query(
         `DELETE FROM ai_qa_cache WHERE org_id = $1 AND outlet_id = $2;`,
         [orgId, outletId],
       );
-
-      return this.retrievalService.reindexOutlet(orgId, outletId, this.provider);
     });
+
+    return this.retrievalService.reindexOutlet(orgId, outletId, this.provider);
   }
 }

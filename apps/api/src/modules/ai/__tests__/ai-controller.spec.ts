@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { CustomerAiController, ConsoleAiController } from '../ai.controller.js';
 import type { AiService } from '../ai.service.js';
 import type { StaffJwtPayload } from '../../../common/decorators/auth.decorators.js';
-import type { CustomerJwtPayload } from '../../auth/token.service.js';
+import type { CustomerJwtPayload, GuestSessionJwtPayload } from '../../auth/token.service.js';
 
 describe('AI Controllers Dispatching & RBAC (Phase 10)', () => {
   let mockAiService: Partial<AiService>;
@@ -29,19 +29,26 @@ describe('AI Controllers Dispatching & RBAC (Phase 10)', () => {
   });
 
   describe('CustomerAiController', () => {
-    it('dispatches chatPublic for guest diner with null customerId', async () => {
+    it('dispatches chatPublic for guest table session with JWT org/outlet/sessionId', async () => {
+      const guestUser: GuestSessionJwtPayload = {
+        sub: '00000000-0000-0000-0000-000000000099',
+        org: orgId,
+        outlet: outletId,
+        table: '00000000-0000-0000-0000-000000000088',
+        sessionId: '00000000-0000-0000-0000-000000000099',
+        type: 'guest_session',
+      };
       const body = {
-        orgId,
-        outletId,
         message: 'What is your specialty?',
       };
 
-      const result = await customerController.chatPublic(body);
+      const result = await customerController.chatPublic(guestUser, body);
 
       expect(mockAiService.chat).toHaveBeenCalledWith(
         expect.objectContaining({
           orgId,
           outletId,
+          tableSessionId: guestUser.sessionId,
           message: 'What is your specialty?',
         }),
         null,
@@ -54,6 +61,7 @@ describe('AI Controllers Dispatching & RBAC (Phase 10)', () => {
         sub: customerId,
         org: orgId,
         phone: '+919876543210',
+        type: 'customer_access',
       };
 
       const body = {
