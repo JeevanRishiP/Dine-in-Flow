@@ -13,6 +13,7 @@ import {
   type GuestSessionJwtPayload,
 } from '../../common/decorators/auth.decorators.js';
 import { toCustomerAccessScope } from '../../common/utils/ownership.utils.js';
+import { resolveScopedOutletId } from '../../common/utils/outlet-scope.utils.js';
 import { Permission } from '@dineflow/contracts';
 
 
@@ -34,7 +35,8 @@ export class ConsoleOrdersController {
     @CurrentUser() user: StaffJwtPayload,
     @Query() query: OrderQueryDto,
   ) {
-    return this.ordersService.listOrders(user.org, query);
+    const scopedOutlet = resolveScopedOutletId(user.outletId, query.outlet_id);
+    return this.ordersService.listOrders(user.org, { ...query, outlet_id: scopedOutlet });
   }
 
   /** Compute a server-side price quote (no side-effects). Returns price_fingerprint for PRICE_CHANGED detection. */
@@ -48,7 +50,7 @@ export class ConsoleOrdersController {
   @Get(':id')
   @Require(Permission.ORDER_READ)
   getOrder(@CurrentUser() user: StaffJwtPayload, @Param('id') id: string) {
-    return this.ordersService.getOrder(user.org, id);
+    return this.ordersService.getOrder(user.org, id, undefined, user.outletId);
   }
 
   /** Staff (waiter) places an order on behalf of the table. */
@@ -56,7 +58,7 @@ export class ConsoleOrdersController {
   @Require(Permission.ORDER_READ)
   @HttpCode(HttpStatus.CREATED)
   placeOrder(@CurrentUser() user: StaffJwtPayload, @Body() dto: PlaceOrderDto) {
-    return this.ordersService.placeOrder(user.org, dto, user.sub, 'STAFF');
+    return this.ordersService.placeOrder(user.org, dto, user.sub, 'STAFF', undefined, user.outletId);
   }
 
   /** Update order status (CONFIRM → PREPARING → READY → etc.). */
@@ -67,7 +69,7 @@ export class ConsoleOrdersController {
     @Param('id') id: string,
     @Body() dto: UpdateOrderStatusDto,
   ) {
-    return this.ordersService.updateOrderStatus(user.org, id, dto, user.sub, 'STAFF');
+    return this.ordersService.updateOrderStatus(user.org, id, dto, user.sub, 'STAFF', user.outletId);
   }
 
   /** KDS: Update an individual item's status (PREPARING / READY / SERVED). */
@@ -79,7 +81,7 @@ export class ConsoleOrdersController {
     @Param('itemId') itemId: string,
     @Body() dto: UpdateItemStatusDto,
   ) {
-    return this.ordersService.updateItemStatus(user.org, orderId, itemId, dto, user.sub);
+    return this.ordersService.updateItemStatus(user.org, orderId, itemId, dto, user.sub, user.outletId);
   }
 }
 

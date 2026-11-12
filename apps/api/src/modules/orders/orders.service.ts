@@ -6,6 +6,7 @@ import {
   assertCustomerAccessScope,
   type CustomerAccessScope,
 } from '../../common/utils/ownership.utils.js';
+import { assertStaffOutletAccess } from '../../common/utils/outlet-scope.utils.js';
 import { ErrorCode } from '@dineflow/contracts';
 import {
   canTransitionOrder,
@@ -19,6 +20,7 @@ import {
   computeQuote,
   DEFAULT_GST_CONFIG,
   NOOP_DISCOUNT,
+  PricingValidationError,
   type PriceLineInput,
 } from './pricing.engine.js';
 import type {
@@ -65,14 +67,17 @@ export class OrdersService {
   // ─── Quote ───────────────────────────────────────────────────────────────────
 
   async quoteOrder(orgId: string, dto: QuoteOrderInput) {
+    if (!orgId) {
+      throw domainError(ErrorCode.UNAUTHORIZED, 'Tenant context required.', 401);
+    }
     return withTenantContextRaw(orgId, async (db) => {
-      const pricingInput = await this.buildPricingInput(orgId, dto.items, db);
-      const quote = computeQuote({
-        lines: pricingInput,
-        taxConfig: DEFAULT_GST_CONFIG,  // TODO Phase 5: load per-outlet tax_config
-        discountHook: NOOP_DISCOUNT,    // TODO Phase 7: loyalty/coupon hooks
-        tipPaise: dto.tip_paise ?? 0,
-      });
+      const { rows: sRows } = await db.query<{ id: string; outlet_id: string }>(
+        `SELECT id, outlet_id FROM table_sessions WHERE id = $1 AND org_id = $2`,
+        [dto.session_id, orgId],
+      );
+      if (!sRows[0]) throw domainError(ErrorCode.NOT_FOUND, 'Session not found.', 404);
+      const pricingInput = await this.buildPricingInput(orgId, sRows[0].outlet_id, dto.items, db);
+      const quote = this.computeQuoteOrThrow(pricingInput, dto.tip_paise ?? 0);
       return { ...quote, session_id: dto.session_id };
     });
   }
@@ -109,24 +114,25 @@ export class OrdersService {
         params,
       );
 
-      for (const ord of rows) {
-        const { rows: itemRows } = await db.query(
-          `SELECT ${ORDER_ITEM_SELECT_FIELDS}
-           FROM order_items WHERE order_id = $1 AND org_id = $2 ORDER BY created_at`,
-          [ord.id, targetOrgId],
-        );
-        (ord as any).items = itemRows;
-      }
+      await this.attachItemsToOrders(targetOrgId, rows, db);
 
       return rows;
     });
   }
 
-  async getOrder(orgId: string, orderId: string, scope?: CustomerAccessScope) {
+  async getOrder(
+    orgId: string,
+    orderId: string,
+    scope?: CustomerAccessScope,
+    staffOutletId?: string,
+  ) {
     const targetOrgId = await this.resolveOrderOrgId(orgId, orderId);
 
     return withTenantContextRaw(targetOrgId, async (db) => {
       const order = await this.getOrderInTx(targetOrgId, orderId, db);
+      if (staffOutletId) {
+        assertStaffOutletAccess(staffOutletId, order.outlet_id as string | undefined);
+      }
       if (scope) {
         let sessionCustomerId: string | null = null;
         if (order.session_id) {
@@ -179,14 +185,7 @@ export class OrdersService {
          ORDER BY o.created_at DESC`,
         [sessionId, orgId],
       );
-      for (const ord of orders) {
-        const { rows: itemRows } = await db.query(
-          `SELECT ${ORDER_ITEM_SELECT_FIELDS}
-           FROM order_items WHERE order_id = $1 AND org_id = $2 ORDER BY created_at`,
-          [ord.id, orgId],
-        );
-        ord.items = itemRows;
-      }
+      await this.attachItemsToOrders(orgId, orders, db);
       return orders;
     });
   }
@@ -199,6 +198,7 @@ export class OrdersService {
     actorId: string,
     actorType: 'STAFF' | 'CUSTOMER',
     scope?: CustomerAccessScope,
+    staffOutletId?: string,
   ) {
     if (!orgId) {
       throw domainError(ErrorCode.UNAUTHORIZED, 'Tenant context required.', 401);
@@ -227,6 +227,9 @@ export class OrdersService {
       );
       const session = sessionRows[0];
       if (!session) throw domainError(ErrorCode.NOT_FOUND, 'Session not found.', 404);
+      if (staffOutletId) {
+        assertStaffOutletAccess(staffOutletId, session.outlet_id);
+      }
       if (actorType === 'CUSTOMER' && scope) {
         assertCustomerAccessScope(scope, {
           session_id: session.id,
@@ -238,13 +241,8 @@ export class OrdersService {
       }
 
       // ── 3. Server-side pricing (AGENTS §2 rule 2) ─────────────────────────────
-      const pricingInput = await this.buildPricingInput(targetOrgId, dto.items, db);
-      const quote = computeQuote({
-        lines: pricingInput,
-        taxConfig: DEFAULT_GST_CONFIG,
-        discountHook: NOOP_DISCOUNT,
-        tipPaise: dto.tip_paise ?? 0,
-      });
+      const pricingInput = await this.buildPricingInput(targetOrgId, session.outlet_id, dto.items, db);
+      const quote = this.computeQuoteOrThrow(pricingInput, dto.tip_paise ?? 0);
 
       // ── 4. PRICE_CHANGED detection ────────────────────────────────────────────
       if (dto.price_fingerprint && dto.price_fingerprint !== quote.price_fingerprint) {
@@ -273,7 +271,8 @@ export class OrdersService {
       );
       const orderId = orderRows[0]!.id;
 
-      for (const line of quote.lines) {
+      for (let idx = 0; idx < quote.lines.length; idx++) {
+        const line = quote.lines[idx]!;
         await db.query(
           `INSERT INTO order_items (org_id, order_id, menu_item_id, name_snapshot,
                                     unit_price_paise, quantity, line_total_paise, modifiers, notes)
@@ -282,8 +281,7 @@ export class OrdersService {
             targetOrgId, orderId, line.menu_item_id, line.name_snapshot,
             line.unit_price_paise, line.quantity, line.line_total_paise,
             JSON.stringify(line.modifiers),
-            // find notes from the original dto for this line
-            dto.items.find((i) => i.menu_item_id === line.menu_item_id)?.notes ?? null,
+            dto.items[idx]?.notes ?? null,
           ],
         );
       }
@@ -304,7 +302,11 @@ export class OrdersService {
       await db.query(
         `INSERT INTO outbox_events (org_id, aggregate, aggregate_id, event_type, payload)
          VALUES ($1, 'order', $2, 'ORDER_PLACED', $3)`,
-        [targetOrgId, orderId, JSON.stringify({ session_id: session.id, total_paise: quote.total_paise })],
+        [
+          targetOrgId,
+          orderId,
+          JSON.stringify({ session_id: session.id, outlet_id: session.outlet_id, total_paise: quote.total_paise }),
+        ],
       );
 
       return this.getOrderInTx(targetOrgId, orderId, db);
@@ -319,16 +321,20 @@ export class OrdersService {
     dto: UpdateOrderStatusInput,
     actorId: string,
     actorType: 'STAFF' | 'CUSTOMER',
+    staffOutletId?: string,
   ) {
     const targetOrgId = await this.resolveOrderOrgId(orgId, orderId);
 
     return withTenantContextRaw(targetOrgId, async (db) => {
-      const { rows } = await db.query<{ status: OrderStatus }>(
-        `SELECT status FROM orders WHERE id = $1 AND org_id = $2`,
+      const { rows } = await db.query<{ status: OrderStatus; outlet_id?: string }>(
+        `SELECT status, outlet_id FROM orders WHERE id = $1 AND org_id = $2`,
         [orderId, targetOrgId],
       );
       const order = rows[0];
       if (!order) throw domainError(ErrorCode.NOT_FOUND, 'Order not found.', 404);
+      if (staffOutletId) {
+        assertStaffOutletAccess(staffOutletId, order.outlet_id);
+      }
       if (isTerminalOrderStatus(order.status)) {
         throw domainError(ErrorCode.VALIDATION_ERROR, `Order is in terminal state '${order.status}'.`, 400);
       }
@@ -357,7 +363,7 @@ export class OrdersService {
       await db.query(
         `INSERT INTO outbox_events (org_id, aggregate, aggregate_id, event_type, payload)
          VALUES ($1, 'order', $2, 'STATUS_CHANGED', $3)`,
-        [targetOrgId, orderId, JSON.stringify({ from: order.status, to: dto.status })],
+        [targetOrgId, orderId, JSON.stringify({ from: order.status, to: dto.status, outlet_id: order.outlet_id ?? null })],
       );
 
       return this.getOrderInTx(targetOrgId, orderId, db);
@@ -372,6 +378,7 @@ export class OrdersService {
     itemId: string,
     dto: UpdateItemStatusInput,
     actorId: string,
+    staffOutletId?: string,
   ) {
     if (!OrdersService.UUID_RE.test(itemId)) {
       throw domainError(ErrorCode.NOT_FOUND, 'Order item not found.', 404);
@@ -379,6 +386,15 @@ export class OrdersService {
     const targetOrgId = await this.resolveOrderOrgId(orgId, orderId);
 
     return withTenantContextRaw(targetOrgId, async (db) => {
+      if (staffOutletId) {
+        const { rows: ordRows } = await db.query<{ outlet_id: string }>(
+          `SELECT outlet_id FROM orders WHERE id = $1 AND org_id = $2`,
+          [orderId, targetOrgId],
+        );
+        if (!ordRows[0]) throw domainError(ErrorCode.NOT_FOUND, 'Order not found.', 404);
+        assertStaffOutletAccess(staffOutletId, ordRows[0].outlet_id);
+      }
+
       const { rows } = await db.query<{ status: ItemStatus; order_id: string }>(
         `SELECT status, order_id FROM order_items WHERE id = $1 AND org_id = $2`,
         [itemId, targetOrgId],
@@ -454,33 +470,127 @@ export class OrdersService {
     return orgId;
   }
 
+  private computeQuoteOrThrow(lines: PriceLineInput[], tipPaise: number) {
+    try {
+      return computeQuote({
+        lines,
+        taxConfig: DEFAULT_GST_CONFIG,
+        discountHook: NOOP_DISCOUNT,
+        tipPaise,
+      });
+    } catch (err) {
+      if (err instanceof PricingValidationError) {
+        throw domainError(ErrorCode[err.code], err.message, 400);
+      }
+      throw err;
+    }
+  }
+
+  private async attachItemsToOrders(
+    orgId: string,
+    orders: Array<Record<string, unknown>>,
+    db: PoolClient,
+  ): Promise<void> {
+    if (orders.length === 0) return;
+    const orderIds = orders.map((o) => o['id'] as string);
+    const { rows: allItems } = await db.query<Record<string, unknown>>(
+      `SELECT order_id, ${ORDER_ITEM_SELECT_FIELDS}
+       FROM order_items WHERE order_id = ANY($1) AND org_id = $2 ORDER BY created_at`,
+      [orderIds, orgId],
+    );
+    const itemsByOrder = new Map<string, Array<Record<string, unknown>>>();
+    for (const item of allItems) {
+      const oid = item['order_id'] as string;
+      const list = itemsByOrder.get(oid) ?? [];
+      list.push(item);
+      itemsByOrder.set(oid, list);
+    }
+    for (const ord of orders) {
+      const id = ord['id'] as string;
+      const matched = itemsByOrder.get(id);
+      if (matched) {
+        ord['items'] = matched;
+      } else if (orders.length === 1 && allItems.length > 0 && allItems[0]!['order_id'] === undefined) {
+        ord['items'] = allItems;
+      } else {
+        ord['items'] = [];
+      }
+    }
+  }
+
   /**
    * Build PriceLineInput from the DTO items by fetching server-side prices from DB.
    * Prices and availability are NEVER taken from the client.
+   * Validates active flags, outlet ownership, scheduled availability, modifier availability,
+   * and modifier-group ownership.
    * Reference: AGENTS §2 rule 2
    */
   private async buildPricingInput(
     orgId: string,
+    outletId: string,
     items: Array<{ menu_item_id: string; quantity: number; modifiers: Array<{ modifier_id: string }>; portion?: 'FULL' | 'HALF'; notes?: string | null }>,
     db: PoolClient,
   ): Promise<PriceLineInput[]> {
     const itemIds = [...new Set(items.map((i) => i.menu_item_id))];
     const { rows: menuItems } = await db.query<{
       id: string; name: string; price_paise: number; is_available: boolean;
+      is_active?: boolean; outlet_id?: string | null;
       allow_half_portion?: boolean; half_price_paise?: number | null;
     }>(
-      `SELECT id, name, price_paise, is_available, allow_half_portion, half_price_paise
+      `SELECT id, name, price_paise, is_available, is_active, outlet_id, allow_half_portion, half_price_paise
        FROM menu_items WHERE id = ANY($1) AND org_id = $2`,
       [itemIds, orgId],
     );
     const menuItemMap = new Map(menuItems.map((m) => [m.id, m]));
 
-    // Validate all items exist and are available
+    // Check scheduled availability rules (if configured for any item in this outlet/org)
+    const { rows: availRows } = await db.query<{
+      item_id: string; day_of_week: number | null; start_time: string | null; end_time: string | null; is_available: boolean;
+    }>(
+      `SELECT item_id, day_of_week, start_time, end_time, is_available
+       FROM item_availability
+       WHERE org_id = $1 AND item_id = ANY($2) AND (outlet_id IS NULL OR outlet_id = $3)`,
+      [orgId, itemIds, outletId],
+    );
+    const availByItem = new Map<string, typeof availRows>();
+    for (const r of availRows) {
+      const list = availByItem.get(r.item_id) ?? [];
+      list.push(r);
+      availByItem.set(r.item_id, list);
+    }
+
+    const now = new Date();
+    const todayDow = now.getUTCDay();
+    const currentHms = now.toISOString().slice(11, 19);
+
+    // Validate all items exist, belong to the outlet, and are active/available
     for (const item of items) {
       const mi = menuItemMap.get(item.menu_item_id);
       if (!mi) throw domainError(ErrorCode.NOT_FOUND, `Menu item ${item.menu_item_id} not found.`, 404);
+      if (mi.is_active === false) {
+        throw domainError(ErrorCode.ITEM_UNAVAILABLE, `'${mi.name}' is not active.`, 400);
+      }
+      if (mi.outlet_id && mi.outlet_id !== outletId) {
+        throw domainError(ErrorCode.ITEM_UNAVAILABLE, `'${mi.name}' is not available at this outlet.`, 400);
+      }
       if (!mi.is_available) {
-        throw domainError(ErrorCode.VALIDATION_ERROR, `'${mi.name}' is currently unavailable.`, 400);
+        throw domainError(ErrorCode.ITEM_UNAVAILABLE, `'${mi.name}' is currently unavailable.`, 400);
+      }
+      const schedules = availByItem.get(mi.id) ?? [];
+      const dayMatches = schedules.filter((s) => s.day_of_week === null || s.day_of_week === todayDow);
+      if (dayMatches.length > 0) {
+        const blocked = dayMatches.some((s) => s.is_available === false);
+        const positiveWindows = dayMatches.filter((s) => s.is_available === true);
+        const insideWindow = positiveWindows.some((s) => {
+          if (!s.start_time || !s.end_time) return true;
+          return currentHms >= s.start_time && currentHms <= s.end_time;
+        });
+        if (blocked && !insideWindow) {
+          throw domainError(ErrorCode.ITEM_UNAVAILABLE, `'${mi.name}' is currently unavailable by schedule.`, 400);
+        }
+        if (positiveWindows.length > 0 && !insideWindow) {
+          throw domainError(ErrorCode.ITEM_UNAVAILABLE, `'${mi.name}' is outside its serving hours.`, 400);
+        }
       }
       if (item.portion === 'HALF' && !mi.allow_half_portion) {
         throw domainError(ErrorCode.VALIDATION_ERROR, `'${mi.name}' does not offer a half plate option.`, 400);
@@ -488,20 +598,51 @@ export class OrdersService {
     }
 
     const modifierIds = [...new Set(items.flatMap((i) => i.modifiers.map((m) => m.modifier_id)))];
-    const modMap = new Map<string, { price_paise: number; name: string }>();
+    const modMap = new Map<string, { group_id: string; price_paise: number; name: string; is_available: boolean }>();
+    const itemAllowedGroups = new Map<string, Set<string>>();
     if (modifierIds.length > 0) {
-      const { rows: mods } = await db.query<{ id: string; name: string; price_paise: number }>(
-        `SELECT id, name, price_paise FROM modifiers WHERE id = ANY($1) AND org_id = $2`,
+      const { rows: mods } = await db.query<{
+        id: string; group_id: string; name: string; price_paise: number; is_available: boolean;
+      }>(
+        `SELECT id, group_id, name, price_paise, is_available FROM modifiers WHERE id = ANY($1) AND org_id = $2`,
         [modifierIds, orgId],
       );
-      for (const m of mods) modMap.set(m.id, { price_paise: m.price_paise, name: m.name });
+      for (const m of mods) {
+        modMap.set(m.id, {
+          group_id: m.group_id,
+          price_paise: m.price_paise,
+          name: m.name,
+          is_available: m.is_available,
+        });
+      }
+
+      const { rows: imgRows } = await db.query<{ item_id: string; group_id: string }>(
+        `SELECT item_id, group_id FROM item_modifier_groups WHERE org_id = $1 AND item_id = ANY($2)`,
+        [orgId, itemIds],
+      );
+      for (const link of imgRows) {
+        const set = itemAllowedGroups.get(link.item_id) ?? new Set<string>();
+        set.add(link.group_id);
+        itemAllowedGroups.set(link.item_id, set);
+      }
     }
 
     return items.map((line) => {
       const mi = menuItemMap.get(line.menu_item_id)!;
+      const allowedGroups = itemAllowedGroups.get(line.menu_item_id);
       const modPaise = line.modifiers.reduce((sum, m) => {
         const mod = modMap.get(m.modifier_id);
         if (!mod) throw domainError(ErrorCode.NOT_FOUND, `Modifier ${m.modifier_id} not found.`, 404);
+        if (!mod.is_available) {
+          throw domainError(ErrorCode.ITEM_UNAVAILABLE, `Modifier '${mod.name}' is currently unavailable.`, 400);
+        }
+        if (!allowedGroups || !allowedGroups.has(mod.group_id)) {
+          throw domainError(
+            ErrorCode.VALIDATION_ERROR,
+            `Modifier '${mod.name}' is not allowed for '${mi.name}'.`,
+            400,
+          );
+        }
         return sum + mod.price_paise;
       }, 0);
 

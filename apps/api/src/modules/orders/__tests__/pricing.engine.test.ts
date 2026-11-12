@@ -5,6 +5,7 @@ import {
   computeTax,
   bankersRound,
   computePriceFingerprint,
+  PricingValidationError,
   DEFAULT_GST_CONFIG,
   NOOP_DISCOUNT,
   MAX_LINE_COUNT,
@@ -322,5 +323,39 @@ describe('computePriceFingerprint', () => {
     const l1 = { ...base, line_total_paise: base.unit_price_paise * base.quantity };
     const l2 = { ...base, quantity: base.quantity + 1, line_total_paise: base.unit_price_paise * (base.quantity + 1) };
     expect(computePriceFingerprint([l1])).not.toBe(computePriceFingerprint([l2]));
+  });
+
+  it('INCLUSIVE tax mode does not double-add tax to total_paise', () => {
+    const inclusiveConfig: TaxConfig = {
+      ...DEFAULT_GST_CONFIG,
+      mode: 'INCLUSIVE',
+    };
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 1000, max: 500_000 }),
+        fc.integer({ min: 0, max: 500 }),
+        fc.integer({ min: 0, max: 1000 }),
+        (unitPrice, discountPaise, tipPaise) => {
+          const line = makeLine({ unit_price_paise: unitPrice, quantity: 1 });
+          const safeDiscount = Math.min(discountPaise, unitPrice);
+          const q = computeQuote({
+            lines: [line],
+            taxConfig: inclusiveConfig,
+            discountHook: { discount_paise: safeDiscount, description: 'disc', ref_type: 'COUPON' },
+            tipPaise,
+          });
+          return q.tax_paise > 0 && q.total_paise === q.subtotal_paise - safeDiscount + tipPaise;
+        },
+      ),
+    );
+  });
+
+  it('throws PricingValidationError with ORDER_LIMIT_EXCEEDED on qty > MAX_QTY_PER_LINE', () => {
+    expect(() =>
+      computeQuote({
+        lines: [makeLine({ quantity: MAX_QTY_PER_LINE + 1 })],
+        taxConfig: DEFAULT_GST_CONFIG,
+      }),
+    ).toThrow(PricingValidationError);
   });
 });

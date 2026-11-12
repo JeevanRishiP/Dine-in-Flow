@@ -24,7 +24,7 @@ import {
   type OnApplicationShutdown,
   type OnApplicationBootstrap,
 } from '@nestjs/common';
-import { getPool } from '../../db/client.js';
+import { getPool, withTenantContextRaw } from '../../db/client.js';
 import { getRedis } from '../../common/redis/redis.client.js';
 
 const RELAY_INTERVAL_MS = 500;   // poll every 500 ms
@@ -71,68 +71,62 @@ export class OutboxRelayService implements OnApplicationBootstrap, OnApplication
 
   private async relayBatch(): Promise<void> {
     const pool = getPool();
-    const client = await pool.connect();
-    try {
-      await client.query('BEGIN');
 
-      // Claim next BATCH_SIZE undelivered rows (skip rows locked by other replicas)
-      const { rows } = await client.query<{
-        id: string;
-        org_id: string;
-        aggregate: string;
-        aggregate_id: string;
-        event_type: string;
-        payload: unknown;
-        created_at: Date;
-      }>(
-        `SELECT id, org_id, aggregate, aggregate_id, event_type, payload, created_at
-         FROM outbox_events
-         WHERE delivered_at IS NULL
-         ORDER BY created_at
-         LIMIT $1
-         FOR UPDATE SKIP LOCKED`,
-        [BATCH_SIZE],
-      );
+    const { rows } = await pool.query<{
+      id: string;
+      org_id: string;
+      aggregate: string;
+      aggregate_id: string;
+      event_type: string;
+      payload: unknown;
+      created_at: Date;
+    }>(`SELECT id, org_id, aggregate, aggregate_id, event_type, payload, created_at FROM fetch_and_claim_outbox_events($1)`, [BATCH_SIZE]);
 
-      if (rows.length === 0) {
-        await client.query('ROLLBACK');
-        return;
-      }
+    if (rows.length === 0) {
+      return;
+    }
 
-      const redis = getRedis();
+    const redis = getRedis();
+    const failedRows: Array<{ id: string; org_id: string }> = [];
 
-      for (const row of rows) {
-        const message = JSON.stringify({
-          id:           row.id,
-          org_id:       row.org_id,
-          aggregate:    row.aggregate,
-          aggregateId:  row.aggregate_id,
-          eventType:    row.event_type,
-          payload:      row.payload,
-          ts:           row.created_at.toISOString(),
-        });
+    for (const row of rows) {
+      const payloadObj =
+        row.payload && typeof row.payload === 'object'
+          ? (row.payload as Record<string, unknown>)
+          : {};
+      const message = JSON.stringify({
+        id:           row.id,
+        org_id:       row.org_id,
+        outlet_id:    typeof payloadObj['outlet_id'] === 'string' ? payloadObj['outlet_id'] : undefined,
+        aggregate:    row.aggregate,
+        aggregateId:  row.aggregate_id,
+        eventType:    row.event_type,
+        payload:      row.payload,
+        ts:           new Date(row.created_at).toISOString(),
+      });
 
-        // Publish to per-org channel so KDS/SSE consumers can filter by org
+      try {
         const orgChannel = `${ORDERS_CHANNEL}:${row.org_id}`;
         await redis.publish(orgChannel, message);
-
-        // Mark delivered (stays in table for audit; a retention job prunes after 30 days)
-        await client.query(
-          `UPDATE outbox_events SET delivered_at = now() WHERE id = $1`,
-          [row.id],
-        );
+      } catch (err) {
+        this.logger.warn(`Redis publish failed for outbox event ${row.id}; scheduling retry`, err);
+        failedRows.push({ id: row.id, org_id: row.org_id });
       }
-
-      await client.query('COMMIT');
-
-      if (rows.length > 0) {
-        this.logger.debug(`Relayed ${rows.length} outbox event(s).`);
-      }
-    } catch (err) {
-      await client.query('ROLLBACK');
-      throw err;
-    } finally {
-      client.release();
     }
+
+    for (const failed of failedRows) {
+      try {
+        await withTenantContextRaw(failed.org_id, async (db) => {
+          await db.query(
+            `UPDATE outbox_events SET delivered_at = NULL, delivered = false WHERE id = $1 AND org_id = $2`,
+            [failed.id, failed.org_id],
+          );
+        });
+      } catch (err) {
+        this.logger.error(`Failed to unclaim outbox event ${failed.id}`, err);
+      }
+    }
+
+    this.logger.debug(`Relayed ${rows.length - failedRows.length}/${rows.length} outbox event(s).`);
   }
 }

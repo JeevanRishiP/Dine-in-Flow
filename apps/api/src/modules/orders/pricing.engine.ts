@@ -84,6 +84,16 @@ export const MAX_LINE_COUNT = 50;
 export const MAX_QTY_PER_LINE = 50;
 export const MAX_TIP_PAISE = 100_000_00; // ₹1,00,000 — sanity cap
 
+export class PricingValidationError extends Error {
+  constructor(
+    public readonly code: 'ORDER_LIMIT_EXCEEDED' | 'VALIDATION_ERROR' | 'CART_EMPTY',
+    message: string,
+  ) {
+    super(message);
+    this.name = 'PricingValidationError';
+  }
+}
+
 // ─── Rounding ─────────────────────────────────────────────────────────────────
 
 /**
@@ -167,19 +177,27 @@ export function computeQuote(opts: ComputeQuoteOptions): OrderQuote {
   const { lines, taxConfig, discountHook, tipPaise = 0, currency = 'INR' } = opts;
 
   // ── 1. Validate caps ────────────────────────────────────────────────────────
-  if (lines.length === 0) throw new Error('Order must have at least one item.');
-  if (lines.length > MAX_LINE_COUNT) throw new Error(`Order exceeds the maximum of ${MAX_LINE_COUNT} lines.`);
-  for (const l of lines) {
-    if (l.quantity <= 0 || !Number.isInteger(l.quantity))
-      throw new Error(`Invalid quantity ${l.quantity} for item ${l.menu_item_id}.`);
-    if (l.quantity > MAX_QTY_PER_LINE)
-      throw new Error(`Quantity ${l.quantity} exceeds max ${MAX_QTY_PER_LINE} for item ${l.menu_item_id}.`);
-    if (!Number.isInteger(l.unit_price_paise) || l.unit_price_paise < 0)
-      throw new Error(`Invalid price ${l.unit_price_paise} for item ${l.menu_item_id}.`);
+  if (lines.length === 0) throw new PricingValidationError('CART_EMPTY', 'Order must have at least one item.');
+  if (lines.length > MAX_LINE_COUNT) {
+    throw new PricingValidationError('ORDER_LIMIT_EXCEEDED', `Order exceeds the maximum of ${MAX_LINE_COUNT} lines.`);
   }
-  if (!Number.isInteger(tipPaise) || tipPaise < 0)
-    throw new Error(`Tip must be a non-negative integer (paise). Got: ${tipPaise}`);
-  if (tipPaise > MAX_TIP_PAISE) throw new Error(`Tip exceeds maximum allowed value.`);
+  for (const l of lines) {
+    if (l.quantity <= 0 || !Number.isInteger(l.quantity)) {
+      throw new PricingValidationError('VALIDATION_ERROR', `Invalid quantity ${l.quantity} for item ${l.menu_item_id}.`);
+    }
+    if (l.quantity > MAX_QTY_PER_LINE) {
+      throw new PricingValidationError('ORDER_LIMIT_EXCEEDED', `Quantity ${l.quantity} exceeds max ${MAX_QTY_PER_LINE} for item ${l.menu_item_id}.`);
+    }
+    if (!Number.isInteger(l.unit_price_paise) || l.unit_price_paise < 0) {
+      throw new PricingValidationError('VALIDATION_ERROR', `Invalid price ${l.unit_price_paise} for item ${l.menu_item_id}.`);
+    }
+  }
+  if (!Number.isInteger(tipPaise) || tipPaise < 0) {
+    throw new PricingValidationError('VALIDATION_ERROR', `Tip must be a non-negative integer (paise). Got: ${tipPaise}`);
+  }
+  if (tipPaise > MAX_TIP_PAISE) {
+    throw new PricingValidationError('ORDER_LIMIT_EXCEEDED', `Tip exceeds maximum allowed value.`);
+  }
 
   // ── 2. Build quote lines ────────────────────────────────────────────────────
   const quoteLines: QuoteLine[] = lines.map((l) => ({
@@ -203,12 +221,16 @@ export function computeQuote(opts: ComputeQuoteOptions): OrderQuote {
   const discountDescription = discountHook?.description ?? null;
 
   // ── 6. Total ────────────────────────────────────────────────────────────────
-  const rawTotal = subtotalPaise + totalTaxPaise - discountPaise + tipPaise;
-  if (rawTotal < 0) throw new Error('Total cannot be negative after discount.');
+  // In INCLUSIVE mode, tax is already embedded inside subtotalPaise — never double-add totalTaxPaise.
+  const preTipTax = taxConfig.mode === 'INCLUSIVE' ? 0 : totalTaxPaise;
+  const rawTotal = subtotalPaise + preTipTax - discountPaise + tipPaise;
+  if (rawTotal < 0) {
+    throw new PricingValidationError('VALIDATION_ERROR', 'Total cannot be negative after discount.');
+  }
   const totalPaise = Math.max(0, rawTotal);
 
   // ── 7. Rounding adjustment (make sum exact) ─────────────────────────────────
-  const computedSum = subtotalPaise + totalTaxPaise - discountPaise + tipPaise;
+  const computedSum = subtotalPaise + preTipTax - discountPaise + tipPaise;
   const roundingAdjustmentPaise = totalPaise - computedSum; // will be 0 for integer inputs
 
   // ── 8. Fingerprint ──────────────────────────────────────────────────────────
