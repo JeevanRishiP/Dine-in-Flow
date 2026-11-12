@@ -192,60 +192,74 @@ describe('MessagingService (Phase 9)', () => {
     });
   });
 
-  describe('Inbound Webhooks & STOP Opt-Out', () => {
-    it('automatically revokes marketing consent when customer replies STOP', async () => {
-      mockClient.query
-        .mockResolvedValueOnce({ rows: [{ org_id: orgId }] }) // select orgs
-        .mockResolvedValueOnce({ rows: [] }); // insert consent revoked
+  describe('Inbound Webhooks & STOP Opt-Out (Official Meta Cloud API)', () => {
+    it('automatically revokes marketing consent via scoped helper when customer replies STOP', async () => {
+      const poolQueryMock = vi.fn()
+        .mockResolvedValueOnce({ rows: [{ org_id: orgId }] }) // resolve_org_by_whatsapp_phone_id
+        .mockResolvedValueOnce({ rows: [{ revoke_marketing_consent_by_phone: 1 }] });
 
-      const evoPayload = {
-        event: 'messages.upsert',
-        data: {
-          key: {
-            remoteJid: '919876543210@s.whatsapp.net',
-            id: 'msg-inbound-1',
+      vi.spyOn(dbClient, 'getPool').mockReturnValue({ query: poolQueryMock } as never);
+
+      const metaPayload = {
+        entry: [
+          {
+            changes: [
+              {
+                value: {
+                  metadata: { phone_number_id: '1000123456789' },
+                  messages: [
+                    {
+                      from: '919876543210',
+                      type: 'text',
+                      text: { body: 'STOP' },
+                    },
+                  ],
+                },
+              },
+            ],
           },
-          message: {
-            conversation: 'STOP',
-          },
-        },
+        ],
       };
 
-      const result = await service.handleInboundWebhook(evoPayload);
+      const result = await service.handleInboundWebhook(metaPayload);
       expect(result.action).toBe('OPT_OUT_RECORDED');
       expect(result.phone).toBe('+919876543210');
-
-      // Verify consent revoked in DB
-      const insertCall = mockClient.query.mock.calls[1];
-      expect(insertCall[0]).toContain('consents');
-      expect(insertCall[0]).toContain('MARKETING_WHATSAPP');
-      expect(insertCall[0]).toContain('false'); // granted = false
-      expect(insertCall[0]).toContain('WA_INBOUND');
-      expect(insertCall[1][0]).toBe(orgId);
-      expect(insertCall[1][1]).toBe('+919876543210');
+      expect(poolQueryMock).toHaveBeenCalledWith(
+        expect.stringContaining('revoke_marketing_consent_by_phone'),
+        ['+919876543210', orgId],
+      );
     });
 
-    it('updates delivery status in message_log on delivery receipts', async () => {
-      mockClient.query.mockResolvedValueOnce({ rows: [] });
+    it('updates delivery status via scoped helper on Meta delivery receipts', async () => {
+      const poolQueryMock = vi.fn().mockResolvedValueOnce({ rows: [] });
+      vi.spyOn(dbClient, 'getPool').mockReturnValue({ query: poolQueryMock } as never);
 
-      const evoStatusPayload = {
-        event: 'messages.update',
-        data: {
-          key: {
-            id: 'mock-msg-id-123',
+      const metaStatusPayload = {
+        entry: [
+          {
+            changes: [
+              {
+                value: {
+                  statuses: [
+                    {
+                      id: 'wamid-msg-123',
+                      status: 'delivered',
+                    },
+                  ],
+                },
+              },
+            ],
           },
-          status: 'DELIVERY_ACK',
-        },
+        ],
       };
 
-      const result = await service.handleInboundWebhook(evoStatusPayload);
+      const result = await service.handleInboundWebhook(metaStatusPayload);
       expect(result.action).toBe('STATUS_UPDATED');
       expect(result.status).toBe('DELIVERED');
-
-      const updateCall = mockClient.query.mock.calls[0];
-      expect(updateCall[0]).toContain('UPDATE message_log');
-      expect(updateCall[1][0]).toBe('DELIVERED');
-      expect(updateCall[1][1]).toBe('mock-msg-id-123');
+      expect(poolQueryMock).toHaveBeenCalledWith(
+        expect.stringContaining('update_message_status_by_provider_id'),
+        ['wamid-msg-123', 'DELIVERED'],
+      );
     });
   });
 

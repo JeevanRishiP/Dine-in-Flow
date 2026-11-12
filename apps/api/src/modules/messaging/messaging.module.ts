@@ -1,6 +1,6 @@
 import { Module } from '@nestjs/common';
 import { MessagingService } from './messaging.service.js';
-import { EvolutionAdapter } from './evolution.adapter.js';
+import { WhatsAppCloudAdapter } from './whatsapp-cloud.adapter.js';
 import { MockMessagingProvider, MockSmsProvider } from './mock-messaging.adapter.js';
 import {
   ConsoleMessagingController,
@@ -18,11 +18,14 @@ import {
     {
       provide: 'MESSAGING_PROVIDER',
       useFactory: () => {
-        // Only use real Evolution API if explicitly set to 'evolution'.
-        // In local development, default to MockMessagingProvider to guarantee zero impact
-        // on any other project running an Evolution API container on localhost:8080.
-        if (process.env['WHATSAPP_PROVIDER'] === 'evolution') {
-          return new EvolutionAdapter();
+        const provider = (process.env['WHATSAPP_PROVIDER'] || '').toLowerCase();
+        if (provider === 'evolution') {
+          throw new Error(
+            'Unofficial WhatsApp bridges (Evolution) are forbidden per AGENTS §2 rule 11. Configure WHATSAPP_PROVIDER=cloud.',
+          );
+        }
+        if (provider === 'cloud' || provider === 'meta') {
+          return new WhatsAppCloudAdapter();
         }
         return new MockMessagingProvider();
       },

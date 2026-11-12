@@ -4,7 +4,7 @@ import {
   BadRequestException,
   Logger,
 } from '@nestjs/common';
-import { withTenantContextRaw } from '../../db/client.js';
+import { getPool, withTenantContextRaw } from '../../db/client.js';
 import type { MessagingProvider, SmsProvider } from './messaging.provider.js';
 import {
   TEMPLATE_REGISTRY,
@@ -89,8 +89,8 @@ export class MessagingService {
       );
     }
 
-    return withTenantContextRaw(orgId, async (client) => {
-      // 2. Check idempotency
+    // Phase 1 (short DB TX): idempotency, settings, budget, consent checks — release TX before HTTP dispatch
+    const preCheck = await withTenantContextRaw(orgId, async (client) => {
       if (dto.idempotencyKey) {
         const existing = await client.query<MessageLogRow>(
           `SELECT * FROM message_log WHERE org_id = $1 AND idempotency_key = $2`,
@@ -99,16 +99,17 @@ export class MessagingService {
         const existingRow = existing.rows[0];
         if (existingRow) {
           return {
-            id: existingRow.id,
-            status: existingRow.status,
-            providerMessageId: existingRow.provider_msg_id,
-            costMinorPaise: Number(existingRow.cost_minor),
-            isIdempotentReplay: true,
+            replay: {
+              id: existingRow.id,
+              status: existingRow.status,
+              providerMessageId: existingRow.provider_msg_id,
+              costMinorPaise: Number(existingRow.cost_minor),
+              isIdempotentReplay: true,
+            },
           };
         }
       }
 
-      // 3. Load Org Messaging Settings
       const settingsRes = await client.query<OrgMessagingSettingsRow>(
         `SELECT * FROM org_messaging_settings WHERE org_id = $1`,
         [orgId],
@@ -123,7 +124,6 @@ export class MessagingService {
         sms_fallback_enabled: true,
       };
 
-      // 4. Budget Check
       const spendRes = await client.query<{
         daily_spend: string | null;
         monthly_spend: string | null;
@@ -148,7 +148,6 @@ export class MessagingService {
       });
 
       if (!budgetEval.allowed) {
-        // Record blocked message in message_log
         await client.query(
           `INSERT INTO message_log (
              org_id, customer_id, phone, channel, template, category,
@@ -166,16 +165,14 @@ export class MessagingService {
             dto.idempotencyKey || null,
           ],
         );
-        throw new BadRequestException(budgetEval.reason);
+        return { blockedReason: budgetEval.reason };
       }
 
-      // 5. Consent & Quiet Hours Evaluation (for MARKETING)
       if (templateDef.category === 'MARKETING') {
         if (!settings.is_marketing_enabled) {
           throw new BadRequestException('Marketing messages are disabled for this organization.');
         }
 
-        // Fetch latest consent status for this phone
         const consentRes = await client.query<{ granted: boolean }>(
           `SELECT granted FROM consents
            WHERE org_id = $1 AND phone = $2 AND purpose = 'MARKETING_WHATSAPP'
@@ -184,7 +181,6 @@ export class MessagingService {
         );
         const consentGranted = consentRes.rows[0]?.granted ?? false;
 
-        // Fetch latest marketing message timestamp to calculate frequency cap
         const lastMktRes = await client.query<{ created_at: Date }>(
           `SELECT created_at FROM message_log
            WHERE org_id = $1 AND phone = $2 AND category = 'MARKETING' AND status IN ('SENT', 'DELIVERED', 'READ')
@@ -226,22 +222,33 @@ export class MessagingService {
               dto.idempotencyKey || null,
             ],
           );
-          throw new BadRequestException(consentEval.reason);
+          return { blockedReason: consentEval.reason };
         }
       }
 
-      // 6. Provider Dispatch
-      const result = await this.provider.sendTemplate({
-        to: dto.phone,
-        templateName: dto.templateName,
-        category: templateDef.category,
-        language: dto.language,
-        params: dto.params,
-        orgId,
-        idempotencyKey: dto.idempotencyKey,
-      });
+      return { proceed: true as const };
+    });
 
-      // 7. Write to message_log
+    if (preCheck.replay) {
+      return preCheck.replay;
+    }
+    if (preCheck.blockedReason) {
+      throw new BadRequestException(preCheck.blockedReason);
+    }
+
+    // Phase 2 (no DB lock held!): External provider dispatch
+    const result = await this.provider.sendTemplate({
+      to: dto.phone,
+      templateName: dto.templateName,
+      category: templateDef.category,
+      language: dto.language,
+      params: dto.params,
+      orgId,
+      idempotencyKey: dto.idempotencyKey,
+    });
+
+    // Phase 3 (short DB TX): Persist message_log
+    return withTenantContextRaw(orgId, async (client) => {
       const insertRes = await client.query<MessageLogRow>(
         `INSERT INTO message_log (
            org_id, customer_id, phone, channel, template, category,
@@ -337,74 +344,74 @@ export class MessagingService {
     });
   }
 
-  // ─── Inbound Webhook (Evolution API & Meta Cloud API) ──────────────────────
+  // ─── Inbound Webhook (Official Meta Cloud API) ─────────────────────────────
 
-  async handleInboundWebhook(rawPayload: any) {
-    // 1. Evolution API format: Inbound message (e.g. STOP command)
-    const evoText =
-      rawPayload?.data?.message?.conversation ||
-      rawPayload?.data?.message?.extendedTextMessage?.text;
+  async handleInboundWebhook(rawPayload: unknown) {
+    const pool = getPool();
+    const body = (rawPayload && typeof rawPayload === 'object' ? rawPayload : {}) as {
+      entry?: Array<{
+        changes?: Array<{
+          value?: {
+            metadata?: { phone_number_id?: string };
+            messages?: Array<{ from?: string; text?: { body?: string }; type?: string }>;
+            statuses?: Array<{ id?: string; status?: string }>;
+          };
+        }>;
+      }>;
+    };
 
-    const evoRemoteJid = rawPayload?.data?.key?.remoteJid as string | undefined;
+    const value = body.entry?.[0]?.changes?.[0]?.value;
+    const phoneNumberId = value?.metadata?.phone_number_id;
 
-    if (evoText && evoRemoteJid) {
-      const phoneDigits = evoRemoteJid.replace(/\D/g, '');
+    // 1. Inbound STOP / UNSUBSCRIBE opt-out message
+    const inboundMsg = value?.messages?.[0];
+    const msgText = inboundMsg?.text?.body;
+    const msgFrom = inboundMsg?.from;
+
+    if (msgText && msgFrom) {
+      const phoneDigits = msgFrom.replace(/\D/g, '');
       const phone = phoneDigits.startsWith('+') ? phoneDigits : `+${phoneDigits}`;
 
-      if (isOptOutKeyword(evoText)) {
+      if (isOptOutKeyword(msgText)) {
         this.logger.log(`[OPT-OUT] Inbound STOP received from ${phone}`);
-
-        // Revoke marketing consent globally across all orgs for this phone
-        await withTenantContextRaw('00000000-0000-0000-0000-000000000000', async (client) => {
-          // Find orgs where this phone is registered
-          const orgsRes = await client.query<{ org_id: string }>(
-            `SELECT DISTINCT org_id FROM consents WHERE phone = $1`,
-            [phone],
+        let resolvedOrgId: string | null = null;
+        if (phoneNumberId) {
+          const { rows } = await pool.query<{ org_id: string | null }>(
+            `SELECT resolve_org_by_whatsapp_phone_id($1) AS org_id`,
+            [phoneNumberId],
           );
-
-          for (const row of orgsRes.rows) {
-            await client.query(
-              `INSERT INTO consents (org_id, phone, purpose, granted, notice_version, source)
-               VALUES ($1, $2, 'MARKETING_WHATSAPP', false, 'v1.0', 'WA_INBOUND')`,
-              [row.org_id, phone],
-            );
-          }
-        });
-
+          resolvedOrgId = rows[0]?.org_id ?? null;
+        }
+        await pool.query(
+          `SELECT revoke_marketing_consent_by_phone($1, $2)`,
+          [phone, resolvedOrgId],
+        );
         return { action: 'OPT_OUT_RECORDED', phone };
       }
     }
 
-    // 2. Status Update (Evolution or Meta)
-    const msgId =
-      rawPayload?.data?.key?.id ||
-      rawPayload?.entry?.[0]?.changes?.[0]?.value?.statuses?.[0]?.id;
-
-    const rawStatus =
-      rawPayload?.data?.status ||
-      rawPayload?.entry?.[0]?.changes?.[0]?.value?.statuses?.[0]?.status;
+    // 2. Delivery status updates
+    const statusObj = value?.statuses?.[0];
+    const msgId = statusObj?.id;
+    const rawStatus = statusObj?.status;
 
     if (msgId && rawStatus) {
       const statusMap: Record<string, string> = {
-        DELIVERY_ACK: 'DELIVERED',
         delivered: 'DELIVERED',
-        READ: 'READ',
+        DELIVERED: 'DELIVERED',
         read: 'READ',
-        FAILED: 'FAILED',
+        READ: 'READ',
         failed: 'FAILED',
+        FAILED: 'FAILED',
         sent: 'SENT',
+        SENT: 'SENT',
       };
 
       const mappedStatus = statusMap[rawStatus] || 'SENT';
-
-      await withTenantContextRaw('00000000-0000-0000-0000-000000000000', async (client) => {
-        await client.query(
-          `UPDATE message_log
-           SET status = $1, updated_at = now()
-           WHERE provider_msg_id = $2`,
-          [mappedStatus, msgId],
-        );
-      });
+      await pool.query(
+        `SELECT update_message_status_by_provider_id($1, $2)`,
+        [msgId, mappedStatus],
+      );
 
       return { action: 'STATUS_UPDATED', messageId: msgId, status: mappedStatus };
     }
