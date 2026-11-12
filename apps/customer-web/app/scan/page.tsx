@@ -2,25 +2,47 @@
 
 import React, { Suspense, useEffect, useState } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
+import { buildSignedQrTokenFromSearch, openSignedTableSession } from '../lib/guest-session';
 
 function ScanHandlerContent() {
   const searchParams = useSearchParams();
   const router = useRouter();
   const [status, setStatus] = useState('Verifying Table QR Signature...');
-
-  const table = searchParams.get('t') || 'T01';
-  const sig = searchParams.get('sig');
+  const [error, setError] = useState<string | null>(null);
+  const [tableLabel, setTableLabel] = useState('Table');
 
   useEffect(() => {
-    const timer = setTimeout(() => {
-      setStatus(`Verified Table ${table}! Launching Dine-in Experience...`);
-      setTimeout(() => {
-        router.push(`/?table=${table}`);
-      }, 800);
-    }, 600);
+    let active = true;
+    async function verifyScan() {
+      const qrToken = buildSignedQrTokenFromSearch(new URLSearchParams(searchParams.toString()));
+      if (!qrToken) {
+        if (!active) return;
+        setError('Invalid or unsigned table QR code. Please scan the physical QR code placed on your table.');
+        setStatus('QR verification failed');
+        return;
+      }
 
-    return () => clearTimeout(timer);
-  }, [table, router]);
+      const res = await openSignedTableSession(qrToken, 2);
+      if (!active) return;
+      if (!res.ok) {
+        setError(res.error);
+        setStatus('QR verification failed');
+        return;
+      }
+
+      const label = res.session.tableNumber ? `Table ${res.session.tableNumber}` : 'Verified Table';
+      setTableLabel(label);
+      setStatus(`Verified ${label}! Launching Dine-in Experience...`);
+      setTimeout(() => {
+        if (active) router.push('/');
+      }, 600);
+    }
+
+    verifyScan();
+    return () => {
+      active = false;
+    };
+  }, [searchParams, router]);
 
   return (
     <div
@@ -50,21 +72,22 @@ function ScanHandlerContent() {
       >
         👑
       </div>
-      <h1 style={{ fontSize: '1.5rem', marginBottom: '8px' }}>Royal Spice Bistro</h1>
-      <p style={{ color: '#f59e0b', fontWeight: 700, fontSize: '1.1rem', marginBottom: '16px' }}>
-        Table {table}
+      <h1 style={{ fontSize: '1.5rem', marginBottom: '8px' }}>Dine-in Ordering</h1>
+      <p style={{ color: error ? '#ef4444' : '#f59e0b', fontWeight: 700, fontSize: '1.1rem', marginBottom: '16px' }}>
+        {tableLabel}
       </p>
       <div
         style={{
           background: 'rgba(255, 255, 255, 0.06)',
-          border: '1px solid rgba(255, 255, 255, 0.12)',
+          border: error ? '1px solid rgba(239, 68, 68, 0.5)' : '1px solid rgba(255, 255, 255, 0.12)',
           borderRadius: '999px',
           padding: '8px 20px',
           fontSize: '0.88rem',
-          color: '#94a3b8',
+          color: error ? '#fca5a5' : '#94a3b8',
+          maxWidth: '380px',
         }}
       >
-        {status}
+        {error || status}
       </div>
     </div>
   );

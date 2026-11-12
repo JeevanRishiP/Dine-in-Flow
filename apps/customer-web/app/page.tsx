@@ -1,6 +1,17 @@
 'use client';
 
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import {
+  buildSignedQrTokenFromSearch,
+  openSignedTableSession,
+  loadGuestSession,
+  clearGuestSession,
+  loadCustomerAuth,
+  saveCustomerAuth,
+  clearCustomerAuth,
+  resolveTenantIds,
+  customerApiFetch,
+} from './lib/guest-session';
 
 // ============================================================================
 // Types & Data Models
@@ -1387,11 +1398,14 @@ export default function CustomerDineInPage() {
   // Navigation View: 'home' (Discovery & Browse Feed) | 'menu' (Full Menu Page)
   const [currentView, setCurrentView] = useState<'home' | 'menu'>('home');
 
-  // Table and Dining Session State
-  const [selectedTable, setSelectedTable] = useState('T04');
+  // Table and Dining Session State (verified exclusively via signed QR token)
+  const [selectedTable, setSelectedTable] = useState('--');
   const [tablePax, setTablePax] = useState(2);
   const [activeSessionId, setActiveSessionId] = useState<string>('');
   const [activeTableId, setActiveTableId] = useState<string>('');
+  const [activeOrgId, setActiveOrgId] = useState<string>(() => resolveTenantIds().orgId);
+  const [activeOutletId, setActiveOutletId] = useState<string>(() => resolveTenantIds().outletId);
+  const [manualQrInput, setManualQrInput] = useState('');
   const [isTableVerified, setIsTableVerified] = useState(false);
   const [isTableModalOpen, setIsTableModalOpen] = useState(false);
 
@@ -1627,29 +1641,47 @@ export default function CustomerDineInPage() {
     return () => clearInterval(timer);
   }, []);
 
-  // ── 2. Establish Table Session ─────────────────────────────────────────────
-  const establishTableSession = async (tableNum: string, pax: number = 2) => {
-    try {
-      const res = await fetch('/api/v1/public/sessions/open', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ qr_token: tableNum, pax }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setActiveSessionId(data.id);
-        setActiveTableId(data.table_id);
-        setIsTableVerified(true);
-        fetchSessionOrders(data.id);
-      }
-    } catch {
-      setIsTableVerified(true);
+  // ── 2. Establish Signed Table Session ──────────────────────────────────────
+  const establishSignedTableSession = async (qrToken: string, pax: number = 2) => {
+    const res = await openSignedTableSession(qrToken, pax);
+    if (!res.ok) {
+      setIsTableVerified(false);
+      showToast(res.error);
+      return null;
     }
+    setActiveSessionId(res.session.sessionId);
+    setActiveTableId(res.session.tableId);
+    setActiveOrgId(res.session.orgId);
+    setActiveOutletId(res.session.outletId);
+    if (res.session.tableNumber) {
+      setSelectedTable(res.session.tableNumber);
+    }
+    setIsTableVerified(true);
+    fetchSessionOrders(res.session.sessionId);
+    return res.session;
   };
 
   useEffect(() => {
-    establishTableSession(selectedTable, tablePax);
-  }, [selectedTable]);
+    if (typeof window === 'undefined') return;
+    const urlParams = new URLSearchParams(window.location.search);
+    const qrFromUrl = buildSignedQrTokenFromSearch(urlParams);
+    if (qrFromUrl) {
+      establishSignedTableSession(qrFromUrl, tablePax);
+      return;
+    }
+    const existing = loadGuestSession();
+    if (existing) {
+      setActiveSessionId(existing.sessionId);
+      setActiveTableId(existing.tableId);
+      setActiveOrgId(existing.orgId);
+      setActiveOutletId(existing.outletId);
+      if (existing.tableNumber) {
+        setSelectedTable(existing.tableNumber);
+      }
+      setIsTableVerified(true);
+      fetchSessionOrders(existing.sessionId);
+    }
+  }, []);
 
   // ── 3. Fetch Live Menu from API ───────────────────────────────────────────
   useEffect(() => {
@@ -1664,8 +1696,10 @@ export default function CustomerDineInPage() {
         setIsOrdersHistoryOpen(true);
         showToast('Payment confirmed via PhonePe! Kitchen is preparing your dishes 🍳');
         window.history.replaceState({}, '', window.location.pathname);
-        // Refresh session orders immediately
-        establishTableSession(selectedTable, tablePax);
+        const existing = loadGuestSession();
+        if (existing?.sessionId) {
+          fetchSessionOrders(existing.sessionId);
+        }
       } else if (urlParams.get('payment_cancelled') || urlParams.get('payment_failed')) {
         setIsCartOpen(true);
         showToast('⚠️ Payment was not completed. Your dishes are saved in your cart — tap below to retry!');
@@ -1676,10 +1710,13 @@ export default function CustomerDineInPage() {
 
   useEffect(() => {
     async function fetchLiveMenu() {
+      const tenant = resolveTenantIds(loadGuestSession());
+      const orgToFetch = activeOrgId || tenant.orgId;
+      const outletToFetch = activeOutletId || tenant.outletId;
+      if (!orgToFetch) return;
       try {
-        const res = await fetch(
-          '/api/v1/public/menu/7762b6af-d052-4e74-b917-39e3c56e7914?outlet_id=71ad00a6-d79b-4035-b563-bf9543fcfa86'
-        );
+        const query = outletToFetch ? `?outlet_id=${encodeURIComponent(outletToFetch)}` : '';
+        const res = await fetch(`/api/v1/public/menu/${encodeURIComponent(orgToFetch)}${query}`);
         if (res.ok) {
           const data = await res.json();
           if (data && data.items && data.items.length > 0) {
@@ -1812,9 +1849,11 @@ export default function CustomerDineInPage() {
   // ── 4. Fetch Session Orders History ────────────────────────────────────────
   const fetchSessionOrders = async (sessionId?: string) => {
     const sId = sessionId || activeSessionId;
-    if (!sId) return;
+    if (!sId || !loadGuestSession()?.guestSessionToken) return;
     try {
-      const res = await fetch(`/api/v1/customer/orders/session/${sId}`);
+      const res = await customerApiFetch(`/api/v1/customer/orders/session/${encodeURIComponent(sId)}`, undefined, {
+        preferToken: 'guest',
+      });
       if (res.ok) {
         const data = await res.json();
         if (Array.isArray(data)) {
@@ -1832,18 +1871,19 @@ export default function CustomerDineInPage() {
   }, [activeSessionId]);
 
   // ── 5. Fetch Diner Profiles Strictly from Real Database ─────────────────
-  const fetchCustomerDinerProfiles = useCallback(async (custTargetId?: string | null) => {
+  const fetchCustomerDinerProfiles = useCallback(async (custTargetId?: string | null, tokenOverride?: string | null) => {
     const targetId = custTargetId || customerId;
-    if (!targetId) {
+    const authToken = tokenOverride || customerToken;
+    if (!targetId || !authToken) {
       setDinerProfiles([]);
       return;
     }
     try {
-      const res = await fetch(`/api/v1/auth/customer/diner-profiles?customer_id=${encodeURIComponent(targetId)}`, {
-        headers: {
-          'x-org-id': '7762b6af-d052-4e74-b917-39e3c56e7914',
-        },
-      });
+      const res = await customerApiFetch(
+        '/api/v1/auth/customer/diner-profiles',
+        undefined,
+        { preferToken: 'customer', tokenOverride: authToken, orgIdOverride: activeOrgId },
+      );
       if (res.ok) {
         const data = await res.json();
         if (Array.isArray(data)) {
@@ -1865,19 +1905,20 @@ export default function CustomerDineInPage() {
     } catch {
       setDinerProfiles([]);
     }
-  }, [customerId]);
+  }, [customerId, customerToken, activeOrgId]);
 
   // Restore Customer Profile & Diner Profiles from Database on mount
   useEffect(() => {
     try {
-      const savedToken = localStorage.getItem('dineflow_customer_token');
-      const savedCustId = localStorage.getItem('dineflow_customer_id');
-      if (savedToken && savedCustId) {
-        setCustomerToken(savedToken);
-        setCustomerId(savedCustId);
-        fetch(`/api/v1/auth/customer/profile?customer_id=${encodeURIComponent(savedCustId)}`, {
-          headers: { 'x-org-id': '7762b6af-d052-4e74-b917-39e3c56e7914' },
-        })
+      const auth = loadCustomerAuth();
+      if (auth?.accessToken && auth?.customerId) {
+        setCustomerToken(auth.accessToken);
+        setCustomerId(auth.customerId);
+        customerApiFetch(
+          '/api/v1/auth/customer/profile',
+          undefined,
+          { preferToken: 'customer', tokenOverride: auth.accessToken, orgIdOverride: activeOrgId },
+        )
           .then((r) => (r.ok ? r.json() : null))
           .then((prof) => {
             if (prof) {
@@ -1886,10 +1927,10 @@ export default function CustomerDineInPage() {
             }
           })
           .catch(() => {});
-        fetchCustomerDinerProfiles(savedCustId);
+        fetchCustomerDinerProfiles(auth.customerId, auth.accessToken);
       }
     } catch {}
-  }, [fetchCustomerDinerProfiles]);
+  }, [fetchCustomerDinerProfiles, activeOrgId]);
 
   // Sync Diner Profiles: Only active when a customer is authenticated, strictly from database
   useEffect(() => {
@@ -2950,23 +2991,23 @@ export default function CustomerDineInPage() {
     // Save strictly to real PostgreSQL database
     if (isNewDinerProfile) {
       if (customerToken && customerId) {
-        fetch('/api/v1/auth/customer/diner-profiles', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-org-id': '7762b6af-d052-4e74-b917-39e3c56e7914',
+        customerApiFetch(
+          '/api/v1/auth/customer/diner-profiles',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              name: trimmedName,
+              relationshipTag: 'FRIEND',
+              spicePreference: updatedProfile.spicePreference,
+              dietaryPreference: updatedProfile.dietaryPreference,
+              kitchenInstructions: updatedProfile.kitchenInstructions,
+              notes: updatedProfile.notes,
+              preferences: updatedProfile.preferences,
+            }),
           },
-          body: JSON.stringify({
-            customerId,
-            name: trimmedName,
-            relationshipTag: 'FRIEND',
-            spicePreference: updatedProfile.spicePreference,
-            dietaryPreference: updatedProfile.dietaryPreference,
-            kitchenInstructions: updatedProfile.kitchenInstructions,
-            notes: updatedProfile.notes,
-            preferences: updatedProfile.preferences,
-          }),
-        })
+          { preferToken: 'customer', tokenOverride: customerToken, orgIdOverride: activeOrgId },
+        )
           .then((r) => (r.ok ? r.json() : null))
           .then((saved) => {
             if (saved) {
@@ -2989,22 +3030,23 @@ export default function CustomerDineInPage() {
     } else {
       // Editing existing profile in real database
       if (customerToken && editingDinerProfile?.id) {
-        fetch(`/api/v1/auth/customer/diner-profiles/${encodeURIComponent(editingDinerProfile.id)}`, {
-          method: 'PATCH',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-org-id': '7762b6af-d052-4e74-b917-39e3c56e7914',
+        customerApiFetch(
+          `/api/v1/auth/customer/diner-profiles/${encodeURIComponent(editingDinerProfile.id)}`,
+          {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              name: trimmedName,
+              relationshipTag: 'FRIEND',
+              spicePreference: updatedProfile.spicePreference,
+              dietaryPreference: updatedProfile.dietaryPreference,
+              kitchenInstructions: updatedProfile.kitchenInstructions,
+              notes: updatedProfile.notes,
+              preferences: updatedProfile.preferences,
+            }),
           },
-          body: JSON.stringify({
-            name: trimmedName,
-            relationshipTag: 'FRIEND',
-            spicePreference: updatedProfile.spicePreference,
-            dietaryPreference: updatedProfile.dietaryPreference,
-            kitchenInstructions: updatedProfile.kitchenInstructions,
-            notes: updatedProfile.notes,
-            preferences: updatedProfile.preferences,
-          }),
-        })
+          { preferToken: 'customer', tokenOverride: customerToken, orgIdOverride: activeOrgId },
+        )
           .then((r) => (r.ok ? r.json() : null))
           .then((saved) => {
             if (saved) {
@@ -3037,14 +3079,15 @@ export default function CustomerDineInPage() {
 
   const handleDeleteDinerProfile = (id: string) => {
     if (customerToken) {
-      fetch('/api/v1/auth/customer/diner-profiles/delete', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-org-id': '7762b6af-d052-4e74-b917-39e3c56e7914',
+      customerApiFetch(
+        '/api/v1/auth/customer/diner-profiles/delete',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id }),
         },
-        body: JSON.stringify({ id }),
-      }).catch(() => {});
+        { preferToken: 'customer', tokenOverride: customerToken, orgIdOverride: activeOrgId },
+      ).catch(() => {});
     }
     setDinerProfiles((prev) => prev.filter((p) => p.id !== id));
     showToast('Profile removed from database');
@@ -3102,22 +3145,22 @@ export default function CustomerDineInPage() {
     let createdId = `dp-${Date.now()}`;
     if (customerToken && customerId) {
       try {
-        const res = await fetch('/api/v1/auth/customer/diner-profiles', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-org-id': '7762b6af-d052-4e74-b917-39e3c56e7914',
+        const res = await customerApiFetch(
+          '/api/v1/auth/customer/diner-profiles',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              name: trimmed,
+              relationshipTag: 'FRIEND',
+              spicePreference: newProfileSpice,
+              dietaryPreference: 'ANY',
+              kitchenInstructions: instructions.length > 0 ? instructions : ['Regular Spice', 'Standard Prep'],
+              notes: 'Custom dining profile',
+            }),
           },
-          body: JSON.stringify({
-            customerId,
-            name: trimmed,
-            relationshipTag: 'FRIEND',
-            spicePreference: newProfileSpice,
-            dietaryPreference: 'ANY',
-            kitchenInstructions: instructions.length > 0 ? instructions : ['Regular Spice', 'Standard Prep'],
-            notes: 'Custom dining profile',
-          }),
-        });
+          { preferToken: 'customer', tokenOverride: customerToken, orgIdOverride: activeOrgId },
+        );
         if (res.ok) {
           const saved = await res.json();
           createdId = saved.id;
@@ -3316,58 +3359,61 @@ export default function CustomerDineInPage() {
 
   const handlePlaceOrder = async () => {
     if (cartLines.length === 0 || isPlacingOrder) return;
+    const guestSession = loadGuestSession();
+    const currentSessionId = activeSessionId || guestSession?.sessionId || '';
+    if (!currentSessionId || !guestSession?.guestSessionToken) {
+      showToast('Please scan your table QR code before placing an order.');
+      setIsTableModalOpen(true);
+      return;
+    }
+
     setIsPlacingOrder(true);
 
     try {
-      let currentSessionId = activeSessionId;
-      if (!currentSessionId) {
-        const sRes = await fetch('/api/v1/public/sessions/open', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ qr_token: selectedTable || 'T04', pax: tablePax || 2 }),
-        });
-        if (sRes.ok) {
-          const sData = await sRes.json();
-          currentSessionId = sData.id;
-          setActiveSessionId(currentSessionId);
-          setActiveTableId(sData.table_id);
-        }
-      }
-
+      const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
       // Map cart lines into backend items payload
-      const itemsPayload = cartLines.map((c) => {
-        let validMenuUuid = c.item.id;
-        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(validMenuUuid)) {
-          const matchingLiveItem = menuItems.find(
-            (m) => m.name.toLowerCase() === c.item.name.toLowerCase() && /^[0-9a-f]{8}-/i.test(m.id)
-          );
-          validMenuUuid = matchingLiveItem ? matchingLiveItem.id : (menuItems[0]?.id || 'd4d75486-bbc6-449e-8366-f6697cc14301');
-        }
+      const itemsPayload = cartLines
+        .map((c) => {
+          let validMenuUuid = c.item.id;
+          if (!uuidPattern.test(validMenuUuid)) {
+            const matchingLiveItem = menuItems.find(
+              (m) => m.name.toLowerCase() === c.item.name.toLowerCase() && uuidPattern.test(m.id)
+            );
+            validMenuUuid = matchingLiveItem ? matchingLiveItem.id : '';
+          }
+          if (!uuidPattern.test(validMenuUuid)) return null;
 
-        const modifierText = c.selectedModifiers && c.selectedModifiers.length > 0 
-          ? `Add-ons: ${c.selectedModifiers.map((m) => m.name).join(', ')}` 
-          : '';
-        const portionBadge = c.portion === 'HALF' ? '[HALF PLATE]' : '';
-        const noteWithPlate = [
-          c.plateLabel ? `[${c.plateLabel}]` : '',
-          portionBadge,
-          c.spiceLevel && c.spiceLevel !== 'NONE' ? `Spice: ${c.spiceLevel}` : '',
-          modifierText,
-          c.notes ? c.notes : '',
-        ].filter(Boolean).join(' · ');
+          const modifierText = c.selectedModifiers && c.selectedModifiers.length > 0
+            ? `Add-ons: ${c.selectedModifiers.map((m) => m.name).join(', ')}`
+            : '';
+          const portionBadge = c.portion === 'HALF' ? '[HALF PLATE]' : '';
+          const noteWithPlate = [
+            c.plateLabel ? `[${c.plateLabel}]` : '',
+            portionBadge,
+            c.spiceLevel && c.spiceLevel !== 'NONE' ? `Spice: ${c.spiceLevel}` : '',
+            modifierText,
+            c.notes ? c.notes : '',
+          ].filter(Boolean).join(' · ');
 
-        const validModifiers = (c.selectedModifiers || [])
-          .filter((m) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(m.id))
-          .map((m) => ({ modifier_id: m.id }));
+          const validModifiers = (c.selectedModifiers || [])
+            .filter((m) => uuidPattern.test(m.id))
+            .map((m) => ({ modifier_id: m.id }));
 
-        return {
-          menu_item_id: validMenuUuid,
-          quantity: c.quantity,
-          portion: c.portion || 'FULL',
-          modifiers: validModifiers,
-          notes: noteWithPlate || undefined,
-        };
-      });
+          return {
+            menu_item_id: validMenuUuid,
+            quantity: c.quantity,
+            portion: c.portion || 'FULL',
+            modifiers: validModifiers,
+            notes: noteWithPlate || undefined,
+          };
+        })
+        .filter((x): x is NonNullable<typeof x> => x !== null);
+
+      if (itemsPayload.length === 0) {
+        showToast('Menu items are still syncing from restaurant catalog. Please try again.');
+        setIsPlacingOrder(false);
+        return;
+      }
 
       const orderBody = {
         session_id: currentSessionId,
@@ -3375,26 +3421,29 @@ export default function CustomerDineInPage() {
         items: itemsPayload,
       };
 
-      const res = await fetch('/api/v1/customer/orders', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(orderBody),
-      });
+      const res = await customerApiFetch(
+        '/api/v1/customer/orders',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(orderBody),
+        },
+        { preferToken: 'guest' },
+      );
 
       if (res.ok) {
         const orderData = await res.json();
-        // Optimistically record order into sessionOrders so it is ready upon payment
         setSessionOrders((prev) => {
           if (prev.some((o) => o.id === orderData.id)) return prev;
           const optimisticOrd: TableOrderRecord = {
             id: orderData.id,
-            table_number: selectedTable || 'T04',
-            status: selectedPaymentMethod === 'CASH' ? 'CONFIRMED' : 'PENDING',
+            table_number: selectedTable,
+            status: 'PENDING',
             subtotal_paise: orderData.subtotal_paise || cartSubtotalPaise,
             tax_paise: orderData.tax_paise || gstPaise,
             total_paise: orderData.total_paise || cartGrandTotalPaise,
             created_at: orderData.created_at || new Date().toISOString(),
-            payment_status: selectedPaymentMethod === 'CASH' ? 'PAID' : 'PENDING',
+            payment_status: 'PENDING',
             payment_method: selectedPaymentMethod,
             items: (orderData.items && orderData.items.length > 0)
               ? orderData.items.map((it: any) => ({
@@ -3418,60 +3467,57 @@ export default function CustomerDineInPage() {
           };
           return [optimisticOrd, ...prev];
         });
-        // Immediately initiate payment for this order (unpaid dishes remain in cart)
+
         try {
-          const payRes = await fetch('/api/v1/customer/payments', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              order_id: orderData.id,
-              idempotency_key: crypto.randomUUID(),
-              method: selectedPaymentMethod === 'UPI' ? 'UPI' : 'CASH',
-            }),
-          });
+          const payRes = await customerApiFetch(
+            '/api/v1/customer/payments',
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                order_id: orderData.id,
+                idempotency_key: crypto.randomUUID(),
+                method: selectedPaymentMethod === 'UPI' ? 'UPI' : 'PAY_AT_COUNTER',
+              }),
+            },
+            { preferToken: 'guest' },
+          );
 
           if (payRes.ok) {
             const payData = await payRes.json();
             if (selectedPaymentMethod === 'CASH') {
-              await fetch(`/api/v1/customer/payments/${payData.id}/simulate-success`, { method: 'POST' }).catch(() => {});
               setCartLines([]);
               setIsCartOpen(false);
-              if (currentSessionId) fetchSessionOrders(currentSessionId);
+              fetchSessionOrders(currentSessionId);
               setOrdersFilterTab('PREPARING');
               setIsOrdersHistoryOpen(true);
-              showToast('Order confirmed! Cash will be collected by staff at table 💵');
+              showToast('Order placed! Counter/cash payment request sent — staff will confirm settlement 💵');
             } else {
+              const checkout = payData.checkoutPayload || {};
+              if (!checkout.redirectUrl && !checkout.qrCodeUrl && !checkout.upiString) {
+                showToast('Payment gateway session created, awaiting checkout details.');
+              }
               setPaymentQrData({
                 paymentId: payData.id,
                 orderId: orderData.id,
                 sessionId: currentSessionId,
-                redirectUrl: payData.checkoutPayload?.redirectUrl,
-                qrCodeUrl:
-                  payData.checkoutPayload?.qrCodeUrl ||
-                  `https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=upi://pay?pa=royalspicebistro@icici&am=${(orderData.total_paise / 100).toFixed(2)}`,
-                upiString:
-                  payData.checkoutPayload?.upiString ||
-                  `upi://pay?pa=royalspicebistro@icici&am=${(orderData.total_paise / 100).toFixed(2)}`,
+                redirectUrl: checkout.redirectUrl,
+                qrCodeUrl: checkout.qrCodeUrl || '',
+                upiString: checkout.upiString || '',
               });
               setIsPaymentModalOpen(true);
             }
           } else {
-            setPaymentQrData({
-              paymentId: `pay_${orderData.id.slice(0, 8)}`,
-              orderId: orderData.id,
-              sessionId: currentSessionId,
-              qrCodeUrl: `https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=upi://pay?pa=royalspicebistro@icici&am=${(orderData.total_paise / 100).toFixed(2)}`,
-              upiString: `upi://pay?pa=royalspicebistro@icici&am=${(orderData.total_paise / 100).toFixed(2)}`,
-            });
-            setIsPaymentModalOpen(true);
+            const payErr = await payRes.json().catch(() => ({}));
+            showToast(payErr.detail || payErr.message || 'Unable to initialize payment. Your order is saved.');
           }
         } catch {
-          setIsPaymentModalOpen(true);
+          showToast('Unable to initialize payment gateway.');
         }
       } else {
         const errJson = await res.json().catch(() => ({}));
         console.error('Order placement failed:', errJson);
-        showToast('Unable to place order. Please review your cart.');
+        showToast(errJson.detail || errJson.message || 'Unable to place order. Please review your cart.');
       }
     } catch (e) {
       console.error('Order error:', e);
@@ -3481,93 +3527,20 @@ export default function CustomerDineInPage() {
     }
   };
 
-  // ── 11. Customer Authentication (Real Database Auth & Fast Dev Bypass) ───────
-  const handleCompleteVirtualLogin = async (phoneInput?: string) => {
-    setAuthLoading(true);
-    setAuthError('');
-    const rawPhone = (phoneInput || customerPhoneInput || '9876543210').trim();
-    const formattedPhone = rawPhone.startsWith('+') ? rawPhone : `+91${rawPhone}`;
-
-    try {
-      // 1. Request OTP code from real backend (creates OTP in customer_otp_codes)
-      const reqRes = await fetch('/api/v1/auth/customer/otp/request', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-org-id': '7762b6af-d052-4e74-b917-39e3c56e7914',
-        },
-        body: JSON.stringify({ phone: formattedPhone }),
-      });
-      const reqData = await reqRes.json().catch(() => ({}));
-      const codeToUse = reqData.devCode || authDevCode || '123456';
-
-      // 2. Verify code with real backend (upserts customer in customers table)
-      const verifyRes = await fetch('/api/v1/auth/customer/otp/verify', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-org-id': '7762b6af-d052-4e74-b917-39e3c56e7914',
-        },
-        body: JSON.stringify({ phone: formattedPhone, code: codeToUse }),
-      });
-      const verifyData = await verifyRes.json().catch(() => ({}));
-
-      if (verifyRes.ok && verifyData.accessToken && verifyData.customerId) {
-        setCustomerToken(verifyData.accessToken);
-        setCustomerId(verifyData.customerId);
-        localStorage.setItem('dineflow_customer_token', verifyData.accessToken);
-        localStorage.setItem('dineflow_customer_id', verifyData.customerId);
-
-        // Fetch real customer profile from PostgreSQL database
-        const profRes = await fetch(
-          `/api/v1/auth/customer/profile?customer_id=${encodeURIComponent(verifyData.customerId)}`,
-          {
-            headers: { 'x-org-id': '7762b6af-d052-4e74-b917-39e3c56e7914' },
-          }
-        ).catch(() => null);
-
-        if (profRes && profRes.ok) {
-          const prof = await profRes.json();
-          setCustomerProfile(prof);
-          setEditDisplayName(prof.displayName || '');
-        } else {
-          setCustomerProfile({
-            phone: formattedPhone,
-            displayName: verifyData.displayName || '',
-            loyaltyPoints: verifyData.loyaltyPoints ?? 0,
-            loyaltyTier: 'Silver Club',
-          });
-          setEditDisplayName(verifyData.displayName || '');
-        }
-
-        // Fetch real diner profiles from database (empty list if none saved yet)
-        await fetchCustomerDinerProfiles(verifyData.customerId);
-
-        setIsAuthModalOpen(false);
-        setAuthStep('PHONE');
-        setAuthLoading(false);
-        showToast(
-          verifyData.displayName
-            ? `Signed in as ${verifyData.displayName}!`
-            : 'Signed in successfully! Enter your name in settings if desired.'
-        );
-        return;
-      } else {
-        setAuthError(verifyData.message || 'Login verification failed on backend database.');
-      }
-    } catch (e) {
-      console.error('Login error:', e);
-      setAuthError('Connection error connecting to backend database.');
-    } finally {
-      setAuthLoading(false);
-    }
-  };
-
+  // ── 11. Customer Authentication (Backend OTP Verification) ─────────────────
   const handleRequestOtp = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     setAuthLoading(true);
     setAuthError('');
-    const rawPhone = (customerPhoneInput || '9876543210').trim();
+    setAuthDevCode(null);
+    const tenant = resolveTenantIds(loadGuestSession());
+    const targetOrgId = activeOrgId || tenant.orgId;
+    if (!targetOrgId) {
+      setAuthError('Scan your table QR code before signing in.');
+      setAuthLoading(false);
+      return;
+    }
+    const rawPhone = customerPhoneInput.trim();
     const formattedPhone = rawPhone.startsWith('+') ? rawPhone : `+91${rawPhone}`;
 
     try {
@@ -3575,23 +3548,24 @@ export default function CustomerDineInPage() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-org-id': '7762b6af-d052-4e74-b917-39e3c56e7914',
+          'x-org-id': targetOrgId,
         },
         body: JSON.stringify({ phone: formattedPhone }),
       });
       const data = await res.json().catch(() => ({}));
-      if (res.ok && data.devCode) {
+      if (!res.ok) {
+        setAuthError(data.detail || data.message || 'Unable to send OTP code.');
+        return;
+      }
+      if (data.devCode) {
         setAuthDevCode(data.devCode);
         setCustomerOtpInput(data.devCode);
       } else {
-        setAuthDevCode('123456');
-        setCustomerOtpInput('123456');
+        setCustomerOtpInput('');
       }
       setAuthStep('OTP');
     } catch {
-      setAuthDevCode('123456');
-      setCustomerOtpInput('123456');
-      setAuthStep('OTP');
+      setAuthError('Network error requesting OTP.');
     } finally {
       setAuthLoading(false);
     }
@@ -3601,31 +3575,36 @@ export default function CustomerDineInPage() {
     if (e) e.preventDefault();
     setAuthLoading(true);
     setAuthError('');
-    const rawPhone = (customerPhoneInput || '9876543210').trim();
+    const tenant = resolveTenantIds(loadGuestSession());
+    const targetOrgId = activeOrgId || tenant.orgId;
+    if (!targetOrgId) {
+      setAuthError('Scan your table QR code before verifying OTP.');
+      setAuthLoading(false);
+      return;
+    }
+    const rawPhone = customerPhoneInput.trim();
     const formattedPhone = rawPhone.startsWith('+') ? rawPhone : `+91${rawPhone}`;
-    const enteredCode = (customerOtpInput || '').trim();
+    const enteredCode = customerOtpInput.trim();
 
     try {
       const res = await fetch('/api/v1/auth/customer/otp/verify', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-org-id': '7762b6af-d052-4e74-b917-39e3c56e7914',
+          'x-org-id': targetOrgId,
         },
         body: JSON.stringify({ phone: formattedPhone, code: enteredCode }),
       });
       const data = await res.json().catch(() => ({}));
       if (res.ok && data.accessToken && data.customerId) {
+        saveCustomerAuth({ accessToken: data.accessToken, customerId: data.customerId });
         setCustomerToken(data.accessToken);
         setCustomerId(data.customerId);
-        localStorage.setItem('dineflow_customer_token', data.accessToken);
-        localStorage.setItem('dineflow_customer_id', data.customerId);
 
-        const profRes = await fetch(
-          `/api/v1/auth/customer/profile?customer_id=${encodeURIComponent(data.customerId)}`,
-          {
-            headers: { 'x-org-id': '7762b6af-d052-4e74-b917-39e3c56e7914' },
-          }
+        const profRes = await customerApiFetch(
+          '/api/v1/auth/customer/profile',
+          undefined,
+          { preferToken: 'customer', tokenOverride: data.accessToken, orgIdOverride: targetOrgId },
         ).catch(() => null);
 
         if (profRes && profRes.ok) {
@@ -3642,11 +3621,12 @@ export default function CustomerDineInPage() {
           setEditDisplayName(data.displayName || '');
         }
 
-        // Fetch real diner profiles from PostgreSQL database
-        await fetchCustomerDinerProfiles(data.customerId);
+        await fetchCustomerDinerProfiles(data.customerId, data.accessToken);
 
         setIsAuthModalOpen(false);
         setAuthStep('PHONE');
+        setAuthDevCode(null);
+        setCustomerOtpInput('');
         showToast(
           data.displayName
             ? `Signed in as ${data.displayName}!`
@@ -3654,10 +3634,10 @@ export default function CustomerDineInPage() {
         );
         return;
       } else {
-        setAuthError(data.message || 'Invalid verification code. Please check and try again.');
+        setAuthError(data.detail || data.message || 'Invalid verification code. Please check and try again.');
       }
     } catch {
-      setAuthError('Network error connecting to database API.');
+      setAuthError('Network error connecting to authentication API.');
     } finally {
       setAuthLoading(false);
     }
@@ -3665,16 +3645,17 @@ export default function CustomerDineInPage() {
 
   // Profile Name Update in Database
   const handleUpdateProfileName = async () => {
-    if (!customerId || !editDisplayName.trim()) return;
+    if (!customerToken || !editDisplayName.trim()) return;
     try {
-      const res = await fetch('/api/v1/auth/customer/profile', {
-        method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-org-id': '7762b6af-d052-4e74-b917-39e3c56e7914',
+      const res = await customerApiFetch(
+        '/api/v1/auth/customer/profile',
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ displayName: editDisplayName.trim() }),
         },
-        body: JSON.stringify({ customerId, displayName: editDisplayName.trim() }),
-      });
+        { preferToken: 'customer', tokenOverride: customerToken, orgIdOverride: activeOrgId },
+      );
       if (res.ok) {
         const updated = await res.json();
         setCustomerProfile(updated);
@@ -3697,45 +3678,48 @@ export default function CustomerDineInPage() {
 
     setPaymentLoading(true);
     try {
-      const res = await fetch('/api/v1/customer/payments', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          order_id: targetOrder.id,
-          idempotency_key: crypto.randomUUID(),
-          method: selectedPaymentMethod === 'UPI' ? 'UPI' : 'CASH',
-        }),
-      });
+      const res = await customerApiFetch(
+        '/api/v1/customer/payments',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            order_id: targetOrder.id,
+            idempotency_key: crypto.randomUUID(),
+            method: selectedPaymentMethod === 'UPI' ? 'UPI' : 'PAY_AT_COUNTER',
+          }),
+        },
+        { preferToken: 'guest' },
+      );
 
       if (res.ok) {
         const payData = await res.json();
         if (selectedPaymentMethod === 'CASH') {
-          await fetch(`/api/v1/customer/payments/${payData.id}/simulate-success`, { method: 'POST' }).catch(() => {});
           setCartLines([]);
           setIsCartOpen(false);
-          setPaymentSuccessData({ paymentId: payData.id, totalPaise: targetOrder.total_paise });
           if (activeSessionId) fetchSessionOrders(activeSessionId);
           setOrdersFilterTab('PREPARING');
           setIsOrdersHistoryOpen(true);
-          showToast('Order confirmed! Cash will be collected by staff at table 💵');
+          showToast('Counter payment request sent — please pay staff at table/counter 💵');
         } else {
+          const checkout = payData.checkoutPayload || {};
           setPaymentQrData({
             paymentId: payData.id,
             orderId: targetOrder.id,
             sessionId: activeSessionId,
-            redirectUrl: payData.checkoutPayload?.redirectUrl,
-            qrCodeUrl:
-              payData.checkoutPayload?.qrCodeUrl ||
-              `https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=upi://pay?pa=royalspicebistro@icici&am=${(targetOrder.total_paise / 100).toFixed(2)}`,
-            upiString:
-              payData.checkoutPayload?.upiString ||
-              `upi://pay?pa=royalspicebistro@icici&am=${(targetOrder.total_paise / 100).toFixed(2)}`,
+            redirectUrl: checkout.redirectUrl,
+            qrCodeUrl: checkout.qrCodeUrl || '',
+            upiString: checkout.upiString || '',
           });
           setIsPaymentModalOpen(true);
         }
+      } else {
+        const err = await res.json().catch(() => ({}));
+        showToast(err.detail || err.message || 'Unable to start payment.');
       }
     } catch (err) {
       console.error('Payment initiation error:', err);
+      showToast('Payment initiation failed.');
     } finally {
       setPaymentLoading(false);
     }
@@ -3745,68 +3729,13 @@ export default function CustomerDineInPage() {
     if (!paymentQrData) return;
     setPaymentLoading(true);
     try {
-      if (paymentQrData.paymentId && !paymentQrData.paymentId.startsWith('pay_')) {
-        await fetch(`/api/v1/customer/payments/${paymentQrData.paymentId}/simulate-success`, {
-          method: 'POST',
-        });
-      }
       const targetOrderId = paymentQrData.orderId;
       const targetOrder = sessionOrders.find((o) => (targetOrderId ? o.id === targetOrderId : o.status !== 'CANCELLED')) || sessionOrders[0];
-
-      // Optimistically ensure order and its items are set to CONFIRMED (new order for kitchen) and PAID
-      setSessionOrders((prev) => {
-        let found = false;
-        const next: TableOrderRecord[] = prev.map((ord) => {
-          if ((targetOrderId && ord.id === targetOrderId) || (!targetOrderId && ord.status !== 'CANCELLED')) {
-            found = true;
-            return {
-              ...ord,
-              status: 'CONFIRMED' as const,
-              payment_status: 'PAID' as const,
-              payment_method: 'UPI',
-              payment_settled_at: new Date().toISOString(),
-              items: ord.items.map((it) => ({
-                ...it,
-                status: it.status === 'CANCELLED' ? 'CANCELLED' : it.status === 'PREPARING' ? 'PREPARING' : 'PENDING',
-              })),
-            };
-          }
-          return ord;
-        });
-
-        if (!found && targetOrderId) {
-          const freshOrd: TableOrderRecord = {
-            id: targetOrderId,
-            table_number: selectedTable || 'T04',
-            status: 'CONFIRMED',
-            subtotal_paise: cartSubtotalPaise,
-            tax_paise: gstPaise,
-            total_paise: targetOrder ? targetOrder.total_paise : cartGrandTotalPaise,
-            created_at: new Date().toISOString(),
-            payment_status: 'PAID',
-            payment_method: 'UPI',
-            payment_settled_at: new Date().toISOString(),
-            items: cartLines.map((c, cIdx) => ({
-              id: `item-${cIdx}-${Date.now()}`,
-              name_snapshot: c.item.name,
-              unit_price_paise: c.item.pricePaise,
-              quantity: c.quantity,
-              line_total_paise: c.item.pricePaise * c.quantity,
-              notes: c.notes,
-              status: 'PENDING',
-              modifiers: (c.selectedModifiers || []).map((m) => ({ name: m.name, price_paise: m.pricePaise })),
-            })),
-          };
-          return [freshOrd, ...next];
-        }
-        return next;
-      });
 
       setPaymentSuccessData({
         paymentId: paymentQrData.paymentId,
         totalPaise: targetOrder ? targetOrder.total_paise : cartGrandTotalPaise,
       });
-      // Cart cleared ONLY upon confirmed payment
       setCartLines([]);
       try {
         localStorage.removeItem('dineflow_customer_cart_v2');
@@ -3838,7 +3767,11 @@ export default function CustomerDineInPage() {
     let isSubscribed = true;
     const pollInterval = setInterval(async () => {
       try {
-        const vRes = await fetch(`/api/v1/customer/payments/${paymentId}/verify`);
+        const vRes = await customerApiFetch(
+          `/api/v1/customer/payments/${encodeURIComponent(paymentId)}/verify`,
+          undefined,
+          { preferToken: 'guest' },
+        );
         if (vRes.ok && isSubscribed) {
           const vData = await vRes.json();
           if (vData.status === 'PAID') {
@@ -3860,6 +3793,16 @@ export default function CustomerDineInPage() {
     const promptToSend = customPrompt || aiInput;
     if (!promptToSend.trim() || aiLoading) return;
 
+    const guestSession = loadGuestSession();
+    const tenant = resolveTenantIds(guestSession);
+    const targetOrgId = activeOrgId || tenant.orgId;
+    const targetOutletId = activeOutletId || tenant.outletId;
+
+    if (!guestSession?.guestSessionToken || !targetOrgId || !targetOutletId) {
+      showToast('Scan your table QR code to chat with the AI concierge.');
+      return;
+    }
+
     const userMsg = promptToSend.trim();
     setAiMessages((prev) => [...prev, { role: 'user', text: userMsg }]);
     if (!customPrompt) setAiInput('');
@@ -3867,8 +3810,8 @@ export default function CustomerDineInPage() {
 
     try {
       const payload: Record<string, unknown> = {
-        org_id: '7762b6af-d052-4e74-b917-39e3c56e7914',
-        outlet_id: '71ad00a6-d79b-4035-b563-bf9543fcfa86',
+        org_id: targetOrgId,
+        outlet_id: targetOutletId,
         message: userMsg,
       };
       if (aiSessionId) {
@@ -3878,11 +3821,15 @@ export default function CustomerDineInPage() {
         payload['table_session_id'] = activeSessionId;
       }
 
-      const res = await fetch('/api/v1/public/ai/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
+      const res = await customerApiFetch(
+        '/api/v1/public/ai/chat',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        },
+        { preferToken: 'guest' },
+      );
 
       if (res.ok) {
         const data = await res.json();
@@ -7574,11 +7521,8 @@ export default function CustomerDineInPage() {
                         marginBottom: '10px',
                       }}
                     >
-                      <span>🚀 Open PhonePe Sandbox Link ↗</span>
+                      <span>🚀 Open PhonePe Checkout ↗</span>
                     </a>
-                    <div style={{ fontSize: '0.72rem', color: '#94a3b8', marginBottom: '14px' }}>
-                      ⚡ Connected via Cloudflare Tunnel: https://titled-north-aware-praise.trycloudflare.com
-                    </div>
                   </div>
                 ) : (
                   <div style={{ fontSize: '0.82rem', color: '#94a3b8', marginBottom: '12px' }}>
@@ -7593,7 +7537,11 @@ export default function CustomerDineInPage() {
                       if (!paymentQrData?.paymentId) return;
                       setPaymentLoading(true);
                       try {
-                        const vRes = await fetch(`/api/v1/customer/payments/${paymentQrData.paymentId}/verify`);
+                        const vRes = await customerApiFetch(
+                          `/api/v1/customer/payments/${encodeURIComponent(paymentQrData.paymentId)}/verify`,
+                          undefined,
+                          { preferToken: 'guest' },
+                        );
                         if (vRes.ok) {
                           const vData = await vRes.json();
                           if (vData.status === 'PAID') {
@@ -7616,27 +7564,6 @@ export default function CustomerDineInPage() {
                     style={{ width: '100%' }}
                   >
                     {paymentLoading ? 'Verifying with PhonePe...' : '✓ Verify PhonePe Payment'}
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={async () => {
-                      await handleConfirmUpiPayment();
-                    }}
-                    disabled={paymentLoading}
-                    style={{
-                      width: '100%',
-                      padding: '8px 12px',
-                      borderRadius: '8px',
-                      background: 'rgba(255, 255, 255, 0.05)',
-                      border: '1px dashed rgba(255, 255, 255, 0.25)',
-                      color: '#cbd5e1',
-                      fontSize: '0.76rem',
-                      fontWeight: 600,
-                      cursor: 'pointer',
-                    }}
-                  >
-                    ⚡ Test Mode: Simulate Success Manually
                   </button>
 
                   <button
@@ -7700,48 +7627,84 @@ export default function CustomerDineInPage() {
         </div>
       )}
 
-      {/* Table Verification / Switcher Modal */}
+      {/* Table QR Verification Modal */}
       {isTableModalOpen && (
         <div className="filter-sheet-overlay" onClick={() => setIsTableModalOpen(false)}>
           <div className="modal-center-card" onClick={(e) => e.stopPropagation()}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
-              <h3 style={{ fontSize: '1.1rem', fontWeight: 800, color: '#fff' }}>Select Table Number</h3>
+              <h3 style={{ fontSize: '1.1rem', fontWeight: 800, color: '#fff' }}>Table QR Verification</h3>
               <button onClick={() => setIsTableModalOpen(false)} style={{ color: '#94a3b8', fontSize: '1.1rem' }}>
                 ✕
               </button>
             </div>
 
-            <p style={{ fontSize: '0.8rem', color: '#94a3b8', marginBottom: '14px' }}>
-              Select your dine-in table number to sync orders directly with the kitchen:
+            <p style={{ fontSize: '0.82rem', color: '#94a3b8', marginBottom: '14px', lineHeight: 1.5 }}>
+              {isTableVerified
+                ? `Active verified session for Table ${selectedTable}. To change tables, scan the signed QR code on your new table.`
+                : 'Please scan the QR code on your table using your phone camera, or paste the signed scan URL / QR token below:'}
             </p>
 
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '8px', marginBottom: '16px' }}>
-              {['T01', 'T02', 'T03', 'T04', 'T05', 'T06', 'T07', 'T08', 'T09', 'T10'].map((t) => (
-                <button
-                  key={t}
-                  onClick={() => {
-                    setSelectedTable(t);
-                    setIsTableModalOpen(false);
-                    showToast(`Switched to Table ${t}`);
-                  }}
-                  style={{
-                    padding: '10px 0',
-                    borderRadius: '8px',
-                    background: selectedTable === t ? 'var(--accent-gold)' : 'rgba(255,255,255,0.06)',
-                    color: selectedTable === t ? '#000' : '#fff',
-                    fontWeight: 800,
-                    fontSize: '0.85rem',
-                    border: '1px solid rgba(255,255,255,0.1)',
-                    cursor: 'pointer',
-                  }}
-                >
-                  {t}
-                </button>
-              ))}
-            </div>
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                const raw = manualQrInput.trim();
+                if (!raw) return;
+                let parsedToken = raw;
+                if (raw.includes('?')) {
+                  try {
+                    const url = raw.startsWith('http') ? new URL(raw) : new URL(raw, window.location.origin);
+                    const extracted = buildSignedQrTokenFromSearch(url.searchParams);
+                    if (extracted) parsedToken = extracted;
+                  } catch {
+                    // keep raw
+                  }
+                }
+                const session = await establishSignedTableSession(parsedToken, tablePax);
+                if (session) {
+                  setManualQrInput('');
+                  setIsTableModalOpen(false);
+                  showToast(`Verified Table ${session.tableNumber || 'session'}!`);
+                }
+              }}
+              style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginBottom: '12px' }}
+            >
+              <input
+                type="text"
+                placeholder="Paste signed QR link or token"
+                value={manualQrInput}
+                onChange={(e) => setManualQrInput(e.target.value)}
+                style={{
+                  padding: '10px 12px',
+                  borderRadius: '8px',
+                  background: 'rgba(255,255,255,0.06)',
+                  border: '1px solid rgba(255,255,255,0.14)',
+                  color: '#fff',
+                  fontSize: '0.82rem',
+                }}
+              />
+              <button type="submit" className="accordion-add-action-btn" style={{ width: '100%' }}>
+                Verify Signed Table QR
+              </button>
+            </form>
+
+            {isTableVerified && (
+              <button
+                type="button"
+                className="filter-clear-btn"
+                onClick={() => {
+                  clearGuestSession();
+                  setIsTableVerified(false);
+                  setActiveSessionId('');
+                  setSelectedTable('--');
+                }}
+                style={{ width: '100%', marginBottom: '8px' }}
+              >
+                Leave Current Table Session
+              </button>
+            )}
 
             <button className="filter-clear-btn" onClick={() => setIsTableModalOpen(false)} style={{ width: '100%' }}>
-              Cancel
+              Close
             </button>
           </div>
         </div>
@@ -7803,90 +7766,40 @@ export default function CustomerDineInPage() {
                 {authError && <div style={{ color: '#ef4444', fontSize: '0.78rem' }}>{authError}</div>}
 
                 <button className="accordion-add-action-btn" type="submit" disabled={authLoading}>
-                  {authLoading ? 'Generating Virtual OTP...' : 'Get Virtual OTP Code 📲'}
-                </button>
-
-                {/* Instant 1-Click Fast Bypass Button */}
-                <div style={{ textAlign: 'center', position: 'relative', margin: '4px 0' }}>
-                  <span style={{ fontSize: '0.72rem', color: '#64748b', background: '#121826', padding: '0 8px' }}>
-                    or bypass login directly
-                  </span>
-                </div>
-
-                <button
-                  type="button"
-                  onClick={() => handleCompleteVirtualLogin(customerPhoneInput)}
-                  style={{
-                    width: '100%',
-                    padding: '11px',
-                    borderRadius: '8px',
-                    background: 'rgba(16, 185, 129, 0.15)',
-                    border: '1px solid rgba(16, 185, 129, 0.4)',
-                    color: '#10b981',
-                    fontSize: '0.84rem',
-                    fontWeight: 800,
-                    cursor: 'pointer',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    gap: '6px',
-                  }}
-                >
-                  ⚡ 1-Click Fast Dev Sign In (Bypass)
+                  {authLoading ? 'Sending OTP...' : 'Send OTP Code 📲'}
                 </button>
               </form>
             ) : (
               <form onSubmit={handleVerifyOtp} style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                {/* Prominent Virtual OTP Banner Displayed on Screen */}
-                <div
-                  style={{
-                    background: 'linear-gradient(135deg, rgba(245, 158, 11, 0.18) 0%, rgba(217, 119, 6, 0.12) 100%)',
-                    border: '1.5px solid rgba(245, 158, 11, 0.45)',
-                    padding: '12px 14px',
-                    borderRadius: '10px',
-                    textAlign: 'center',
-                  }}
-                >
-                  <div style={{ fontSize: '0.74rem', color: '#fbbf24', textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: 800, marginBottom: '2px' }}>
-                    ⚡ Virtual OTP Code:
-                  </div>
-                  <div style={{ fontSize: '1.7rem', fontWeight: 900, color: '#fbbf24', letterSpacing: '0.25em', margin: '2px 0' }}>
-                    {authDevCode || '123456'}
-                  </div>
-                  <div style={{ fontSize: '0.72rem', color: '#cbd5e1', marginBottom: '8px' }}>
-                    Virtual code on this system · No SMS/network needed
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setCustomerOtpInput(authDevCode || '123456');
-                      handleCompleteVirtualLogin(customerPhoneInput);
-                    }}
+                {authDevCode && (
+                  <div
                     style={{
-                      padding: '7px 18px',
-                      borderRadius: '6px',
-                      background: 'linear-gradient(135deg, #f59e0b, #d97706)',
-                      color: '#000',
-                      fontWeight: 800,
-                      fontSize: '0.78rem',
-                      border: 'none',
-                      cursor: 'pointer',
-                      boxShadow: '0 2px 8px rgba(245, 158, 11, 0.35)',
+                      background: 'linear-gradient(135deg, rgba(245, 158, 11, 0.18) 0%, rgba(217, 119, 6, 0.12) 100%)',
+                      border: '1.5px solid rgba(245, 158, 11, 0.45)',
+                      padding: '12px 14px',
+                      borderRadius: '10px',
+                      textAlign: 'center',
                     }}
                   >
-                    Auto-Fill &amp; Proceed ➔
-                  </button>
-                </div>
+                    <div style={{ fontSize: '0.74rem', color: '#fbbf24', textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: 800, marginBottom: '2px' }}>
+                      Dev Preview OTP Code:
+                    </div>
+                    <div style={{ fontSize: '1.5rem', fontWeight: 900, color: '#fbbf24', letterSpacing: '0.25em', margin: '2px 0' }}>
+                      {authDevCode}
+                    </div>
+                  </div>
+                )}
 
                 <p style={{ fontSize: '0.8rem', color: '#94a3b8', margin: 0 }}>
-                  Enter code for +91 {customerPhoneInput || '9876543210'}:
+                  Enter 6-digit OTP code sent to +91 {customerPhoneInput}:
                 </p>
 
                 <input
                   type="text"
-                  placeholder="123456"
+                  maxLength={6}
+                  placeholder="6-digit OTP"
                   value={customerOtpInput}
-                  onChange={(e) => setCustomerOtpInput(e.target.value)}
+                  onChange={(e) => setCustomerOtpInput(e.target.value.replace(/\D/g, ''))}
                   style={{
                     padding: '10px 14px',
                     background: 'rgba(255,255,255,0.06)',
@@ -7908,7 +7821,11 @@ export default function CustomerDineInPage() {
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '2px' }}>
                   <button
                     type="button"
-                    onClick={() => setAuthStep('PHONE')}
+                    onClick={() => {
+                      setAuthStep('PHONE');
+                      setAuthDevCode(null);
+                      setCustomerOtpInput('');
+                    }}
                     style={{
                       background: 'transparent',
                       border: 'none',
@@ -7919,21 +7836,6 @@ export default function CustomerDineInPage() {
                     }}
                   >
                     ← Change number
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleCompleteVirtualLogin(customerPhoneInput)}
-                    style={{
-                      background: 'transparent',
-                      border: 'none',
-                      color: '#10b981',
-                      fontSize: '0.74rem',
-                      fontWeight: 700,
-                      cursor: 'pointer',
-                      padding: 0,
-                    }}
-                  >
-                    ⚡ Skip to login
                   </button>
                 </div>
               </form>
@@ -8373,8 +8275,7 @@ export default function CustomerDineInPage() {
                     setCustomerProfile(null);
                     setEditDisplayName('');
                     setDinerProfiles([]);
-                    localStorage.removeItem('dineflow_customer_token');
-                    localStorage.removeItem('dineflow_customer_id');
+                    clearCustomerAuth();
                     localStorage.removeItem('dineflow_diner_profiles');
                     if (currentCustId) {
                       localStorage.removeItem(`dineflow_diner_profiles_${currentCustId}`);

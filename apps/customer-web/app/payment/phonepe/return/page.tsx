@@ -2,6 +2,7 @@
 
 import React, { useEffect, useState, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
+import { customerApiFetch } from '../../../lib/guest-session';
 
 function PhonePeReturnContent() {
   const router = useRouter();
@@ -17,7 +18,9 @@ function PhonePeReturnContent() {
     if (!orderId) return;
     setLoading(true);
     try {
-      const res = await fetch(`/api/v1/customer/payments/verify-order?orderId=${encodeURIComponent(orderId)}`);
+      const res = await customerApiFetch(
+        `/api/v1/customer/payments/verify-order?orderId=${encodeURIComponent(orderId)}`,
+      );
       if (res.ok) {
         const data = await res.json();
         if (data.status === 'PAID') {
@@ -28,25 +31,6 @@ function PhonePeReturnContent() {
           }, 2000);
           return;
         }
-      }
-    } catch {}
-    setLoading(false);
-  };
-
-  const handleSimulateSandbox = async () => {
-    if (!orderId) return;
-    setLoading(true);
-    try {
-      const res = await fetch(`/api/v1/customer/payments/simulate-order-success?orderId=${encodeURIComponent(orderId)}`, {
-        method: 'POST',
-      });
-      if (res.ok) {
-        setStatus('SUCCESS');
-        setLoading(false);
-        setTimeout(() => {
-          router.push(`/?payment_success=true&order_id=${encodeURIComponent(orderId)}`);
-        }, 1500);
-        return;
       }
     } catch {}
     setLoading(false);
@@ -71,7 +55,9 @@ function PhonePeReturnContent() {
         if (!isSubscribed) return;
         attempts++;
         try {
-          const res = await fetch(`/api/v1/customer/payments/verify-order?orderId=${encodeURIComponent(orderId)}`);
+          const res = await customerApiFetch(
+            `/api/v1/customer/payments/verify-order?orderId=${encodeURIComponent(orderId)}`,
+          );
           if (res.ok) {
             const data = await res.json();
             if (data.status === 'PAID') {
@@ -259,22 +245,6 @@ function PhonePeReturnContent() {
                 }}
               >
                 🔄 Re-check Payment Status Now
-              </button>
-              <button
-                onClick={handleSimulateSandbox}
-                style={{
-                  width: '100%',
-                  padding: '11px',
-                  borderRadius: '10px',
-                  background: 'rgba(245, 158, 11, 0.15)',
-                  color: '#f59e0b',
-                  fontWeight: 700,
-                  fontSize: '0.84rem',
-                  border: '1px dashed rgba(245, 158, 11, 0.4)',
-                  cursor: 'pointer',
-                }}
-              >
-                ⚡ Sandbox Test: Confirm &amp; Send to Kitchen
               </button>
               <button
                 onClick={() => router.push('/?payment_cancelled=true')}
