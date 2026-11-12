@@ -27,11 +27,10 @@ export interface StaffMember {
   username?: string;
   phone: string;
   role: 'OWNER' | 'MANAGER' | 'CAPTAIN' | 'KITCHEN' | 'CASHIER' | 'WAITER';
-  pin: string;
-  password?: string;
   avatar: string;
   outletId: string | null;
   isActive: boolean;
+  mfaEnrolled?: boolean;
 }
 
 export interface MenuItem {
@@ -272,13 +271,12 @@ export const ALL_STAFF_MEMBERS: StaffMember[] = [
     name: 'Vikram Malhotra',
     email: 'owner@royalspice.in',
     username: 'owner',
-    password: 'ExecutiveSecure2026!',
     phone: '+919876543101',
     role: 'OWNER',
-    pin: '4567',
     avatar: '👔',
     outletId: null, // Org-wide access
     isActive: true,
+    mfaEnrolled: true,
   },
   {
     id: 'c0000000-0000-0000-0000-000000000002',
@@ -286,13 +284,12 @@ export const ALL_STAFF_MEMBERS: StaffMember[] = [
     name: 'Anand Joshi',
     email: 'manager@royalspice.in',
     username: 'manager',
-    password: 'StaffPass@2026',
     phone: '+919876543102',
     role: 'MANAGER',
-    pin: '5678',
     avatar: '📋',
     outletId: '71ad00a6-d79b-4035-b563-bf9543fcfa86',
     isActive: true,
+    mfaEnrolled: true,
   },
   {
     id: 'c0000000-0000-0000-0000-000000000003',
@@ -300,10 +297,8 @@ export const ALL_STAFF_MEMBERS: StaffMember[] = [
     name: 'Rajesh Sharma',
     email: 'rajesh.captain@royalspice.in',
     username: 'captain',
-    password: 'StaffPass@2026',
     phone: '+919876543103',
     role: 'CAPTAIN',
-    pin: '1234',
     avatar: '👨‍💼',
     outletId: '71ad00a6-d79b-4035-b563-bf9543fcfa86',
     isActive: true,
@@ -314,10 +309,8 @@ export const ALL_STAFF_MEMBERS: StaffMember[] = [
     name: 'Chef Amit Roy',
     email: 'chef.amit@royalspice.in',
     username: 'kitchen',
-    password: 'StaffPass@2026',
     phone: '+919876543104',
     role: 'KITCHEN',
-    pin: '2345',
     avatar: '👨‍🍳',
     outletId: '71ad00a6-d79b-4035-b563-bf9543fcfa86',
     isActive: true,
@@ -328,10 +321,8 @@ export const ALL_STAFF_MEMBERS: StaffMember[] = [
     name: 'Pooja Iyer',
     email: 'pooja.cashier@royalspice.in',
     username: 'cashier',
-    password: 'StaffPass@2026',
     phone: '+919876543105',
     role: 'CASHIER',
-    pin: '3456',
     avatar: '👩‍💼',
     outletId: '71ad00a6-d79b-4035-b563-bf9543fcfa86',
     isActive: true,
@@ -342,10 +333,8 @@ export const ALL_STAFF_MEMBERS: StaffMember[] = [
     name: 'Suresh Kumar',
     email: 'suresh.waiter@royalspice.in',
     username: 'waiter',
-    password: 'StaffPass@2026',
     phone: '+919876543106',
     role: 'WAITER',
-    pin: '7890',
     avatar: '🤵',
     outletId: '71ad00a6-d79b-4035-b563-bf9543fcfa86',
     isActive: true,
@@ -1401,7 +1390,8 @@ export function saveStoredOutlet(outlet: Outlet): Outlet[] {
 export function getStoredStaff(): StaffMember[] {
   if (typeof window === 'undefined') return ALL_STAFF_MEMBERS;
   try {
-    const raw = localStorage.getItem('dineflow_custom_staff');
+    const raw = localStorage.getItem('dineflow_custom_staff_v2');
+    localStorage.removeItem('dineflow_custom_staff');
     if (raw) {
       const custom: StaffMember[] = JSON.parse(raw);
       const map = new Map<string, StaffMember>();
@@ -1412,8 +1402,6 @@ export function getStoredStaff(): StaffMember[] {
           ...existing,
           ...s,
           username: s.username || existing?.username || s.email.split('@')[0],
-          password: s.password || existing?.password || 'StaffPass@2026',
-          pin: s.pin || existing?.pin || '1234',
         });
       });
       return Array.from(map.values());
@@ -1426,8 +1414,21 @@ export function saveStoredStaffMember(staff: StaffMember): StaffMember[] {
   if (typeof window === 'undefined') return ALL_STAFF_MEMBERS;
   try {
     const current = getStoredStaff();
-    const updated = [staff, ...current.filter((s) => s.id !== staff.id)];
-    localStorage.setItem('dineflow_custom_staff', JSON.stringify(updated));
+    const sanitized: StaffMember = {
+      id: staff.id,
+      orgId: staff.orgId,
+      name: staff.name,
+      email: staff.email,
+      username: staff.username,
+      phone: staff.phone,
+      role: staff.role,
+      avatar: staff.avatar,
+      outletId: staff.outletId,
+      isActive: staff.isActive,
+      mfaEnrolled: staff.mfaEnrolled,
+    };
+    const updated = [sanitized, ...current.filter((s) => s.id !== staff.id)];
+    localStorage.setItem('dineflow_custom_staff_v2', JSON.stringify(updated));
     return updated;
   } catch {}
   return ALL_STAFF_MEMBERS;
@@ -1438,155 +1439,43 @@ export function deleteStoredStaffMember(staffId: string): StaffMember[] {
   try {
     const current = getStoredStaff();
     const updated = current.filter((s) => s.id !== staffId);
-    localStorage.setItem('dineflow_custom_staff', JSON.stringify(updated));
+    localStorage.setItem('dineflow_custom_staff_v2', JSON.stringify(updated));
     return updated;
   } catch {}
   return ALL_STAFF_MEMBERS;
 }
 
-export function getStoredOwnerPassword(): string {
-  if (typeof window === 'undefined') return 'ExecutiveSecure2026!';
-  try {
-    const saved = localStorage.getItem('dineflow_owner_password');
-    if (saved && saved.trim()) return saved.trim();
-  } catch {}
-  return 'ExecutiveSecure2026!';
-}
-
-export function saveStoredOwnerPassword(password: string): void {
-  if (typeof window === 'undefined') return;
-  try {
-    localStorage.setItem('dineflow_owner_password', password.trim());
-  } catch {}
-}
-
 // -----------------------------------------------------------------------------
-// UNIFIED AUTHENTICATION & SESSION PERSISTENCE
+// SESSION READ HELPERS (backed by verified JWT storage in auth-client.ts)
 // -----------------------------------------------------------------------------
-
-export const AUTH_USER_STORAGE_KEY = 'dineflow_logged_in_user';
-export const OWNER_SESSION_FLAG_KEY = 'dineflow_is_owner_session';
+import { getConsoleAuthState } from './auth-client';
 
 export function getLoggedInUser(): StaffMember | null {
-  if (typeof window === 'undefined') return null;
-  try {
-    const raw = localStorage.getItem(AUTH_USER_STORAGE_KEY);
-    if (raw) {
-      return JSON.parse(raw);
-    }
-  } catch {}
-  return null;
-}
-
-export function setLoggedInUser(user: StaffMember, isOwnerImpersonating: boolean = false): void {
-  if (typeof window === 'undefined') return;
-  try {
-    localStorage.setItem(AUTH_USER_STORAGE_KEY, JSON.stringify(user));
-    if (user.role === 'OWNER') {
-      localStorage.setItem(OWNER_SESSION_FLAG_KEY, 'true');
-    } else if (!isOwnerImpersonating) {
-      // Normal staff login clears any previous owner override
-      localStorage.removeItem(OWNER_SESSION_FLAG_KEY);
-    }
-    window.dispatchEvent(new CustomEvent('dineflow-auth-changed', { detail: user }));
-  } catch {}
-}
-
-export function clearLoggedInUser(): void {
-  if (typeof window === 'undefined') return;
-  try {
-    localStorage.removeItem(AUTH_USER_STORAGE_KEY);
-    localStorage.removeItem(OWNER_SESSION_FLAG_KEY);
-    window.dispatchEvent(new CustomEvent('dineflow-auth-changed', { detail: null }));
-  } catch {}
-}
-
-export function isOwnerSessionActive(): boolean {
-  if (typeof window === 'undefined') return false;
-  try {
-    return localStorage.getItem(OWNER_SESSION_FLAG_KEY) === 'true';
-  } catch {}
-  return false;
-}
-
-export function authenticateUser(identifier: string, secret: string): {
-  success: boolean;
-  user?: StaffMember;
-  error?: string;
-} {
-  const cleanId = identifier.trim().toLowerCase();
-  const cleanSecret = secret.trim();
-
-  if (!cleanId || !cleanSecret) {
-    return { success: false, error: 'Please enter both username/email and password/PIN.' };
+  const session = getConsoleAuthState();
+  if (!session) return null;
+  const known = getStoredStaff().find(
+    (s) => s.id === session.user.id || s.email.toLowerCase() === session.user.email.toLowerCase(),
+  );
+  if (known) {
+    return {
+      ...known,
+      id: session.user.id,
+      orgId: session.user.orgId,
+      outletId: session.user.outletId,
+      role: (session.user.role as StaffMember['role']) || known.role,
+    };
   }
-
-  const staffList = getStoredStaff();
-  const ownerMasterPass = getStoredOwnerPassword();
-
-  // 1. Direct check against all staff members (including custom and default)
-  const matched = staffList.find((s) => {
-    const sUsername = s.username?.toLowerCase() || '';
-    const sEmail = s.email.toLowerCase();
-    const sEmailPrefix = s.email.split('@')[0]?.toLowerCase() || '';
-    const sRole = s.role.toLowerCase();
-    const sName = s.name.toLowerCase();
-    const sNameDot = sName.replace(/\s+/g, '.');
-    const sNameNoSpace = sName.replace(/\s+/g, '');
-    const sFirstName = sName.split(' ')[0] || '';
-    const sLastName = sName.split(' ').slice(1).join(' ') || '';
-
-    const matchesId =
-      sUsername === cleanId ||
-      sEmail === cleanId ||
-      sEmailPrefix === cleanId ||
-      sRole === cleanId ||
-      sName === cleanId ||
-      sNameDot === cleanId ||
-      sNameNoSpace === cleanId ||
-      sFirstName === cleanId ||
-      sLastName === cleanId;
-
-    if (!matchesId) return false;
-
-    // Check secrets: password, PIN, universal fallback passwords, or owner master password
-    const matchesPass =
-      s.password === cleanSecret ||
-      s.pin === cleanSecret ||
-      cleanSecret === 'StaffPass@2026' ||
-      cleanSecret === 'PilotLaunch2026!' ||
-      (s.role === 'OWNER' && (cleanSecret === ownerMasterPass || cleanSecret === 'ExecutiveSecure2026!'));
-
-    return matchesPass;
-  });
-
-  if (matched) {
-    return { success: true, user: matched };
-  }
-
-  // 2. Owner fallback: if username is owner/vikram and owner password or PIN is provided
-  if (
-    (cleanId === 'owner' || cleanId === 'owner@royalspice.in' || cleanId === 'vikram' || cleanId === 'vikram malhotra') &&
-    (cleanSecret === ownerMasterPass || cleanSecret === 'ExecutiveSecure2026!' || cleanSecret === '4567')
-  ) {
-    const ownerMember = staffList.find((s) => s.role === 'OWNER') || ALL_STAFF_MEMBERS[0]!;
-    return { success: true, user: ownerMember };
-  }
-
-  // 3. Fallback for role keywords if user entered role name and that role's PIN or default pass
-  const roleMatch = staffList.find((s) => s.role.toLowerCase() === cleanId);
-  if (roleMatch) {
-    if (
-      cleanSecret === roleMatch.pin ||
-      cleanSecret === roleMatch.password ||
-      cleanSecret === 'StaffPass@2026' ||
-      cleanSecret === 'PilotLaunch2026!'
-    ) {
-      return { success: true, user: roleMatch };
-    }
-  }
-
-  return { success: false, error: 'Invalid username/email or password/PIN.' };
+  return {
+    id: session.user.id,
+    orgId: session.user.orgId,
+    name: session.user.name || session.user.email,
+    email: session.user.email,
+    phone: '',
+    role: (session.user.role as StaffMember['role']) || 'WAITER',
+    avatar: session.user.role === 'OWNER' ? '👔' : '👤',
+    outletId: session.user.outletId,
+    isActive: true,
+  };
 }
 
 export function getBranchData(outletId: string): BranchData {

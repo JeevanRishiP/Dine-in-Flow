@@ -13,10 +13,6 @@ import {
   formatOrderDateTime,
   deriveOrderStatusFromItems,
   getLoggedInUser,
-  setLoggedInUser,
-  clearLoggedInUser,
-  isOwnerSessionActive,
-  authenticateUser,
   type Outlet,
   type StaffMember,
   type Order,
@@ -26,6 +22,14 @@ import {
   type MenuItem,
   type ServiceCall,
 } from '../lib/restaurant-db';
+import {
+  getConsoleAuthState,
+  loginStaffRemote,
+  verifyStaffMfaRemote,
+  logoutStaffRemote,
+  consoleAuthFetch,
+  isAuthStateExpired,
+} from '../lib/auth-client';
 
 type StaffTab = 'ORDERS' | 'TABLES' | 'PASS' | 'STOCK' | 'CALLS' | 'POS' | 'MORE';
 
@@ -113,17 +117,9 @@ export default function StaffWebApp() {
 
   const [currentUser, setCurrentUser] = useState<StaffMember | null>(() => {
     if (typeof window !== 'undefined') {
-      const logged = getLoggedInUser();
-      if (logged) return logged;
-      const params = new URLSearchParams(window.location.search);
-      const roleParam = params.get('role');
-      if (roleParam) {
-        const list = getStoredStaff();
-        const found = list.find((s) => s.role === roleParam.toUpperCase());
-        if (found) {
-          setLoggedInUser(found);
-          return found;
-        }
+      const state = getConsoleAuthState();
+      if (state && !isAuthStateExpired(state, 0)) {
+        return getLoggedInUser();
       }
     }
     return null;
@@ -131,33 +127,40 @@ export default function StaffWebApp() {
 
   const [isOwnerMode, setIsOwnerMode] = useState<boolean>(() => {
     if (typeof window !== 'undefined') {
-      return isOwnerSessionActive() || getLoggedInUser()?.role === 'OWNER';
+      return getConsoleAuthState()?.user.role === 'OWNER';
     }
     return false;
   });
 
-  // Authentication Guard: Ensure a valid logged in session exists
+  const [ownerViewRole, setOwnerViewRole] = useState<StaffMember['role'] | null>(null);
+
+  // Authentication Guard: Ensure a valid server-issued JWT session exists (never accept ?role= bypass)
   useEffect(() => {
+    const state = getConsoleAuthState();
     const user = getLoggedInUser();
-    if (!user) {
+    if (!state || !user) {
       router.push('/');
-    } else {
-      setCurrentUser(user);
-      setIsOwnerMode(isOwnerSessionActive() || user.role === 'OWNER');
+      return;
+    }
+    setCurrentUser(user);
+    setIsOwnerMode(state.user.role === 'OWNER');
+    if (user.outletId) {
+      setSelectedOutletId(user.outletId);
     }
   }, [router]);
 
   const [isLocked, setIsLocked] = useState(false);
-  const [lockAuthMode, setLockAuthMode] = useState<'PIN' | 'PASSWORD'>('PIN');
-  const [pinInput, setPinInput] = useState('');
+  const [lockMfaToken, setLockMfaToken] = useState('');
+  const [lockMfaCode, setLockMfaCode] = useState('');
   const [pinError, setPinError] = useState('');
   const [staffLoginUser, setStaffLoginUser] = useState('');
   const [staffLoginPass, setStaffLoginPass] = useState('');
   const [showStaffPass, setShowStaffPass] = useState(false);
   const [showSwitchUserModal, setShowSwitchUserModal] = useState(false);
 
-  // Active Role Configuration
-  const currentRole = currentUser?.role || 'CAPTAIN';
+  // Active Role Configuration (Owners may preview station views within their own OWNER JWT)
+  const currentRole =
+    isOwnerMode && ownerViewRole ? ownerViewRole : currentUser?.role || 'CAPTAIN';
   const roleConfig = ROLE_CONFIGS[currentRole] || ROLE_CONFIGS.CAPTAIN;
 
   // Sync stored outlets and staff when updated by Owner
@@ -179,13 +182,6 @@ export default function StaffWebApp() {
 
   // Navigation Tabs: ORDERS (KDS), TABLES (Floor Map), PASS (Food Pass), STOCK (86 Item Toggles), CALLS (Bells), POS (Cashier / POS)
   const [activeTab, setActiveTab] = useState<StaffTab>(() => {
-    if (typeof window !== 'undefined') {
-      const params = new URLSearchParams(window.location.search);
-      const roleParam = params.get('role');
-      if (roleParam && ROLE_CONFIGS[roleParam.toUpperCase() as StaffMember['role']]) {
-        return ROLE_CONFIGS[roleParam.toUpperCase() as StaffMember['role']].defaultTab;
-      }
-    }
     const role = currentUser?.role || 'CAPTAIN';
     return (ROLE_CONFIGS[role] || ROLE_CONFIGS.CAPTAIN).defaultTab;
   });
@@ -193,11 +189,11 @@ export default function StaffWebApp() {
   // Guard active tab to ensure the staff member only views allowed stations for their role
   useEffect(() => {
     if (!currentUser) return;
-    const config = ROLE_CONFIGS[currentUser.role] || ROLE_CONFIGS.CAPTAIN;
+    const config = ROLE_CONFIGS[currentRole] || ROLE_CONFIGS.CAPTAIN;
     if (!config.allowedTabs.includes(activeTab)) {
       setActiveTab(config.defaultTab);
     }
-  }, [currentUser?.role, currentUser?.id]);
+  }, [currentRole, currentUser?.id]);
 
   const [moreSubTab, setMoreSubTab] = useState<'PAYMENTS' | 'STAFF' | 'SETTINGS'>('PAYMENTS');
 
@@ -211,7 +207,14 @@ export default function StaffWebApp() {
   // Live Database Orders Sync
   const fetchLiveOrders = async () => {
     try {
-      const res = await fetch(`/api/v1/console/orders/feed?outlet_id=${selectedOutletId}`);
+      const res = await consoleAuthFetch(
+        `/api/v1/console/orders?outlet_id=${encodeURIComponent(selectedOutletId)}`,
+      );
+      if (res.status === 401) {
+        setConnectionStatus('offline');
+        setIsLocked(true);
+        return;
+      }
       if (res.ok) {
         const data = await res.json();
         const defaultActive = getBranchData(selectedOutletId).activeOrders;
@@ -384,85 +387,95 @@ export default function StaffWebApp() {
     };
   }, [isLocked]);
 
-  // Handle PIN unlock
-  const handlePinDigit = (digit: string) => {
-    if (pinInput.length < 4) {
-      const nextPin = pinInput + digit;
-      setPinInput(nextPin);
-      if (nextPin.length === 4) {
-        if ((currentUser && nextPin === currentUser.pin) || (isOwnerMode && nextPin === '4567')) {
-          setIsLocked(false);
-          setPinInput('');
-          setPinError('');
-        } else {
-          setPinError('Incorrect PIN. Please re-enter.');
-          setTimeout(() => {
-            setPinInput('');
-            setPinError('');
-          }, 800);
-        }
-      }
-    }
-  };
-
-  // Sign out handler: Clears session and redirects to common login
-  const handleSignOut = () => {
-    clearLoggedInUser();
+  // Sign out handler: Clears server session + local state and redirects to common login
+  const handleSignOut = async () => {
+    await logoutStaffRemote();
     router.push('/');
   };
 
-  // Owner user switch: Allows owner to switch to any staff role without logging out
+  // Owner station view preview (keeps real OWNER JWT; never spoofs another user's token)
   const handleOwnerSwitchUser = (targetStaff: StaffMember) => {
-    setLoggedInUser(targetStaff, true); // preserve owner session flag
-    setCurrentUser(targetStaff);
+    if (!isOwnerMode) return;
+    setOwnerViewRole(targetStaff.role);
     if (targetStaff.outletId) {
       setSelectedOutletId(targetStaff.outletId);
     }
     const uConfig = ROLE_CONFIGS[targetStaff.role] || ROLE_CONFIGS.CAPTAIN;
     setActiveTab(uConfig.defaultTab);
     setShowSwitchUserModal(false);
-    setPinInput('');
     setPinError('');
   };
 
-  // Handle Staff Username & Password login on Lock Screen
-  const handlePasswordLogin = (e: React.FormEvent) => {
+  // Handle server-verified Staff Email + Password (+ MFA) unlock on Lock Screen
+  const handlePasswordLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    const queryUser = staffLoginUser.trim();
-    const queryPass = staffLoginPass.trim();
-    if (!queryUser || !queryPass) {
-      setPinError('Please enter both username/email and password.');
+    const state = getConsoleAuthState();
+    const orgSlug = state?.user.orgSlug || '';
+    const emailToVerify = (staffLoginUser || state?.user.email || '').trim().toLowerCase();
+
+    if (!orgSlug) {
+      await logoutStaffRemote();
+      router.push('/');
       return;
     }
 
-    const authResult = authenticateUser(queryUser, queryPass);
-    if (authResult.success && authResult.user) {
-      const matched = authResult.user;
-
-      // If regular staff (not owner), they cannot hijack another staff member's locked station
-      if (!isOwnerMode && currentUser && matched.id !== currentUser.id) {
-        setPinError(`To switch from ${currentUser.name} to ${matched.name}, please Sign Out first.`);
+    if (lockMfaToken) {
+      const mfaResult = await verifyStaffMfaRemote({
+        preMfaToken: lockMfaToken,
+        code: lockMfaCode,
+        orgSlug,
+        email: emailToVerify,
+      });
+      if (!mfaResult.ok || !mfaResult.session) {
+        setPinError(mfaResult.error || 'Invalid authenticator code.');
         return;
       }
-
-      if (isOwnerMode) {
-        setLoggedInUser(matched, true);
-      } else {
-        setLoggedInUser(matched);
-      }
-      setCurrentUser(matched);
-      if (matched.outletId) {
-        setSelectedOutletId(matched.outletId);
-      }
-      const cfg = ROLE_CONFIGS[matched.role] || ROLE_CONFIGS.CAPTAIN;
-      setActiveTab(cfg.defaultTab);
       setIsLocked(false);
-      setPinInput('');
-      setPinError('');
+      setLockMfaToken('');
+      setLockMfaCode('');
       setStaffLoginPass('');
-    } else {
-      setPinError(authResult.error || 'Invalid credentials.');
+      setPinError('');
+      return;
     }
+
+    if (!emailToVerify || !staffLoginPass) {
+      setPinError('Please enter your staff email and password.');
+      return;
+    }
+
+    // Prevent switching accounts from a locked non-owner terminal without explicit Sign Out
+    if (!isOwnerMode && state?.user.email && emailToVerify !== state.user.email.toLowerCase()) {
+      setPinError(`Please unlock as ${state.user.email} or Sign Out to switch staff.`);
+      return;
+    }
+
+    const authResult = await loginStaffRemote({
+      orgSlug,
+      email: emailToVerify,
+      password: staffLoginPass,
+    });
+    if (!authResult.ok) {
+      setPinError(authResult.error || 'Invalid email or password.');
+      return;
+    }
+    if (authResult.requiresMfa && authResult.preMfaToken) {
+      setLockMfaToken(authResult.preMfaToken);
+      setLockMfaCode('');
+      setPinError('');
+      return;
+    }
+
+    const updated = getLoggedInUser();
+    if (updated) {
+      setCurrentUser(updated);
+      setIsOwnerMode(authResult.session?.user.role === 'OWNER');
+      if (updated.outletId) {
+        setSelectedOutletId(updated.outletId);
+      }
+    }
+    setIsLocked(false);
+    setPinError('');
+    setStaffLoginPass('');
   };
 
   // Order state transitions with PostgreSQL DB Persistence
@@ -503,10 +516,10 @@ export default function StaffWebApp() {
       setSelectedOrder((prev) => (prev ? { ...prev, status: nextStatus, needsAck: false } : null));
     }
 
-    // 2. Persist directly to PostgreSQL database via backend API
+    // 2. Persist directly to PostgreSQL database via authenticated backend API
     try {
       const apiStatus = nextStatus === 'PENDING_APPROVAL' ? 'PENDING' : nextStatus;
-      const res = await fetch(`/api/v1/console/orders/${orderId}/status/public`, {
+      const res = await consoleAuthFetch(`/api/v1/console/orders/${orderId}/status`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -518,6 +531,8 @@ export default function StaffWebApp() {
         delete localStatusOverrides.current[orderId];
         delete localItemStatusOverrides.current[orderId];
         fetchLiveOrders();
+      } else if (res.status === 401) {
+        setIsLocked(true);
       } else if (res.status !== 404) {
         delete localStatusOverrides.current[orderId];
         fetchLiveOrders();
@@ -528,7 +543,6 @@ export default function StaffWebApp() {
   };
 
   // Item-wise KDS transition: moves a single order_item to the next status without touching other items.
-  // Uses the public endpoint (no auth required from KDS tablet).
   const transitionItem = async (orderId: string, itemId: string, nextStatus: 'PREPARING' | 'READY' | 'SERVED') => {
     const existingOrder = orders.find((o) => o.id === orderId);
     const updatedOrderItems = existingOrder
@@ -557,9 +571,9 @@ export default function StaffWebApp() {
         return { ...o, status: derivedStatus, items: updatedItems };
       })
     );
-    // Persist to DB via public item-status endpoint
+    // Persist to DB via authenticated item-status endpoint
     try {
-      const res = await fetch(`/api/v1/console/orders/${orderId}/items/${itemId}/status/public`, {
+      const res = await consoleAuthFetch(`/api/v1/console/orders/${orderId}/items/${itemId}/status`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: nextStatus }),
@@ -573,6 +587,8 @@ export default function StaffWebApp() {
           }
         }
         fetchLiveOrders();
+      } else if (res.status === 401) {
+        setIsLocked(true);
       } else if (res.status !== 404) {
         // Real DB failure (e.g. invalid transition): revert optimistic override
         if (localItemStatusOverrides.current[orderId]) {
@@ -2441,66 +2457,10 @@ export default function StaffWebApp() {
         >
           <div style={{ textAlign: 'center', maxWidth: '360px', width: '100%' }}>
             <div style={{ fontSize: '48px', marginBottom: '12px' }}>{currentUser?.avatar || '🔒'}</div>
-            <h2 style={{ fontSize: '1.4rem', fontWeight: 800 }}>Welcome, {currentUser?.name}</h2>
+            <h2 style={{ fontSize: '1.4rem', fontWeight: 800 }}>Station Locked</h2>
             <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginBottom: '18px' }}>
-              Unlock {currentUser?.role} floor station
+              Verify credentials to unlock {currentRole} floor station ({currentUser?.email})
             </p>
-
-            {/* Mode Switcher: PIN vs Password */}
-            <div
-              style={{
-                display: 'flex',
-                background: 'rgba(255, 255, 255, 0.06)',
-                borderRadius: '8px',
-                padding: '4px',
-                marginBottom: '20px',
-                gap: '4px',
-              }}
-            >
-              <button
-                type="button"
-                onClick={() => {
-                  setLockAuthMode('PIN');
-                  setPinError('');
-                }}
-                style={{
-                  flex: 1,
-                  padding: '8px',
-                  borderRadius: '6px',
-                  border: 'none',
-                  fontSize: '0.82rem',
-                  fontWeight: 700,
-                  cursor: 'pointer',
-                  background: lockAuthMode === 'PIN' ? 'var(--accent-cyan)' : 'transparent',
-                  color: lockAuthMode === 'PIN' ? '#000' : 'var(--text-secondary)',
-                }}
-              >
-                🔢 4-Digit Quick PIN
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setLockAuthMode('PASSWORD');
-                  setPinError('');
-                  if (currentUser) {
-                    setStaffLoginUser(currentUser.username || currentUser.email.split('@')[0] || '');
-                  }
-                }}
-                style={{
-                  flex: 1,
-                  padding: '8px',
-                  borderRadius: '6px',
-                  border: 'none',
-                  fontSize: '0.82rem',
-                  fontWeight: 700,
-                  cursor: 'pointer',
-                  background: lockAuthMode === 'PASSWORD' ? 'var(--accent-cyan)' : 'transparent',
-                  color: lockAuthMode === 'PASSWORD' ? '#000' : 'var(--text-secondary)',
-                }}
-              >
-                🔑 Login with Password
-              </button>
-            </div>
 
             {pinError && (
               <div style={{ color: 'var(--accent-rose)', fontSize: '0.85rem', fontWeight: 700, marginBottom: '16px' }}>
@@ -2508,115 +2468,74 @@ export default function StaffWebApp() {
               </div>
             )}
 
-            {lockAuthMode === 'PIN' ? (
-              <>
-                {/* PIN Dots */}
-                <div style={{ display: 'flex', justifyContent: 'center', gap: '14px', marginBottom: '24px' }}>
-                  {[0, 1, 2, 3].map((idx) => (
-                    <div
-                      key={idx}
-                      style={{
-                        width: '18px',
-                        height: '18px',
-                        borderRadius: '50%',
-                        background: pinInput.length > idx ? 'var(--accent-cyan)' : 'rgba(255, 255, 255, 0.15)',
-                        boxShadow: pinInput.length > idx ? '0 0 12px var(--accent-cyan)' : 'none',
-                        transition: 'all 0.15s ease',
-                      }}
+            <form onSubmit={handlePasswordLogin} style={{ display: 'flex', flexDirection: 'column', gap: '12px', textAlign: 'left', marginBottom: '20px' }}>
+              {!lockMfaToken ? (
+                <>
+                  <div>
+                    <label className="form-label" style={{ fontSize: '0.8rem' }}>Staff Email</label>
+                    <input
+                      type="email"
+                      required
+                      placeholder={currentUser?.email || 'staff@restaurant.com'}
+                      value={staffLoginUser || currentUser?.email || ''}
+                      onChange={(e) => setStaffLoginUser(e.target.value)}
+                      className="form-input"
+                      style={{ padding: '10px 12px' }}
                     />
-                  ))}
-                </div>
-
-                {/* Number Keypad */}
-                <div
-                  style={{
-                    display: 'grid',
-                    gridTemplateColumns: 'repeat(3, 1fr)',
-                    gap: '12px',
-                    marginBottom: '20px',
-                  }}
-                >
-                  {['1', '2', '3', '4', '5', '6', '7', '8', '9', 'C', '0', '⌫'].map((k) => (
-                    <button
-                      key={k}
-                      type="button"
-                      onClick={() => {
-                        if (k === 'C') {
-                          setPinInput('');
-                        } else if (k === '⌫') {
-                          setPinInput((prev) => prev.slice(0, -1));
-                        } else {
-                          handlePinDigit(k);
-                        }
-                      }}
-                      style={{
-                        height: '56px',
-                        borderRadius: '12px',
-                        background: 'rgba(255, 255, 255, 0.06)',
-                        border: '1px solid var(--border-light)',
-                        color: '#fff',
-                        fontSize: '1.3rem',
-                        fontWeight: 700,
-                      }}
-                    >
-                      {k}
-                    </button>
-                  ))}
-                </div>
-
-                <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '14px' }}>
-                  Hint: {currentUser?.name} PIN: {currentUser?.pin || '1234'}
-                </div>
-              </>
-            ) : (
-              <form onSubmit={handlePasswordLogin} style={{ display: 'flex', flexDirection: 'column', gap: '12px', textAlign: 'left', marginBottom: '20px' }}>
+                  </div>
+                  <div>
+                    <label className="form-label" style={{ fontSize: '0.8rem' }}>Password</label>
+                    <div style={{ position: 'relative' }}>
+                      <input
+                        type={showStaffPass ? 'text' : 'password'}
+                        required
+                        minLength={8}
+                        placeholder="••••••••"
+                        value={staffLoginPass}
+                        onChange={(e) => setStaffLoginPass(e.target.value)}
+                        className="form-input"
+                        style={{ padding: '10px 12px', paddingRight: '36px' }}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowStaffPass(!showStaffPass)}
+                        style={{
+                          position: 'absolute',
+                          right: '8px',
+                          top: '50%',
+                          transform: 'translateY(-50%)',
+                          background: 'none',
+                          border: 'none',
+                          cursor: 'pointer',
+                          fontSize: '13px',
+                        }}
+                      >
+                        {showStaffPass ? '🙈' : '👁️'}
+                      </button>
+                    </div>
+                  </div>
+                </>
+              ) : (
                 <div>
-                  <label className="form-label" style={{ fontSize: '0.8rem' }}>Username or Email</label>
+                  <label className="form-label" style={{ fontSize: '0.8rem' }}>Authenticator Code</label>
                   <input
                     type="text"
                     required
-                    placeholder="e.g. rajesh.captain"
-                    value={staffLoginUser}
-                    onChange={(e) => setStaffLoginUser(e.target.value)}
+                    minLength={6}
+                    maxLength={32}
+                    autoFocus
+                    placeholder="6-digit TOTP code"
+                    value={lockMfaCode}
+                    onChange={(e) => setLockMfaCode(e.target.value)}
                     className="form-input"
-                    style={{ padding: '10px 12px' }}
+                    style={{ padding: '10px 12px', textAlign: 'center', letterSpacing: '2px' }}
                   />
                 </div>
-                <div>
-                  <label className="form-label" style={{ fontSize: '0.8rem' }}>Password (Set by Owner)</label>
-                  <div style={{ position: 'relative' }}>
-                    <input
-                      type={showStaffPass ? 'text' : 'password'}
-                      required
-                      placeholder="••••••••"
-                      value={staffLoginPass}
-                      onChange={(e) => setStaffLoginPass(e.target.value)}
-                      className="form-input"
-                      style={{ padding: '10px 12px', paddingRight: '36px' }}
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowStaffPass(!showStaffPass)}
-                      style={{
-                        position: 'absolute',
-                        right: '8px',
-                        top: '50%',
-                        transform: 'translateY(-50%)',
-                        background: 'none',
-                        border: 'none',
-                        cursor: 'pointer',
-                        fontSize: '13px',
-                      }}
-                    >
-                      {showStaffPass ? '🙈' : '👁️'}
-                    </button>
-                  </div>
-                </div>
-                <button type="submit" className="btn-primary" style={{ width: '100%', padding: '12px', marginTop: '6px' }}>
-                  🔑 Sign In & Unlock Station
-                </button>
-              </form>
-            )}
+              )}
+              <button type="submit" className="btn-primary" style={{ width: '100%', padding: '12px', marginTop: '6px' }}>
+                {lockMfaToken ? 'Verify MFA & Unlock' : '🔑 Verify Password & Unlock'}
+              </button>
+            </form>
 
             {isOwnerMode ? (
               <button
@@ -2634,7 +2553,7 @@ export default function StaffWebApp() {
                   textDecoration: 'underline',
                 }}
               >
-                👑 Switch Active Staff (Owner Mode)
+                👑 Preview Station View (Owner Mode)
               </button>
             ) : (
               <button
@@ -2693,7 +2612,7 @@ export default function StaffWebApp() {
                       <div style={{ fontSize: '0.78rem', color: 'var(--accent-cyan)', display: 'flex', alignItems: 'center', gap: '6px' }}>
                         <span>{uConfig.stationBadge}</span>
                         <span>·</span>
-                        <span>PIN: {u.pin}</span>
+                        <span>{u.role}</span>
                       </div>
                     </div>
                   </button>

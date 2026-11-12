@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start -p 3004",
     "typecheck": "tsc --noEmit",
-    "lint": "echo 'console-web lint passed'"
+    "lint": "node ../../packages/config/scripts/lint-workspace.mjs --package .",
+    "test": "node --test app/lib/auth-client.test.ts"
   },
   "dependencies": {
     "@dineflow/contracts": "workspace:*",

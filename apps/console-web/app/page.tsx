@@ -3,136 +3,97 @@
 import React, { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import {
-  authenticateUser,
-  getLoggedInUser,
-  setLoggedInUser,
-  clearLoggedInUser,
-  isOwnerSessionActive,
-  getStoredOwnerPassword,
-  type StaffMember,
-} from './lib/restaurant-db';
-
-interface CredentialPreset {
-  label: string;
-  emoji: string;
-  role: string;
-  identifier: string;
-  secret: string;
-  badge: string;
-}
+  getConsoleAuthState,
+  loginStaffRemote,
+  verifyStaffMfaRemote,
+  logoutStaffRemote,
+  isAuthStateExpired,
+  type StaffSessionUser,
+} from './lib/auth-client';
 
 export default function CommonLoginPage() {
   const router = useRouter();
 
-  const [identifier, setIdentifier] = useState('');
-  const [secret, setSecret] = useState('');
+  const [orgSlug, setOrgSlug] = useState(
+    () => process.env['NEXT_PUBLIC_DEFAULT_ORG_SLUG'] || '',
+  );
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [showSecret, setShowSecret] = useState(false);
+  const [loginStep, setLoginStep] = useState<'CREDENTIALS' | 'MFA'>('CREDENTIALS');
+  const [preMfaToken, setPreMfaToken] = useState('');
+  const [mfaCode, setMfaCode] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-  const [activeSessionUser, setActiveSessionUser] = useState<StaffMember | null>(null);
+  const [activeSessionUser, setActiveSessionUser] = useState<StaffSessionUser | null>(null);
 
-  // Check existing session on mount
   useEffect(() => {
-    const existing = getLoggedInUser();
-    if (existing) {
-      setActiveSessionUser(existing);
+    const existing = getConsoleAuthState();
+    if (existing && !isAuthStateExpired(existing, 0)) {
+      setActiveSessionUser(existing.user);
     }
   }, []);
 
-  const handleLogin = (e: React.FormEvent) => {
-    e.preventDefault();
-    setError('');
-    setLoading(true);
-
-    const result = authenticateUser(identifier, secret);
-    if (!result.success || !result.user) {
-      setError(result.error || 'Invalid credentials. Please verify username and password/PIN.');
-      setLoading(false);
-      return;
-    }
-
-    const user = result.user;
-    setLoggedInUser(user);
-
-    if (user.role === 'OWNER') {
+  const routeForRole = (role: string) => {
+    if (role.toUpperCase() === 'OWNER') {
       router.push('/owner');
     } else {
       router.push('/staff');
     }
   };
 
-  const handleSignOutExisting = () => {
-    clearLoggedInUser();
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+    setLoading(true);
+
+    if (loginStep === 'CREDENTIALS') {
+      const result = await loginStaffRemote({ orgSlug, email, password });
+      setLoading(false);
+      if (!result.ok) {
+        setError(result.error || 'Invalid credentials. Please check workspace, email, and password.');
+        return;
+      }
+      if (result.requiresMfa && result.preMfaToken) {
+        setPreMfaToken(result.preMfaToken);
+        setMfaCode('');
+        setLoginStep('MFA');
+        return;
+      }
+      if (result.session) {
+        routeForRole(result.session.user.role);
+      }
+      return;
+    }
+
+    const mfaRes = await verifyStaffMfaRemote({
+      preMfaToken,
+      code: mfaCode,
+      orgSlug,
+      email,
+    });
+    setLoading(false);
+    if (!mfaRes.ok || !mfaRes.session) {
+      setError(mfaRes.error || 'Invalid authenticator or recovery code.');
+      return;
+    }
+    routeForRole(mfaRes.session.user.role);
+  };
+
+  const handleSignOutExisting = async () => {
+    await logoutStaffRemote();
     setActiveSessionUser(null);
-    setIdentifier('');
-    setSecret('');
+    setEmail('');
+    setPassword('');
+    setPreMfaToken('');
+    setMfaCode('');
+    setLoginStep('CREDENTIALS');
     setError('');
   };
 
   const handleContinueSession = () => {
     if (!activeSessionUser) return;
-    if (activeSessionUser.role === 'OWNER') {
-      router.push('/owner');
-    } else {
-      router.push('/staff');
-    }
-  };
-
-  const presets: CredentialPreset[] = [
-    {
-      label: 'Kitchen KDS',
-      emoji: '🍳',
-      role: 'KITCHEN',
-      identifier: 'kitchen',
-      secret: '2345',
-      badge: 'PIN: 2345',
-    },
-    {
-      label: 'Floor Captain',
-      emoji: '🪑',
-      role: 'CAPTAIN',
-      identifier: 'captain',
-      secret: '1234',
-      badge: 'PIN: 1234',
-    },
-    {
-      label: 'Cashier / POS',
-      emoji: '💳',
-      role: 'CASHIER',
-      identifier: 'cashier',
-      secret: '3456',
-      badge: 'PIN: 3456',
-    },
-    {
-      label: 'Table Waiter',
-      emoji: '🤵',
-      role: 'WAITER',
-      identifier: 'waiter',
-      secret: '7890',
-      badge: 'PIN: 7890',
-    },
-    {
-      label: 'Floor Manager',
-      emoji: '📋',
-      role: 'MANAGER',
-      identifier: 'manager',
-      secret: '5678',
-      badge: 'PIN: 5678',
-    },
-    {
-      label: 'Group Owner',
-      emoji: '👑',
-      role: 'OWNER',
-      identifier: 'owner',
-      secret: typeof window !== 'undefined' ? getStoredOwnerPassword() : 'ExecutiveSecure2026!',
-      badge: 'Master Pass',
-    },
-  ];
-
-  const applyPreset = (preset: CredentialPreset) => {
-    setIdentifier(preset.identifier);
-    setSecret(preset.secret);
-    setError('');
+    routeForRole(activeSessionUser.role);
   };
 
   return (
@@ -201,7 +162,9 @@ export default function CommonLoginPage() {
             }}
           >
             <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '14px' }}>
-              <span style={{ fontSize: '28px' }}>{activeSessionUser.avatar}</span>
+              <span style={{ fontSize: '28px' }}>
+                {activeSessionUser.avatar || (activeSessionUser.role === 'OWNER' ? '👔' : '👤')}
+              </span>
               <div>
                 <div style={{ fontWeight: 800, fontSize: '1rem', color: '#fff' }}>
                   {activeSessionUser.name}
@@ -277,87 +240,176 @@ export default function CommonLoginPage() {
           )}
 
           <form onSubmit={handleLogin} style={{ display: 'flex', flexDirection: 'column', gap: '18px' }}>
-            <div>
-              <label
-                style={{
-                  display: 'block',
-                  fontSize: '0.82rem',
-                  fontWeight: 700,
-                  color: '#cbd5e1',
-                  marginBottom: '6px',
-                }}
-              >
-                Username, Role, or Email
-              </label>
-              <input
-                type="text"
-                required
-                autoComplete="username"
-                placeholder="e.g. kitchen, captain, cashier, waiter, or owner"
-                value={identifier}
-                onChange={(e) => setIdentifier(e.target.value)}
-                className="form-input"
-                style={{
-                  width: '100%',
-                  padding: '12px 14px',
-                  fontSize: '0.92rem',
-                  borderRadius: '10px',
-                }}
-              />
-            </div>
+            {loginStep === 'CREDENTIALS' ? (
+              <>
+                <div>
+                  <label
+                    style={{
+                      display: 'block',
+                      fontSize: '0.82rem',
+                      fontWeight: 700,
+                      color: '#cbd5e1',
+                      marginBottom: '6px',
+                    }}
+                  >
+                    Organization Workspace Slug
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    autoComplete="organization"
+                    placeholder="e.g. royal-spice-bistro"
+                    value={orgSlug}
+                    onChange={(e) => setOrgSlug(e.target.value)}
+                    className="form-input"
+                    style={{
+                      width: '100%',
+                      padding: '12px 14px',
+                      fontSize: '0.92rem',
+                      borderRadius: '10px',
+                    }}
+                  />
+                </div>
 
-            <div>
-              <label
-                style={{
-                  display: 'block',
-                  fontSize: '0.82rem',
-                  fontWeight: 700,
-                  color: '#cbd5e1',
-                  marginBottom: '6px',
-                }}
-              >
-                Password or 4-Digit PIN
-              </label>
-              <div style={{ position: 'relative' }}>
-                <input
-                  type={showSecret ? 'text' : 'password'}
-                  required
-                  autoComplete="current-password"
-                  placeholder="Enter password or 4-digit PIN"
-                  value={secret}
-                  onChange={(e) => setSecret(e.target.value)}
-                  className="form-input"
-                  style={{
-                    width: '100%',
-                    padding: '12px 14px',
-                    paddingRight: '42px',
-                    fontSize: '0.92rem',
-                    borderRadius: '10px',
-                  }}
-                />
+                <div>
+                  <label
+                    style={{
+                      display: 'block',
+                      fontSize: '0.82rem',
+                      fontWeight: 700,
+                      color: '#cbd5e1',
+                      marginBottom: '6px',
+                    }}
+                  >
+                    Staff Email
+                  </label>
+                  <input
+                    type="email"
+                    required
+                    autoComplete="username"
+                    placeholder="staff@restaurant.com"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    className="form-input"
+                    style={{
+                      width: '100%',
+                      padding: '12px 14px',
+                      fontSize: '0.92rem',
+                      borderRadius: '10px',
+                    }}
+                  />
+                </div>
+
+                <div>
+                  <label
+                    style={{
+                      display: 'block',
+                      fontSize: '0.82rem',
+                      fontWeight: 700,
+                      color: '#cbd5e1',
+                      marginBottom: '6px',
+                    }}
+                  >
+                    Password
+                  </label>
+                  <div style={{ position: 'relative' }}>
+                    <input
+                      type={showSecret ? 'text' : 'password'}
+                      required
+                      minLength={8}
+                      autoComplete="current-password"
+                      placeholder="Enter your password"
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      className="form-input"
+                      style={{
+                        width: '100%',
+                        padding: '12px 14px',
+                        paddingRight: '42px',
+                        fontSize: '0.92rem',
+                        borderRadius: '10px',
+                      }}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowSecret(!showSecret)}
+                      title={showSecret ? 'Hide Password' : 'Show Password'}
+                      style={{
+                        position: 'absolute',
+                        right: '12px',
+                        top: '50%',
+                        transform: 'translateY(-50%)',
+                        background: 'none',
+                        border: 'none',
+                        color: '#94a3b8',
+                        cursor: 'pointer',
+                        fontSize: '16px',
+                      }}
+                    >
+                      {showSecret ? '🙈' : '👁️'}
+                    </button>
+                  </div>
+                </div>
+              </>
+            ) : (
+              <>
+                <div style={{ fontSize: '0.85rem', color: '#cbd5e1' }}>
+                  Enter the 6-digit authenticator code (or recovery code) for <strong>{email}</strong>.
+                </div>
+                <div>
+                  <label
+                    style={{
+                      display: 'block',
+                      fontSize: '0.82rem',
+                      fontWeight: 700,
+                      color: '#cbd5e1',
+                      marginBottom: '6px',
+                    }}
+                  >
+                    Authenticator Code
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    minLength={6}
+                    maxLength={32}
+                    autoFocus
+                    placeholder="6-digit TOTP code"
+                    value={mfaCode}
+                    onChange={(e) => setMfaCode(e.target.value)}
+                    className="form-input"
+                    style={{
+                      width: '100%',
+                      padding: '12px 14px',
+                      fontSize: '1rem',
+                      letterSpacing: '2px',
+                      textAlign: 'center',
+                      borderRadius: '10px',
+                    }}
+                  />
+                </div>
                 <button
                   type="button"
-                  onClick={() => setShowSecret(!showSecret)}
-                  title={showSecret ? 'Hide Secret' : 'Show Secret'}
+                  onClick={() => {
+                    setLoginStep('CREDENTIALS');
+                    setPreMfaToken('');
+                    setMfaCode('');
+                    setError('');
+                  }}
                   style={{
-                    position: 'absolute',
-                    right: '12px',
-                    top: '50%',
-                    transform: 'translateY(-50%)',
                     background: 'none',
                     border: 'none',
                     color: '#94a3b8',
+                    fontSize: '0.8rem',
                     cursor: 'pointer',
-                    fontSize: '16px',
+                    textAlign: 'left',
+                    padding: 0,
                   }}
                 >
-                  {showSecret ? '🙈' : '👁️'}
+                  ← Back to credentials
                 </button>
-              </div>
-              <div style={{ fontSize: '0.74rem', color: '#64748b', marginTop: '6px' }}>
-                Staff can log in with their 4-digit PIN or password assigned by the Owner.
-              </div>
-            </div>
+              </>
+            )}
 
             <button
               type="submit"
@@ -378,79 +430,21 @@ export default function CommonLoginPage() {
                 marginTop: '4px',
               }}
             >
-              <span>{loading ? 'Authenticating...' : 'Sign In to Station'}</span>
+              <span>
+                {loading
+                  ? 'Authenticating...'
+                  : loginStep === 'MFA'
+                  ? 'Verify MFA & Sign In'
+                  : 'Sign In to Station'}
+              </span>
               <span>→</span>
             </button>
           </form>
-
-          {/* QUICK-FILL TEST CREDENTIALS */}
-          <div style={{ marginTop: '24px', borderTop: '1px solid var(--border-light)', paddingTop: '20px' }}>
-            <div
-              style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                marginBottom: '10px',
-              }}
-            >
-              <span style={{ fontSize: '0.75rem', fontWeight: 800, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                Quick Credential Fill
-              </span>
-              <span style={{ fontSize: '0.72rem', color: 'var(--accent-cyan)' }}>Tap to populate</span>
-            </div>
-
-            <div
-              style={{
-                display: 'grid',
-                gridTemplateColumns: 'repeat(2, 1fr)',
-                gap: '8px',
-              }}
-            >
-              {presets.map((preset) => (
-                <button
-                  key={preset.role}
-                  type="button"
-                  onClick={() => applyPreset(preset)}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    padding: '8px 10px',
-                    background: identifier.toLowerCase() === preset.identifier ? 'rgba(6, 182, 212, 0.15)' : 'rgba(255, 255, 255, 0.04)',
-                    border: identifier.toLowerCase() === preset.identifier ? '1px solid var(--accent-cyan)' : '1px solid var(--border-light)',
-                    borderRadius: '8px',
-                    color: '#f8fafc',
-                    fontSize: '0.78rem',
-                    cursor: 'pointer',
-                    textAlign: 'left',
-                    transition: 'all 0.15s ease',
-                  }}
-                >
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                    <span style={{ fontSize: '15px' }}>{preset.emoji}</span>
-                    <span style={{ fontWeight: 700 }}>{preset.label}</span>
-                  </div>
-                  <span
-                    style={{
-                      fontSize: '0.68rem',
-                      color: '#94a3b8',
-                      fontFamily: 'monospace',
-                      background: 'rgba(255, 255, 255, 0.06)',
-                      padding: '2px 5px',
-                      borderRadius: '4px',
-                    }}
-                  >
-                    {preset.badge}
-                  </span>
-                </button>
-              ))}
-            </div>
-          </div>
         </div>
 
         {/* Security & Multi-tenant Note */}
         <div style={{ marginTop: '20px', fontSize: '0.75rem', color: '#64748b', lineHeight: 1.5 }}>
-          🔒 Multi-tenant station isolation enforced · Staff accounts require signing out before switching profiles · Executive owners have instant multi-station access.
+          🔒 Multi-tenant JWT & MFA authentication enforced · Server-validated station RBAC and outlet isolation active.
         </div>
       </div>
     </div>

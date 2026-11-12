@@ -26,13 +26,16 @@ import {
   getStoredStaff,
   saveStoredStaffMember,
   deleteStoredStaffMember,
-  getStoredOwnerPassword,
-  saveStoredOwnerPassword,
   getLoggedInUser,
-  setLoggedInUser,
-  clearLoggedInUser,
-  isOwnerSessionActive,
 } from '../lib/restaurant-db';
+import {
+  getConsoleAuthState,
+  loginStaffRemote,
+  verifyStaffMfaRemote,
+  logoutStaffRemote,
+  consoleAuthFetch,
+  isAuthStateExpired,
+} from '../lib/auth-client';
 
 export type OwnerScreen =
   | 'DASHBOARD'
@@ -46,31 +49,32 @@ export type OwnerScreen =
   | 'SETTINGS';
 
 export default function OwnerWebApp() {
-  // Authentication & TOTP State (Owner master password authorization)
-  const [ownerMasterPassword, setOwnerMasterPassword] = useState<string>(() =>
-    typeof window !== 'undefined' ? getStoredOwnerPassword() : 'ExecutiveSecure2026!'
-  );
-  const [showOwnerMasterPass, setShowOwnerMasterPass] = useState(false);
+  // Server-backed JWT & Pre-MFA TOTP State
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => {
     if (typeof window !== 'undefined') {
-      const logged = getLoggedInUser();
-      return logged?.role === 'OWNER' || isOwnerSessionActive();
+      const state = getConsoleAuthState();
+      return Boolean(state && !isAuthStateExpired(state, 0) && state.user.role === 'OWNER');
     }
     return false;
   });
-  const [email, setEmail] = useState('owner@royalspice.in');
-  const [password, setPassword] = useState(() =>
-    typeof window !== 'undefined' ? getStoredOwnerPassword() : 'ExecutiveSecure2026!'
+  const [orgSlug, setOrgSlug] = useState(
+    () => process.env['NEXT_PUBLIC_DEFAULT_ORG_SLUG'] || '',
   );
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [preMfaToken, setPreMfaToken] = useState('');
   const [totpCode, setTotpCode] = useState('');
   const [loginStep, setLoginStep] = useState<'CREDENTIALS' | 'TOTP'>('CREDENTIALS');
   const [loginError, setLoginError] = useState('');
+  const [loginLoading, setLoginLoading] = useState(false);
 
-  // Sync auth state if session exists
+  // Sync auth state from verified session
   useEffect(() => {
-    const logged = getLoggedInUser();
-    if (logged?.role === 'OWNER' || isOwnerSessionActive()) {
+    const state = getConsoleAuthState();
+    if (state && !isAuthStateExpired(state, 0) && state.user.role === 'OWNER') {
       setIsAuthenticated(true);
+    } else {
+      setIsAuthenticated(false);
     }
   }, []);
 
@@ -147,19 +151,15 @@ export default function OwnerWebApp() {
   const [staffOutletId, setStaffOutletId] = useState<string>('ALL');
   const [staffRole, setStaffRole] = useState<StaffMember['role']>('CAPTAIN');
   const [staffUsername, setStaffUsername] = useState('');
-  const [staffPassword, setStaffPassword] = useState('');
-  const [staffPin, setStaffPin] = useState('');
   const [staffPhone, setStaffPhone] = useState('');
   const [staffAvatar, setStaffAvatar] = useState('👨‍💼');
   const [staffFilterOutlet, setStaffFilterOutlet] = useState<string>('ALL');
-  const [revealedStaffPasswords, setRevealedStaffPasswords] = useState<Record<string, boolean>>({});
 
   // Listen for dynamic storage updates
   useEffect(() => {
     const handleSync = () => {
       setOutletsList(getStoredOutlets());
       setStaffList(getStoredStaff());
-      setOwnerMasterPassword(getStoredOwnerPassword());
     };
     window.addEventListener('dineflow-data-updated', handleSync);
     window.addEventListener('storage', handleSync);
@@ -227,11 +227,7 @@ export default function OwnerWebApp() {
     setStaffOutletId(selectedOutletId);
     setStaffRole('CAPTAIN');
     setStaffUsername('');
-    const randomPin = Math.floor(1000 + Math.random() * 9000).toString();
-    const randomPass = 'Staff@' + Math.floor(100 + Math.random() * 900);
-    setStaffPassword(randomPass);
-    setStaffPin(randomPin);
-    setStaffPhone('+91 98860 ' + Math.floor(10000 + Math.random() * 90000));
+    setStaffPhone('');
     setStaffAvatar('👨‍💼');
     setShowStaffModal(true);
   };
@@ -242,8 +238,6 @@ export default function OwnerWebApp() {
     setStaffOutletId(staff.outletId || 'ALL');
     setStaffRole(staff.role);
     setStaffUsername(staff.username || staff.email.split('@')[0] || '');
-    setStaffPassword(staff.password || 'StaffPass@2026');
-    setStaffPin(staff.pin || '1234');
     setStaffPhone(staff.phone || '');
     setStaffAvatar(staff.avatar || '👤');
     setShowStaffModal(true);
@@ -258,23 +252,22 @@ export default function OwnerWebApp() {
     const cleanUsername = staffUsername.trim() || staffName.trim().toLowerCase().replace(/\s+/g, '.');
     const staffToSave: StaffMember = {
       id: editingStaff ? editingStaff.id : `staff-${Date.now()}`,
-      orgId: ORGANIZATION.id,
+      orgId: getLoggedInUser()?.orgId || ORGANIZATION.id,
       name: staffName.trim(),
       email: cleanUsername.includes('@') ? cleanUsername : `${cleanUsername}@royalspice.in`,
       username: cleanUsername,
       phone: staffPhone.trim() || '+91 98860 00000',
       role: staffRole,
-      pin: staffPin.trim() || '1234',
-      password: staffPassword.trim() || 'StaffPass@2026',
       avatar: staffAvatar || '👤',
       outletId: staffOutletId === 'ALL' ? null : staffOutletId,
       isActive: true,
+      mfaEnrolled: editingStaff?.mfaEnrolled ?? (staffRole === 'OWNER' || staffRole === 'MANAGER'),
     };
     const updated = saveStoredStaffMember(staffToSave);
     setStaffList(updated);
     setShowStaffModal(false);
     setEditingStaff(null);
-    showToast(`✅ Saved credentials for ${staffToSave.name} (${staffToSave.role})`);
+    showToast(`✅ Saved profile for ${staffToSave.name} (${staffToSave.role}). Credentials are provisioned server-side.`);
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent('dineflow-data-updated'));
     }
@@ -299,8 +292,15 @@ export default function OwnerWebApp() {
   const [liveDbOrders, setLiveDbOrders] = useState<Order[]>([]);
 
   const fetchOwnerLiveOrders = async () => {
+    if (!getConsoleAuthState()) return;
     try {
-      const res = await fetch(`/api/v1/console/orders/feed?outlet_id=${selectedOutletId}`);
+      const res = await consoleAuthFetch(
+        `/api/v1/console/orders?outlet_id=${encodeURIComponent(selectedOutletId)}`,
+      );
+      if (res.status === 401) {
+        setIsAuthenticated(false);
+        return;
+      }
       if (res.ok) {
         const data = await res.json();
         if (Array.isArray(data) && data.length > 0) {
@@ -364,30 +364,55 @@ export default function OwnerWebApp() {
   const totalBilledOrders = allOrders.filter((o) => o.status === 'BILLED' || o.status === 'SERVED').length || currentBranchData.payments.length;
   const aovPaise = totalBilledOrders > 0 ? Math.round(totalRevenuePaise / totalBilledOrders) : 0;
 
-  // Login handler with master password verification
-  const handleLoginSubmit = (e: React.FormEvent) => {
+  // Server-backed login handler with real JWT + pre-MFA TOTP verification
+  const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const activeMasterPass = getStoredOwnerPassword();
+    setLoginError('');
+    setLoginLoading(true);
+
     if (loginStep === 'CREDENTIALS') {
-      if (
-        (email === 'owner@royalspice.in' || email.includes('@')) &&
-        (password === activeMasterPass || password === 'ExecutiveSecure2026!')
-      ) {
+      const res = await loginStaffRemote({ orgSlug, email, password });
+      setLoginLoading(false);
+      if (!res.ok) {
+        setLoginError(res.error || 'Invalid organization slug, email, or password.');
+        return;
+      }
+      if (res.requiresMfa && res.preMfaToken) {
+        setPreMfaToken(res.preMfaToken);
+        setTotpCode('');
         setLoginStep('TOTP');
-        setLoginError('');
-      } else {
-        setLoginError('Invalid credentials. Please enter the Owner Master Password.');
+        return;
       }
-    } else {
-      if (totpCode.length === 6 || totpCode === '123456') {
-        const ownerMember = getStoredStaff().find((s) => s.role === 'OWNER') || ALL_STAFF_MEMBERS[0]!;
-        setLoggedInUser(ownerMember);
-        setIsAuthenticated(true);
-        setLoginError('');
-      } else {
-        setLoginError('Enter a valid 6-digit authenticator code (e.g. 123456)');
+      if (!res.session || res.session.user.role !== 'OWNER') {
+        await logoutStaffRemote();
+        setLoginError('Access restricted to verified OWNER accounts.');
+        return;
       }
+      setIsAuthenticated(true);
+      setPassword('');
+      return;
     }
+
+    const mfaRes = await verifyStaffMfaRemote({
+      preMfaToken,
+      code: totpCode,
+      orgSlug,
+      email,
+    });
+    setLoginLoading(false);
+    if (!mfaRes.ok || !mfaRes.session) {
+      setLoginError(mfaRes.error || 'Invalid authenticator or recovery code.');
+      return;
+    }
+    if (mfaRes.session.user.role !== 'OWNER') {
+      await logoutStaffRemote();
+      setLoginError('Access restricted to verified OWNER accounts.');
+      return;
+    }
+    setIsAuthenticated(true);
+    setPassword('');
+    setPreMfaToken('');
+    setTotpCode('');
   };
 
   // If not authenticated, render Owner 2FA Login Screen
@@ -460,63 +485,62 @@ export default function OwnerWebApp() {
             {loginStep === 'CREDENTIALS' ? (
               <>
                 <div>
+                  <label className="form-label">Workspace Slug</label>
+                  <input
+                    type="text"
+                    value={orgSlug}
+                    onChange={(e) => setOrgSlug(e.target.value)}
+                    placeholder="e.g. royal-spice-bistro"
+                    required
+                    className="form-input"
+                  />
+                </div>
+                <div>
                   <label className="form-label">Owner Email</label>
                   <input
                     type="email"
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
+                    placeholder="owner@restaurant.com"
                     required
                     className="form-input"
                   />
                 </div>
                 <div>
-                  <label className="form-label">Master Password</label>
+                  <label className="form-label">Password</label>
                   <input
                     type="password"
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
+                    minLength={8}
                     required
                     className="form-input"
                   />
                 </div>
-                <button type="submit" className="btn-primary" style={{ width: '100%', marginTop: '8px' }}>
-                  Continue to 2FA →
+                <button
+                  type="submit"
+                  disabled={loginLoading}
+                  className="btn-primary"
+                  style={{ width: '100%', marginTop: '8px', opacity: loginLoading ? 0.7 : 1 }}
+                >
+                  {loginLoading ? 'Verifying...' : 'Sign In →'}
                 </button>
-                <div style={{ marginTop: '10px', textAlign: 'center' }}>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const p = getStoredOwnerPassword();
-                      setPassword(p);
-                      setEmail('owner@royalspice.in');
-                    }}
-                    style={{
-                      background: 'none',
-                      border: 'none',
-                      color: 'var(--accent-cyan)',
-                      fontSize: '0.78rem',
-                      cursor: 'pointer',
-                      textDecoration: 'underline',
-                    }}
-                  >
-                    💡 Autofill Owner Master Password
-                  </button>
-                </div>
               </>
             ) : (
               <>
                 <div style={{ textAlign: 'center', marginBottom: '8px' }}>
                   <div style={{ fontSize: '14px', color: 'var(--text-secondary)' }}>
-                    Enter 6-digit TOTP code from your Google / Microsoft Authenticator app
+                    Enter 6-digit TOTP code from your authenticator app or a recovery code
                   </div>
                 </div>
                 <div>
                   <input
                     type="text"
-                    maxLength={6}
+                    minLength={6}
+                    maxLength={32}
                     placeholder="••••••"
                     value={totpCode}
-                    onChange={(e) => setTotpCode(e.target.value.replace(/\D/g, ''))}
+                    onChange={(e) => setTotpCode(e.target.value)}
                     autoFocus
                     required
                     style={{
@@ -525,20 +549,30 @@ export default function OwnerWebApp() {
                       border: '2px solid var(--accent-cyan)',
                       borderRadius: '12px',
                       padding: '12px',
-                      fontSize: '1.8rem',
+                      fontSize: '1.5rem',
                       fontWeight: 900,
-                      letterSpacing: '8px',
+                      letterSpacing: '4px',
                       textAlign: 'center',
                       color: 'var(--accent-cyan)',
                     }}
                   />
                 </div>
-                <button type="submit" className="btn-primary" style={{ width: '100%', marginTop: '8px' }}>
-                  Authenticate & Launch Cockpit
+                <button
+                  type="submit"
+                  disabled={loginLoading}
+                  className="btn-primary"
+                  style={{ width: '100%', marginTop: '8px', opacity: loginLoading ? 0.7 : 1 }}
+                >
+                  {loginLoading ? 'Verifying...' : 'Authenticate & Launch Cockpit'}
                 </button>
                 <button
                   type="button"
-                  onClick={() => setLoginStep('CREDENTIALS')}
+                  onClick={() => {
+                    setLoginStep('CREDENTIALS');
+                    setPreMfaToken('');
+                    setTotpCode('');
+                    setLoginError('');
+                  }}
                   style={{ color: 'var(--text-muted)', fontSize: '0.8rem', cursor: 'pointer' }}
                 >
                   ← Back to credentials
@@ -662,10 +696,11 @@ export default function OwnerWebApp() {
               </div>
             </div>
             <button
-              onClick={() => {
-                clearLoggedInUser();
+              onClick={async () => {
+                await logoutStaffRemote();
                 setIsAuthenticated(false);
                 setLoginStep('CREDENTIALS');
+                setPreMfaToken('');
                 setTotpCode('');
                 setPassword('');
                 window.location.href = '/';
@@ -1780,8 +1815,8 @@ export default function OwnerWebApp() {
                       <th>Staff Member</th>
                       <th>Role</th>
                       <th>Hotel / Branch</th>
-                      <th>Login Credentials (Owner Assigned)</th>
-                      <th>Terminal PIN</th>
+                      <th>Email / Directory</th>
+                      <th>Auth Security</th>
                       <th>Phone</th>
                       <th>Status</th>
                       <th style={{ textAlign: 'right' }}>Actions</th>
@@ -1795,7 +1830,6 @@ export default function OwnerWebApp() {
                       })
                       .map((s) => {
                         const assignedOutlet = outletsList.find((o) => o.id === s.outletId);
-                        const isPassRevealed = revealedStaffPasswords[s.id];
                         return (
                           <tr key={s.id}>
                             <td style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
@@ -1828,68 +1862,24 @@ export default function OwnerWebApp() {
                               </span>
                             </td>
                             <td>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                <code
-                                  style={{
-                                    background: 'rgba(255, 255, 255, 0.08)',
-                                    padding: '3px 8px',
-                                    borderRadius: '4px',
-                                    fontSize: '0.82rem',
-                                    fontFamily: 'monospace',
-                                    color: '#f8fafc',
-                                  }}
-                                >
-                                  {isPassRevealed ? s.password || 'StaffPass@2026' : '••••••••'}
-                                </code>
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    setRevealedStaffPasswords((prev) => ({
-                                      ...prev,
-                                      [s.id]: !prev[s.id],
-                                    }))
-                                  }
-                                  title={isPassRevealed ? 'Hide Password' : 'Show Password'}
-                                  style={{
-                                    background: 'transparent',
-                                    border: 'none',
-                                    cursor: 'pointer',
-                                    fontSize: '14px',
-                                  }}
-                                >
-                                  {isPassRevealed ? '🙈' : '👁️'}
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    navigator.clipboard.writeText(s.password || 'StaffPass@2026');
-                                    showToast(`📋 Copied password for ${s.name}`);
-                                  }}
-                                  title="Copy Password"
-                                  style={{
-                                    background: 'transparent',
-                                    border: 'none',
-                                    cursor: 'pointer',
-                                    fontSize: '14px',
-                                  }}
-                                >
-                                  📋
-                                </button>
+                              <div style={{ fontSize: '0.82rem', color: '#e2e8f0', fontFamily: 'monospace' }}>
+                                {s.email}
                               </div>
                             </td>
                             <td>
                               <span
                                 style={{
-                                  background: 'rgba(6, 182, 212, 0.15)',
-                                  color: 'var(--accent-cyan)',
+                                  background: s.mfaEnrolled
+                                    ? 'rgba(16, 185, 129, 0.14)'
+                                    : 'rgba(6, 182, 212, 0.14)',
+                                  color: s.mfaEnrolled ? '#10b981' : 'var(--accent-cyan)',
                                   fontWeight: 800,
                                   padding: '3px 8px',
                                   borderRadius: '6px',
-                                  fontSize: '0.85rem',
-                                  fontFamily: 'monospace',
+                                  fontSize: '0.78rem',
                                 }}
                               >
-                                🔢 {s.pin}
+                                {s.mfaEnrolled ? '🔐 Password + MFA' : '🔑 Argon2id Password'}
                               </span>
                             </td>
                             <td style={{ fontSize: '0.82rem', color: 'var(--text-secondary)' }}>{s.phone}</td>
@@ -1978,50 +1968,17 @@ export default function OwnerWebApp() {
                   </span>
                 </div>
 
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: '12px', alignItems: 'flex-end' }}>
-                  <div>
-                    <label className="form-label">Master Cockpit Password</label>
-                    <div style={{ position: 'relative' }}>
-                      <input
-                        type={showOwnerMasterPass ? 'text' : 'password'}
-                        value={ownerMasterPassword}
-                        onChange={(e) => setOwnerMasterPassword(e.target.value)}
-                        className="form-input"
-                        style={{ paddingRight: '40px' }}
-                      />
-                      <button
-                        type="button"
-                        onClick={() => setShowOwnerMasterPass(!showOwnerMasterPass)}
-                        style={{
-                          position: 'absolute',
-                          right: '10px',
-                          top: '50%',
-                          transform: 'translateY(-50%)',
-                          background: 'none',
-                          border: 'none',
-                          cursor: 'pointer',
-                          fontSize: '14px',
-                        }}
-                      >
-                        {showOwnerMasterPass ? '🙈' : '👁️'}
-                      </button>
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (!ownerMasterPassword.trim() || ownerMasterPassword.length < 4) {
-                        showToast('⚠️ Password must be at least 4 characters');
-                        return;
-                      }
-                      saveStoredOwnerPassword(ownerMasterPassword);
-                      showToast('✅ Owner Master Password updated successfully!');
-                    }}
-                    className="btn-primary"
-                    style={{ height: '42px', padding: '0 20px', fontWeight: 800 }}
-                  >
-                    💾 Save Password
-                  </button>
+                <div
+                  style={{
+                    padding: '14px 16px',
+                    background: 'rgba(16, 185, 129, 0.08)',
+                    borderRadius: '10px',
+                    border: '1px solid rgba(16, 185, 129, 0.25)',
+                    fontSize: '0.85rem',
+                    color: '#d1fae5',
+                  }}
+                >
+                  🔐 Owner & Manager authentication uses server-verified Argon2id passwords + AES-256-GCM encrypted TOTP MFA. Credentials are never stored in browser storage.
                 </div>
 
                 <div
@@ -2653,52 +2610,17 @@ export default function OwnerWebApp() {
                 />
               </div>
 
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
-                <div>
-                  <label className="form-label">Login Password (Set by Owner) *</label>
-                  <input
-                    type="text"
-                    required
-                    placeholder="e.g. StaffPass@2026"
-                    value={staffPassword}
-                    onChange={(e) => setStaffPassword(e.target.value)}
-                    className="form-input"
-                  />
-                </div>
-                <div>
-                  <label className="form-label">4-Digit Terminal PIN *</label>
-                  <input
-                    type="text"
-                    required
-                    maxLength={4}
-                    placeholder="e.g. 1234"
-                    value={staffPin}
-                    onChange={(e) => setStaffPin(e.target.value.replace(/\D/g, ''))}
-                    className="form-input"
-                  />
-                </div>
-              </div>
-
-              <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '-6px' }}>
-                <button
-                  type="button"
-                  onClick={() => {
-                    const rPin = Math.floor(1000 + Math.random() * 9000).toString();
-                    const rPass = 'Staff@' + Math.floor(100 + Math.random() * 900);
-                    setStaffPin(rPin);
-                    setStaffPassword(rPass);
-                  }}
-                  style={{
-                    background: 'none',
-                    border: 'none',
-                    color: 'var(--accent-cyan)',
-                    fontSize: '0.78rem',
-                    cursor: 'pointer',
-                    textDecoration: 'underline',
-                  }}
-                >
-                  ⚡ Auto-generate random Password & PIN
-                </button>
+              <div
+                style={{
+                  padding: '10px 12px',
+                  borderRadius: '8px',
+                  background: 'rgba(6, 182, 212, 0.08)',
+                  border: '1px solid rgba(6, 182, 212, 0.2)',
+                  fontSize: '0.78rem',
+                  color: 'var(--text-secondary)',
+                }}
+              >
+                🔐 Credentials and TOTP MFA enrollment are provisioned securely via the Identity API and are never persisted or exposed in client storage.
               </div>
 
               <div>
