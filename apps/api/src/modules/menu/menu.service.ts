@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { withTenantContext } from '../../db/client.js';
+import { getRedis } from '../../common/redis/redis.client.js';
 import { domainError } from '../../common/errors/domain-error.js';
 import { ErrorCode } from '@dineflow/contracts';
 import { MediaService } from './media.service.js';
@@ -273,7 +274,23 @@ export class MenuService {
     categories: Record<string, unknown>[];
     items: Record<string, unknown>[];
   }> {
-    return withTenantContext(orgId, async (db) => {
+    const cacheKey = `menu:public:${orgId}:${outletId ?? 'all'}`;
+    if (process.env['NODE_ENV'] !== 'test') {
+      try {
+        const cached = await getRedis().get(cacheKey);
+        if (cached) {
+          return JSON.parse(cached) as {
+            version: string;
+            categories: Record<string, unknown>[];
+            items: Record<string, unknown>[];
+          };
+        }
+      } catch {
+        // Fallback cleanly to DB on cache read failure
+      }
+    }
+
+    const menuData = await withTenantContext(orgId, async (db) => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const client = (db as any).session?.client ?? (db as any);
 
@@ -339,6 +356,16 @@ export class MenuService {
         items: itemRes.rows as Record<string, unknown>[],
       };
     });
+
+    if (process.env['NODE_ENV'] !== 'test') {
+      try {
+        await getRedis().set(cacheKey, JSON.stringify(menuData), 'EX', 30);
+      } catch {
+        // Ignore cache write failures
+      }
+    }
+
+    return menuData;
   }
 
   // ─── Private helpers ─────────────────────────────────────────────────────────
@@ -372,15 +399,37 @@ export class MenuService {
          SET version = menu_versions.version + 1, updated_at = now()`,
       [orgId, outletId ?? null],
     );
+    if (process.env['NODE_ENV'] !== 'test') {
+      try {
+        const redis = getRedis();
+        const keys = outletId
+          ? [`menu:public:${orgId}:all`, `menu:public:${orgId}:${outletId}`]
+          : [`menu:public:${orgId}:all`];
+        await redis.del(...keys);
+      } catch {
+        // Best-effort cache invalidation
+      }
+    }
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private async _auditLog(client: any, orgId: string, actorId: string,
     table: string, rowId: string, action: string, before: unknown, after: unknown) {
+    const validActor =
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(actorId)
+        ? actorId
+        : null;
     await client.query(
-      `INSERT INTO audit_logs (org_id, actor_id, action, table_name, row_id, before, after)
-       VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb)`,
-      [orgId, actorId, action, table, rowId, JSON.stringify(before), JSON.stringify(after)],
+      `INSERT INTO audit_logs (org_id, actor_id, actor_type, action, resource, resource_id, metadata)
+       VALUES ($1, $2, 'staff', $3, $4, $5, $6::jsonb)`,
+      [
+        orgId,
+        validActor,
+        action,
+        table,
+        rowId,
+        JSON.stringify({ before, after }),
+      ],
     );
   }
 }

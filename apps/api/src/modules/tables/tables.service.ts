@@ -4,6 +4,7 @@ import type { PoolClient } from 'pg';
 import { withTenantContextRaw, getPool } from '../../db/client.js';
 import { getConfig } from '../../config/config.js';
 import { domainError } from '../../common/errors/domain-error.js';
+import { assertStaffOutletAccess } from '../../common/utils/outlet-scope.utils.js';
 import { ErrorCode } from '@dineflow/contracts';
 import { TokenService } from '../auth/token.service.js';
 import type { CreateTableSchema, UpdateTableSchema, OpenSessionSchema } from './tables.dto.js';
@@ -56,17 +57,27 @@ export class TablesService {
     });
   }
 
-  async getTable(orgId: string, tableId: string) {
+  async getTable(orgId: string, tableId: string, staffOutletId?: string) {
     return withTenantContextRaw(orgId, async (db) => {
-      const { rows } = await db.query(
-        `SELECT id, org_id, outlet_id, table_number, capacity, section,
-                qr_token_version, is_active, created_at, updated_at
-         FROM tables WHERE id = $1 AND org_id = $2`,
-        [tableId, orgId],
-      );
-      if (!rows[0]) throw domainError(ErrorCode.NOT_FOUND, 'Table not found.', 404);
-      return rows[0] as Record<string, unknown>;
+      return this.getTableInTx(orgId, tableId, db, staffOutletId);
     });
+  }
+
+  private async getTableInTx(
+    orgId: string,
+    tableId: string,
+    db: PoolClient,
+    staffOutletId?: string,
+  ): Promise<Record<string, unknown>> {
+    const { rows } = await db.query(
+      `SELECT id, org_id, outlet_id, table_number, capacity, section,
+              qr_token_version, is_active, created_at, updated_at
+       FROM tables WHERE id = $1 AND org_id = $2`,
+      [tableId, orgId],
+    );
+    if (!rows[0]) throw domainError(ErrorCode.NOT_FOUND, 'Table not found.', 404);
+    assertStaffOutletAccess(staffOutletId, rows[0]['outlet_id'] as string | undefined);
+    return rows[0] as Record<string, unknown>;
   }
 
   async createTable(orgId: string, dto: CreateTableInput) {
@@ -77,18 +88,19 @@ export class TablesService {
          RETURNING id`,
         [orgId, dto.outlet_id, dto.table_number, dto.capacity, dto.section ?? null],
       );
-      return this.getTable(orgId, rows[0]!.id);
+      return this.getTableInTx(orgId, rows[0]!.id, db);
     });
   }
 
-  async updateTable(orgId: string, tableId: string, dto: UpdateTableInput) {
+  async updateTable(orgId: string, tableId: string, dto: UpdateTableInput, staffOutletId?: string) {
     return withTenantContextRaw(orgId, async (db) => {
+      await this.getTableInTx(orgId, tableId, db, staffOutletId);
       const setClauses: string[] = [];
       const params: unknown[] = [orgId, tableId];
       if (dto.table_number !== undefined) { params.push(dto.table_number); setClauses.push(`table_number = $${params.length}`); }
       if (dto.capacity !== undefined)     { params.push(dto.capacity);     setClauses.push(`capacity = $${params.length}`); }
       if (dto.section !== undefined)      { params.push(dto.section);      setClauses.push(`section = $${params.length}`); }
-      if (setClauses.length === 0) return this.getTable(orgId, tableId);
+      if (setClauses.length === 0) return this.getTableInTx(orgId, tableId, db, staffOutletId);
 
       setClauses.push(`updated_at = now()`);
       const { rowCount } = await db.query(
@@ -96,12 +108,13 @@ export class TablesService {
         params,
       );
       if (!rowCount) throw domainError(ErrorCode.NOT_FOUND, 'Table not found.', 404);
-      return this.getTable(orgId, tableId);
+      return this.getTableInTx(orgId, tableId, db, staffOutletId);
     });
   }
 
-  async deleteTable(orgId: string, tableId: string) {
+  async deleteTable(orgId: string, tableId: string, staffOutletId?: string) {
     return withTenantContextRaw(orgId, async (db) => {
+      await this.getTableInTx(orgId, tableId, db, staffOutletId);
       const { rowCount } = await db.query(
         `UPDATE tables SET is_active = false, updated_at = now()
          WHERE org_id = $1 AND id = $2`,
@@ -120,8 +133,8 @@ export class TablesService {
       .digest('hex');
   }
 
-  async getTableQr(orgId: string, tableId: string) {
-    const table = await this.getTable(orgId, tableId);
+  async getTableQr(orgId: string, tableId: string, staffOutletId?: string) {
+    const table = await this.getTable(orgId, tableId, staffOutletId);
     const version = table['qr_token_version'] as number;
     const token = this.generateQrToken(tableId, version);
     return {
@@ -132,8 +145,9 @@ export class TablesService {
     };
   }
 
-  async rotateQrToken(orgId: string, tableId: string) {
+  async rotateQrToken(orgId: string, tableId: string, staffOutletId?: string) {
     return withTenantContextRaw(orgId, async (db) => {
+      await this.getTableInTx(orgId, tableId, db, staffOutletId);
       const { rows } = await db.query<{ qr_token_version: number }>(
         `UPDATE tables
          SET qr_token_version = qr_token_version + 1, updated_at = now()
@@ -183,57 +197,46 @@ export class TablesService {
       }
     }
 
-    let table: {
-      id: string;
-      org_id: string;
-      qr_token_version: number;
-      outlet_id: string;
-      is_active: boolean;
-      table_number: string;
-    };
-
-    if (tableId && sig && version !== null) {
-      // Verify HMAC (timing-safe)
-      const expected = this.generateQrToken(tableId, version);
-      const expectedBuf = Buffer.from(expected, 'hex');
-      const sigBuf = Buffer.from(sig, 'hex');
-      const valid =
-        expectedBuf.length === sigBuf.length &&
-        crypto.timingSafeEqual(expectedBuf, sigBuf);
-      if (!valid) {
-        throw domainError(ErrorCode.UNAUTHORIZED, 'QR token signature invalid.', 401);
-      }
-
-      const { rows } = await pool.query<{
-        id: string; org_id: string; qr_token_version: number; outlet_id: string; is_active: boolean; table_number: string;
-      }>(
-        `SELECT id, org_id, outlet_id, qr_token_version, is_active, table_number FROM tables WHERE id = $1`,
-        [tableId],
+    if (
+      !tableId ||
+      !sig ||
+      version === null ||
+      Number.isNaN(version) ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(tableId) ||
+      !/^[0-9a-f]+$/i.test(sig)
+    ) {
+      throw domainError(
+        ErrorCode.TABLE_TOKEN_INVALID,
+        'Valid HMAC-signed QR token is required.',
+        401,
       );
-      if (!rows[0] || !rows[0].is_active) {
-        throw domainError(ErrorCode.NOT_FOUND, 'Table not found.', 404);
-      }
-      table = rows[0];
-      if (table.qr_token_version !== version) {
-        throw domainError(ErrorCode.UNAUTHORIZED, 'QR code has been rotated. Please scan the new code.', 401);
-      }
-    } else {
-      // Direct table identifier lookup (e.g. "T04" or table UUID)
-      const cleanToken = dto.qr_token.trim().replace(/^Table\s+/i, '');
-      const { rows } = await pool.query<{
-        id: string; org_id: string; qr_token_version: number; outlet_id: string; is_active: boolean; table_number: string;
-      }>(
-        `SELECT id, org_id, outlet_id, qr_token_version, is_active, table_number FROM tables
-         WHERE (id::text = $1 OR table_number ILIKE $1) AND is_active = true
-         LIMIT 1`,
-        [cleanToken],
-      );
-      if (!rows[0]) {
-        throw domainError(ErrorCode.NOT_FOUND, `Table '${cleanToken}' not found.`, 404);
-      }
-      table = rows[0];
-      tableId = table.id;
-      version = table.qr_token_version;
+    }
+
+    // Verify HMAC (timing-safe)
+    const expected = this.generateQrToken(tableId, version);
+    const expectedBuf = Buffer.from(expected, 'hex');
+    const sigBuf = Buffer.from(sig, 'hex');
+    const valid =
+      expectedBuf.length === sigBuf.length &&
+      crypto.timingSafeEqual(expectedBuf, sigBuf);
+    if (!valid) {
+      throw domainError(ErrorCode.UNAUTHORIZED, 'QR token signature invalid.', 401);
+    }
+
+    // Resolve table org_id safely under dineflow_app RLS via SECURITY DEFINER helper
+    const { rows } = await pool.query<{
+      id: string; org_id: string; qr_token_version: number; outlet_id: string; is_active: boolean; table_number: string;
+    }>(
+      `SELECT id, org_id, outlet_id, qr_token_version, is_active, table_number
+       FROM resolve_table_for_qr($1)`,
+      [tableId],
+    );
+    if (!rows[0] || !rows[0].is_active) {
+      throw domainError(ErrorCode.NOT_FOUND, 'Table not found.', 404);
+    }
+    const table = rows[0];
+    if (table.qr_token_version !== version) {
+      throw domainError(ErrorCode.UNAUTHORIZED, 'QR code has been rotated. Please scan the new code.', 401);
     }
 
     // Open session within tenant context (idempotent)
@@ -292,8 +295,15 @@ export class TablesService {
     };
   }
 
-  async closeSession(orgId: string, sessionId: string) {
+  async closeSession(orgId: string, sessionId: string, staffOutletId?: string) {
     return withTenantContextRaw(orgId, async (db) => {
+      const { rows } = await db.query<{ id: string; outlet_id: string }>(
+        `SELECT id, outlet_id FROM table_sessions WHERE org_id = $1 AND id = $2 AND status = 'OPEN'`,
+        [orgId, sessionId],
+      );
+      if (!rows[0]) throw domainError(ErrorCode.NOT_FOUND, 'Open session not found.', 404);
+      assertStaffOutletAccess(staffOutletId, rows[0].outlet_id);
+
       const { rowCount } = await db.query(
         `UPDATE table_sessions
          SET status = 'CLOSED', closed_at = now(), updated_at = now()
