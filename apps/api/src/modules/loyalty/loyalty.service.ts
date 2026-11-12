@@ -6,7 +6,8 @@ import {
   Logger,
 } from '@nestjs/common';
 import type { PoolClient } from 'pg';
-import { withTenantContextRaw } from '../../db/client.js';
+import crypto from 'node:crypto';
+import { getPool, withTenantContextRaw } from '../../db/client.js';
 import { evaluateCoupon, type CouponRuleData } from './coupon.engine.js';
 import {
   calculateWalletBalance,
@@ -72,6 +73,19 @@ export interface LoyaltySettingsRow {
 @Injectable()
 export class LoyaltyService {
   private readonly logger = new Logger(LoyaltyService.name);
+
+  async resolveOrgIdByOutlet(outletId: string): Promise<string> {
+    const pool = getPool();
+    const { rows } = await pool.query<{ org_id: string | null }>(
+      `SELECT resolve_outlet_org($1) AS org_id`,
+      [outletId],
+    );
+    const orgId = rows[0]?.org_id;
+    if (!orgId) {
+      throw new NotFoundException(`Outlet ${outletId} not found or inactive.`);
+    }
+    return orgId;
+  }
 
   // ─── Coupons: Validation & Evaluation ─────────────────────────────────────────
 
@@ -246,11 +260,22 @@ export class LoyaltyService {
   ) {
     if (amountPaise <= 0n) return;
 
-    // Verify current balance inside transaction
+    // Serialize concurrent wallet debits for this customer by locking parent customer row
+    await client.query(
+      `SELECT id FROM customers WHERE org_id = $1 AND id = $2 FOR UPDATE`,
+      [orgId, customerId],
+    );
+
+    // Sum unexpired EARN entries plus all REDEEM/ADJUST/REVERSAL ledger movements
     const balanceRes = await client.query<{ balance: string }>(
-      `SELECT COALESCE(SUM(amount_paise), 0)::text as balance
+      `SELECT COALESCE(SUM(
+         CASE
+           WHEN entry_type = 'EARN' AND expires_at IS NOT NULL AND expires_at <= now() THEN 0
+           ELSE amount_paise
+         END
+       ), 0)::text as balance
        FROM loyalty_ledger
-       WHERE org_id = $1 AND customer_id = $2 AND (expires_at IS NULL OR expires_at > now())`,
+       WHERE org_id = $1 AND customer_id = $2`,
       [orgId, customerId],
     );
 
@@ -387,15 +412,34 @@ export class LoyaltyService {
       );
       const refereeOrderCount = parseInt(ordersRes.rows[0]?.count ?? '0', 10);
 
+      // Compute referrer's actual month-to-date referral earnings
+      const monthlyCapPaise = 500000n; // ₹5,000 monthly cap
+      const earnedRes = await client.query<{ total: string }>(
+        `SELECT COALESCE(SUM(amount_paise), 0)::text as total
+         FROM loyalty_ledger
+         WHERE org_id = $1 AND customer_id = $2
+           AND ref_type = 'REFERRAL' AND entry_type = 'EARN'
+           AND created_at >= date_trunc('month', now())`,
+        [orgId, referrerId],
+      );
+      const referrerMonthlyEarningsPaise = BigInt(earnedRes.rows[0]?.total ?? '0');
+
+      const hashedDevice = dto.deviceId
+        ? crypto.createHash('sha256').update(dto.deviceId).digest('hex').slice(0, 16)
+        : undefined;
+      const hashedIp = dto.ipHash
+        ? crypto.createHash('sha256').update(dto.ipHash).digest('hex').slice(0, 16)
+        : undefined;
+
       // Evaluate eligibility
       const check = evaluateReferralEligibility({
         referrerCustomerId: referrerId,
         refereeCustomerId,
         refereeOrderCount,
-        referrerMonthlyEarningsPaise: 0n,
-        monthlyCapPaise: 500000n, // ₹5,000 monthly cap
-        refereeDeviceId: dto.deviceId,
-        refereeIpHash: dto.ipHash,
+        referrerMonthlyEarningsPaise,
+        monthlyCapPaise,
+        refereeDeviceId: hashedDevice,
+        refereeIpHash: hashedIp,
       });
 
       if (!check.eligible) {

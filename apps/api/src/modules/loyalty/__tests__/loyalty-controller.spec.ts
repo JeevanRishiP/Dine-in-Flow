@@ -32,6 +32,7 @@ describe('Loyalty Controllers & RBAC Guard Validation', () => {
       updateCoupon: vi.fn().mockResolvedValue({ id: 'coupon-1', code: 'SAVE10' }),
       getSettings: vi.fn().mockResolvedValue({ is_loyalty_enabled: true }),
       updateSettings: vi.fn().mockResolvedValue({ is_loyalty_enabled: true }),
+      resolveOrgIdByOutlet: vi.fn().mockResolvedValue('org-uuid-1'),
       validateCoupon: vi.fn().mockResolvedValue({ valid: true, discountPaise: 5000 }),
       getWallet: vi.fn().mockResolvedValue({ balancePaise: '10000', entries: [] }),
       claimReferral: vi.fn().mockResolvedValue({ status: 'PENDING' }),
@@ -76,14 +77,15 @@ describe('Loyalty Controllers & RBAC Guard Validation', () => {
   });
 
   describe('Customer Controller Dispatching', () => {
-    it('dispatches public validateCoupon', async () => {
+    it('dispatches public validateCoupon with resolved owning orgId (not outletId)', async () => {
       const dto = {
         code: 'SAVE10',
         subtotalPaise: 50000,
         outletId: 'outlet-uuid-1',
       };
       const res = await customerController.validateCoupon(dto);
-      expect(mockLoyaltyService.validateCoupon).toHaveBeenCalledWith(dto.outletId, dto);
+      expect(mockLoyaltyService.resolveOrgIdByOutlet).toHaveBeenCalledWith(dto.outletId);
+      expect(mockLoyaltyService.validateCoupon).toHaveBeenCalledWith('org-uuid-1', dto);
       expect(res.valid).toBe(true);
     });
 

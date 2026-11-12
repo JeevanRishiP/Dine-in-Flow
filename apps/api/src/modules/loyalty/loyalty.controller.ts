@@ -92,17 +92,14 @@ export class CustomerLoyaltyController {
 
   /**
    * Public validation: allows guests or customers to test a coupon against cart.
+   * Resolves the real owning org_id from outletId (never uses outletId as orgId).
    */
   @Post('public/coupons/validate')
   @Public()
   @HttpCode(HttpStatus.OK)
-  validateCoupon(@Body() dto: ValidateCouponDto) {
-    // In public mode, org_id is extracted from outlet context or provided in DTO
-    // If not supplied, validate against the outlet's owning org
-    // For now, dto includes outletId, let's query via tenant context in service
-    // Service queries with orgId: we can resolve orgId from outlet or pass in dto
-    // In DineFlow, customer public requests pass table session or outlet context
-    return this.loyaltyService.validateCoupon(dto.outletId, dto);
+  async validateCoupon(@Body() dto: ValidateCouponDto) {
+    const orgId = await this.loyaltyService.resolveOrgIdByOutlet(dto.outletId);
+    return this.loyaltyService.validateCoupon(orgId, dto);
   }
 
   /**

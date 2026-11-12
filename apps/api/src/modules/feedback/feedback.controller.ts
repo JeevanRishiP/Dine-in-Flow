@@ -17,6 +17,7 @@ import {
   type GuestSessionJwtPayload,
 } from '../../common/decorators/auth.decorators.js';
 import { toCustomerAccessScope } from '../../common/utils/ownership.utils.js';
+import { resolveScopedOutletId } from '../../common/utils/outlet-scope.utils.js';
 import { FeedbackService } from './feedback.service.js';
 import {
   SubmitFeedbackDto,
@@ -43,7 +44,8 @@ export class ConsoleFeedbackController {
     @CurrentUser() user: StaffJwtPayload,
     @Query() query: FeedbackQueryDto,
   ) {
-    return this.feedbackService.listFeedback(user.org, query);
+    const outletId = resolveScopedOutletId(user.outletId, query.outletId);
+    return this.feedbackService.listFeedback(user.org, { ...query, outletId });
   }
 
   /**
@@ -55,7 +57,8 @@ export class ConsoleFeedbackController {
     @CurrentUser() user: StaffJwtPayload,
     @Query('outletId') outletId?: string,
   ) {
-    return this.feedbackService.getRatingTrend(user.org, outletId);
+    const scopedOutlet = resolveScopedOutletId(user.outletId, outletId);
+    return this.feedbackService.getRatingTrend(user.org, scopedOutlet);
   }
 
   /**
@@ -68,7 +71,8 @@ export class ConsoleFeedbackController {
     @CurrentUser() user: StaffJwtPayload,
     @Query() query: ReviewListQueryDto,
   ) {
-    return this.feedbackService.listReviews(user.org, query);
+    const outletId = resolveScopedOutletId(user.outletId, query.outletId);
+    return this.feedbackService.listReviews(user.org, { ...query, outletId });
   }
 
   /**
@@ -82,6 +86,7 @@ export class ConsoleFeedbackController {
     @CurrentUser() user: StaffJwtPayload,
     @Body() dto: ConnectGbpDto,
   ) {
+    resolveScopedOutletId(user.outletId, dto.outletId);
     return this.feedbackService.connectGbp(user.org, dto);
   }
 
@@ -95,6 +100,7 @@ export class ConsoleFeedbackController {
     @CurrentUser() user: StaffJwtPayload,
     @Body() dto: SyncReviewsDto,
   ) {
+    resolveScopedOutletId(user.outletId, dto.outletId);
     return this.feedbackService.syncReviewSnapshots(user.org, dto);
   }
 

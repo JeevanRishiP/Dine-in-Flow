@@ -427,6 +427,7 @@ export function dateToOutletLocal(
 
 /**
  * Export formatter: formats arbitrary objects as sanitized RFC 4180 CSV.
+ * Neutralizes spreadsheet formula injection (=, +, -, @, \t, \r prefix).
  */
 export function generateCsvExport(rows: Record<string, unknown>[]): string {
   if (rows.length === 0) return '';
@@ -434,7 +435,10 @@ export function generateCsvExport(rows: Record<string, unknown>[]): string {
 
   const escapeCell = (val: unknown): string => {
     if (val === null || val === undefined) return '';
-    const str = String(val);
+    let str = String(val);
+    if (/^[=+\-@\t\r]/.test(str)) {
+      str = `'${str}`;
+    }
     if (str.includes(',') || str.includes('"') || str.includes('\n') || str.includes('\r')) {
       return `"${str.replace(/"/g, '""')}"`;
     }

@@ -309,5 +309,17 @@ describe('Analytics Pure Calculation Engine', () => {
       expect(lines[1]).toBe('"Idli, Sambar",50,"Special ""Chef"" recipe"');
       expect(lines[2]).toBe('Dosa,80,Crispy');
     });
+
+    it('neutralizes CSV formula injection prefixes (=, +, -, @)', () => {
+      const rows = [
+        { name: '=cmd|"/C calc"!A0', formula: '+1+1', neg: '-2+3', at: '@SUM(A1)' },
+      ];
+      const csv = generateCsvExport(rows);
+      const dataLine = csv.split('\n')[1]!;
+      expect(dataLine).toContain('\'=cmd');
+      expect(dataLine).toContain(',\'+1+1,');
+      expect(dataLine).toContain(',\'-2+3,');
+      expect(dataLine).toContain(',\'@SUM(A1)');
+    });
   });
 });
