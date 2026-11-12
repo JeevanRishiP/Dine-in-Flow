@@ -28,7 +28,9 @@ function loadLocalEnvIfPresent() {
   }
 }
 
-loadLocalEnvIfPresent();
+if (process.env['NODE_ENV'] !== 'production') {
+  loadLocalEnvIfPresent();
+}
 
 /**
  * Zod-validated environment config.
@@ -89,12 +91,52 @@ const envSchema = z
 
     // App public base URL (used to build returnUrl / webhook URLs)
     APP_BASE_URL: z.string().url().default('http://localhost:3000'),
+    ALLOWED_CORS_ORIGINS: z.string().optional(),
+    TRUST_PROXY: z.coerce.boolean().default(true),
 
     // ── AI Assistant (Gemini) ────────────────────────────────────────────────
     GEMINI_API_KEY: z.string().optional(),
     GEMINI_MODEL:   z.string().default('gemini-3.5-flash-lite'),
   })
-  .passthrough();
+  .passthrough()
+  .superRefine((cfg, ctx) => {
+    if (cfg.NODE_ENV !== 'production') return;
+
+    const addIssue = (path: string, message: string) => {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: [path], message });
+    };
+
+    if (/^postgres(ql)?:\/\/postgres:/i.test(cfg.DATABASE_URL)) {
+      addIssue('DATABASE_URL', 'Production DATABASE_URL must not use superuser postgres credentials');
+    }
+    if (cfg.PHONEPE_ENV === 'SANDBOX') {
+      addIssue('PHONEPE_ENV', 'PHONEPE_ENV must be PRODUCTION in production');
+    }
+    if (cfg.PHONEPE_CLIENT_ID === 'PGTESTPAYUAT86') {
+      addIssue('PHONEPE_CLIENT_ID', 'Sandbox PHONEPE_CLIENT_ID is forbidden in production');
+    }
+    if (cfg.PHONEPE_CLIENT_SECRET === '96434309-7796-489d-8924-ab56988a6076') {
+      addIssue('PHONEPE_CLIENT_SECRET', 'Default PHONEPE_CLIENT_SECRET is forbidden in production');
+    }
+    if (cfg.PHONEPE_WEBHOOK_PASSWORD === 'phonepe_webhook_pass') {
+      addIssue('PHONEPE_WEBHOOK_PASSWORD', 'Default PHONEPE_WEBHOOK_PASSWORD is forbidden in production');
+    }
+    if (cfg.RAZORPAY_KEY_ID === 'rzp_test_PLACEHOLDER' || cfg.RAZORPAY_KEY_SECRET === 'PLACEHOLDER_SECRET') {
+      addIssue('RAZORPAY_KEY_ID', 'Placeholder Razorpay credentials are forbidden in production');
+    }
+    if (cfg.RAZORPAY_WEBHOOK_SECRET === 'razorpay_webhook_secret') {
+      addIssue('RAZORPAY_WEBHOOK_SECRET', 'Default RAZORPAY_WEBHOOK_SECRET is forbidden in production');
+    }
+    if (cfg.S3_ACCESS_KEY === 'minioadmin' || cfg.S3_SECRET_KEY === 'minioadmin') {
+      addIssue('S3_ACCESS_KEY', 'Default MinIO dev credentials are forbidden in production');
+    }
+    if (cfg.WEBHOOK_PUBLIC_URL.includes('trycloudflare.com')) {
+      addIssue('WEBHOOK_PUBLIC_URL', 'Ephemeral trycloudflare tunnel URL is forbidden in production');
+    }
+    if (!process.env['GBP_TOKEN_ENCRYPTION_KEY'] || process.env['GBP_TOKEN_ENCRYPTION_KEY'].length < 32) {
+      addIssue('GBP_TOKEN_ENCRYPTION_KEY', 'GBP_TOKEN_ENCRYPTION_KEY (>=32 chars) is required in production');
+    }
+  });
 
 
 export type AppConfig = z.infer<typeof envSchema>;

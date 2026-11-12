@@ -8,6 +8,7 @@ import {
 } from '@nestjs/common';
 import { FastifyReply, FastifyRequest } from 'fastify';
 import { ZodValidationException } from 'nestjs-zod';
+import { ZodError } from 'zod';
 import { ErrorCode, ProblemDetail } from '@dineflow/contracts';
 
 /**
@@ -28,9 +29,13 @@ export class AllExceptionsFilter implements ExceptionFilter {
     let status = HttpStatus.INTERNAL_SERVER_ERROR;
     let problem: ProblemDetail;
 
-    if (exception instanceof ZodValidationException) {
+    if (exception instanceof ZodValidationException || exception instanceof ZodError) {
       status = HttpStatus.UNPROCESSABLE_ENTITY;
-      const errors = exception.getZodError().errors.map((e) => ({
+      const zodErr =
+        exception instanceof ZodValidationException
+          ? exception.getZodError()
+          : exception;
+      const errors = zodErr.errors.map((e) => ({
         path: e.path.join('.'),
         message: e.message,
       }));

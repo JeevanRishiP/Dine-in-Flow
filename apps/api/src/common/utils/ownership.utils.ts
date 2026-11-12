@@ -53,3 +53,4 @@ export function assertCustomerAccessScope(
 
   throw domainError(ErrorCode.FORBIDDEN, 'You do not have permission to access this resource.', 403);
 }
+
