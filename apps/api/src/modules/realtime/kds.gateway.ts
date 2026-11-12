@@ -42,7 +42,16 @@ const orgConnectionCount = new Map<string, number>();
 
 @WebSocketGateway({
   namespace: '/kds',
-  cors: { origin: true, credentials: true },
+  cors: {
+    origin:
+      process.env['NODE_ENV'] === 'production'
+        ? (process.env['ALLOWED_CORS_ORIGINS'] ?? 'https://console.dineflow.in')
+            .split(',')
+            .map((o) => o.trim())
+            .filter(Boolean)
+        : true,
+    credentials: true,
+  },
   transports: ['websocket'],
 })
 export class KdsGateway implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect {
@@ -88,25 +97,37 @@ export class KdsGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
     }
     orgConnectionCount.set(orgId, count + 1);
 
-    // ── Join org room ──────────────────────────────────────────────────────────
-    await socket.join(`org:${orgId}`);
+    // ── Join org/outlet room ──────────────────────────────────────────────────
+    const outletId = payload.outletId;
+    const roomName = outletId ? `outlet:${orgId}:${outletId}` : `org:${orgId}`;
+    await socket.join(roomName);
     socket.data['orgId']  = orgId;
+    socket.data['outletId'] = outletId;
     socket.data['role']   = payload.role;
-    this.logger.debug(`Staff connected: socket=${socket.id} org=${orgId} role=${payload.role}`);
+    this.logger.debug(`Staff connected: socket=${socket.id} room=${roomName} role=${payload.role}`);
 
     // ── Subscribe to realtime events ───────────────────────────────────────────
-    const deregister = this.realtimeService.registerWsEmitter(orgId, (msg: OutboxMessage) => {
-      socket.emit('order:event', msg);
-    });
+    const deregister = this.realtimeService.registerWsEmitter(
+      orgId,
+      (msg: OutboxMessage) => {
+        socket.emit('order:event', msg);
+      },
+      outletId,
+    );
     this.cleanupMap.set(socket.id, deregister);
 
-    socket.emit('connected', { org_id: orgId });
+    socket.emit('connected', { org_id: orgId, ...(outletId ? { outlet_id: outletId } : {}) });
   }
 
   handleDisconnect(socket: Socket) {
     const orgId = socket.data['orgId'] as string | undefined;
     if (orgId) {
-      orgConnectionCount.set(orgId, Math.max(0, (orgConnectionCount.get(orgId) ?? 1) - 1));
+      const next = Math.max(0, (orgConnectionCount.get(orgId) ?? 1) - 1);
+      if (next === 0) {
+        orgConnectionCount.delete(orgId);
+      } else {
+        orgConnectionCount.set(orgId, next);
+      }
     }
     const deregister = this.cleanupMap.get(socket.id);
     if (deregister) {

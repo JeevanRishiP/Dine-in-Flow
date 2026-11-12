@@ -1,13 +1,10 @@
 /**
  * SSE Controller — Server-Sent Events for customer order tracking.
  *
- * Endpoint: GET /customer/orders/:id/events
- *   - No auth required (order ID is a random UUID, acts as a capability token).
- *   - Returns an EventSource stream.
- *   - Heartbeat every 25 s to keep proxies alive.
- *   - `Last-Event-ID` header support for resume after reconnect.
+ * Protected by GuestSession / Customer JWT + tenant/session ownership verification.
+ * Uses reply.hijack() for proper Fastify stream lifecycle, supports Last-Event-ID replay,
+ * and cleans up connection maps deterministically on disconnect.
  *
- * NEEDS_HUMAN_REVIEW: add customer session validation in Phase 4+
  * Reference: ARCH §10 (SSE for customers), D8
  */
 
@@ -40,7 +37,6 @@ import { Subject } from 'rxjs';
 const HEARTBEAT_INTERVAL_MS = 25_000;
 const MAX_SSE_CONNECTIONS_PER_ORDER = 3;
 
-// Simple connection cap per order_id (guards against DoS)
 const connectionCount = new Map<string, number>();
 
 @Controller()
@@ -49,13 +45,6 @@ export class SseController {
 
   constructor(private readonly realtimeService: RealtimeService) {}
 
-  /**
-   * Customer SSE stream for a single order.
-   * Streams order events as they are published to Redis.
-   *
-   * The response is kept open until the client disconnects.
-   * We use raw Fastify reply to set SSE headers and flush.
-   */
   @Get('customer/orders/:orgId/:orderId/events')
   @Require(Permission.GUEST_SESSION)
   async orderEvents(
@@ -70,7 +59,13 @@ export class SseController {
     }
 
     const scope = toCustomerAccessScope(user);
-    await withTenantContextRaw(orgId, async (db) => {
+    const lastEventIdHeader = req.headers['last-event-id'];
+    const lastEventId =
+      typeof lastEventIdHeader === 'string' && /^[0-9a-f-]{36}$/i.test(lastEventIdHeader)
+        ? lastEventIdHeader
+        : undefined;
+
+    const replayMessages = await withTenantContextRaw(orgId, async (db) => {
       const { rows } = await db.query<{
         id: string;
         session_id: string | null;
@@ -87,6 +82,31 @@ export class SseController {
         throw domainError(ErrorCode.NOT_FOUND, 'Order not found.', 404);
       }
       assertCustomerAccessScope(scope, rows[0]);
+
+      if (!lastEventId) return [];
+
+      const { rows: replay } = await db.query<{
+        id: string;
+        org_id: string;
+        aggregate: string;
+        aggregate_id: string;
+        event_type: string;
+        payload: unknown;
+        created_at: Date;
+      }>(
+        `SELECT id, org_id, aggregate, aggregate_id, event_type, payload, created_at
+         FROM outbox_events
+         WHERE org_id = $1
+           AND aggregate_id = $2
+           AND created_at > COALESCE(
+             (SELECT created_at FROM outbox_events WHERE id = $3 AND org_id = $1 LIMIT 1),
+             '-infinity'::timestamptz
+           )
+         ORDER BY created_at ASC
+         LIMIT 50`,
+        [orgId, orderId, lastEventId],
+      );
+      return replay;
     });
 
     // Connection cap per order
@@ -99,36 +119,53 @@ export class SseController {
     }
     connectionCount.set(orderId, count + 1);
 
-    // SSE headers
-    await reply.raw.writeHead(200, {
-      'Content-Type':  'text/event-stream',
+    reply.hijack();
+    reply.raw.writeHead(200, {
+      'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
-      'Connection':    'keep-alive',
-      'X-Accel-Buffering': 'no', // disable nginx buffering
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no',
     });
 
-    const subject = new Subject<{ data: string }>();
+    for (const ev of replayMessages) {
+      const data = JSON.stringify({
+        id: ev.id,
+        org_id: ev.org_id,
+        aggregate: ev.aggregate,
+        aggregateId: ev.aggregate_id,
+        eventType: ev.event_type,
+        payload: ev.payload,
+        ts: new Date(ev.created_at).toISOString(),
+      });
+      if (!reply.raw.writableEnded) {
+        reply.raw.write(`id: ${ev.id}\ndata: ${data}\n\n`);
+      }
+    }
+
+    const subject = new Subject<{ data: string; id?: string }>();
     const deregister = this.realtimeService.registerSseSubject(orgId, subject);
 
-    // Heartbeat to keep the connection alive through proxies
     const heartbeat = setInterval(() => {
       if (!reply.raw.writableEnded) {
         reply.raw.write(': heartbeat\n\n');
       }
     }, HEARTBEAT_INTERVAL_MS);
 
-    // Subscribe to events
     const subscription = subject.subscribe({
-      next: ({ data }) => {
+      next: ({ data, id }) => {
         if (!reply.raw.writableEnded) {
-          // Filter to only events for this order
           try {
             const msg = JSON.parse(data) as { aggregateId?: string; id?: string };
             if (msg.aggregateId !== orderId) return;
+            const eventId = id ?? msg.id;
+            if (eventId) {
+              reply.raw.write(`id: ${eventId}\ndata: ${data}\n\n`);
+            } else {
+              reply.raw.write(`data: ${data}\n\n`);
+            }
           } catch {
             return;
           }
-          reply.raw.write(`data: ${data}\n\n`);
         }
       },
       error: (err: unknown) => {
@@ -136,12 +173,19 @@ export class SseController {
       },
     });
 
-    // Cleanup on client disconnect
+    let cleaned = false;
     const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
       clearInterval(heartbeat);
       subscription.unsubscribe();
       deregister();
-      connectionCount.set(orderId, Math.max(0, (connectionCount.get(orderId) ?? 1) - 1));
+      const next = Math.max(0, (connectionCount.get(orderId) ?? 1) - 1);
+      if (next === 0) {
+        connectionCount.delete(orderId);
+      } else {
+        connectionCount.set(orderId, next);
+      }
       this.logger.debug(`SSE connection closed for order ${orderId}`);
     };
 
