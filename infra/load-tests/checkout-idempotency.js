@@ -23,33 +23,54 @@ export const options = {
 };
 
 const BASE_URL = __ENV.API_BASE_URL || 'http://localhost:3000';
-const OUTLET_ID = __ENV.OUTLET_ID || '00000000-0000-0000-0000-000000000002';
-const TABLE_ID = __ENV.TABLE_ID || '00000000-0000-0000-0000-000000000003';
+const QR_TOKEN = __ENV.QR_TOKEN || '';
+const SESSION_ID = __ENV.SESSION_ID || '00000000-0000-0000-0000-000000000003';
+const GUEST_SESSION_TOKEN = __ENV.GUEST_SESSION_TOKEN || '';
 const ITEM_ID = __ENV.ITEM_ID || '11111111-1111-1111-1111-111111111111';
 
 // Shared set of 5 idempotency keys across all 20 VUs
 const SHARED_KEYS = [
-  'idemp-test-fixed-key-0001',
-  'idemp-test-fixed-key-0002',
-  'idemp-test-fixed-key-0003',
-  'idemp-test-fixed-key-0004',
-  'idemp-test-fixed-key-0005',
+  '10000000-0000-4000-8000-000000000001',
+  '10000000-0000-4000-8000-000000000002',
+  '10000000-0000-4000-8000-000000000003',
+  '10000000-0000-4000-8000-000000000004',
+  '10000000-0000-4000-8000-000000000005',
 ];
 
-export default function () {
+export function setup() {
+  if (GUEST_SESSION_TOKEN && SESSION_ID) {
+    return { sessionId: SESSION_ID, token: GUEST_SESSION_TOKEN };
+  }
+  if (!QR_TOKEN) {
+    throw new Error('Set QR_TOKEN (HMAC signed) or GUEST_SESSION_TOKEN + SESSION_ID');
+  }
+  const openRes = http.post(
+    `${BASE_URL}/v1/public/sessions/open`,
+    JSON.stringify({ qr_token: QR_TOKEN, pax: 2 }),
+    { headers: { 'Content-Type': 'application/json' } },
+  );
+  const body = JSON.parse(openRes.body || '{}');
+  if (openRes.status >= 400 || !body.guestSessionToken || !body.id) {
+    throw new Error(`Failed to open signed session (${openRes.status}): ${openRes.body}`);
+  }
+  return { sessionId: body.id, token: body.guestSessionToken };
+}
+
+export default function (data) {
   const keyIndex = Math.floor(Math.random() * SHARED_KEYS.length);
   const idempotencyKey = SHARED_KEYS[keyIndex];
 
-  const orderUrl = `${BASE_URL}/customer/orders`;
+  const orderUrl = `${BASE_URL}/v1/customer/orders`;
   const orderPayload = JSON.stringify({
-    outlet_id: OUTLET_ID,
-    table_id: TABLE_ID,
-    items: [{ item_id: ITEM_ID, quantity: 1 }],
+    session_id: data.sessionId,
+    idempotency_key: idempotencyKey,
+    items: [{ menu_item_id: ITEM_ID, quantity: 1, portion: 'FULL' }],
   });
 
   const res = http.post(orderUrl, orderPayload, {
     headers: {
       'Content-Type': 'application/json',
+      Authorization: `Bearer ${data.token}`,
       'Idempotency-Key': idempotencyKey,
     },
     tags: { name: 'ConcurrentIdempotentCheckout' },

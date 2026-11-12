@@ -28,8 +28,9 @@ export const options = {
 };
 
 const BASE_URL = __ENV.API_BASE_URL || 'http://localhost:3000';
-const OUTLET_ID = __ENV.OUTLET_ID || '00000000-0000-0000-0000-000000000002';
-const TABLE_ID = __ENV.TABLE_ID || '00000000-0000-0000-0000-000000000003';
+const QR_TOKEN = __ENV.QR_TOKEN || '';
+const SESSION_ID = __ENV.SESSION_ID || '00000000-0000-0000-0000-000000000003';
+const GUEST_SESSION_TOKEN = __ENV.GUEST_SESSION_TOKEN || '';
 const ITEM_ID = __ENV.ITEM_ID || '11111111-1111-1111-1111-111111111111';
 
 // Generate UUID v4 for unique idempotency key
@@ -41,17 +42,37 @@ function generateUuid() {
   });
 }
 
-export default function () {
+export function setup() {
+  if (GUEST_SESSION_TOKEN && SESSION_ID) {
+    return { sessionId: SESSION_ID, token: GUEST_SESSION_TOKEN };
+  }
+  if (!QR_TOKEN) {
+    throw new Error('Set QR_TOKEN (HMAC signed) or GUEST_SESSION_TOKEN + SESSION_ID');
+  }
+  const openRes = http.post(
+    `${BASE_URL}/v1/public/sessions/open`,
+    JSON.stringify({ qr_token: QR_TOKEN, pax: 2 }),
+    { headers: { 'Content-Type': 'application/json' } },
+  );
+  const body = JSON.parse(openRes.body || '{}');
+  if (openRes.status >= 400 || !body.guestSessionToken || !body.id) {
+    throw new Error(`Failed to open signed session (${openRes.status}): ${openRes.body}`);
+  }
+  return { sessionId: body.id, token: body.guestSessionToken };
+}
+
+export default function (data) {
   const idempotencyKey = generateUuid();
-  const orderUrl = `${BASE_URL}/customer/orders`;
+  const orderUrl = `${BASE_URL}/v1/customer/orders`;
 
   const orderPayload = JSON.stringify({
-    outlet_id: OUTLET_ID,
-    table_id: TABLE_ID,
+    session_id: data.sessionId,
+    idempotency_key: idempotencyKey,
     items: [
       {
-        item_id: ITEM_ID,
+        menu_item_id: ITEM_ID,
         quantity: 2,
+        portion: 'FULL',
         notes: 'Extra spicy',
       },
     ],
@@ -60,6 +81,7 @@ export default function () {
   const res = http.post(orderUrl, orderPayload, {
     headers: {
       'Content-Type': 'application/json',
+      Authorization: `Bearer ${data.token}`,
       'Idempotency-Key': idempotencyKey,
     },
     tags: { name: 'PlaceOrder' },
