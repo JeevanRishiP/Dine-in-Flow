@@ -21,6 +21,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import type { PoolClient } from 'pg';
 import { withTenantContextRaw, getPool } from '../../db/client.js';
+import { getRedis } from '../../common/redis/redis.client.js';
 import { domainError } from '../../common/errors/domain-error.js';
 import { ErrorCode } from '@dineflow/contracts';
 import { PhonePeAdapter } from './phonepe.adapter.js';
@@ -301,24 +302,23 @@ export class PaymentsService {
   }
 
   private async processWebhookEvent(
-    db: PoolClient,
+    inboxClient: PoolClient,
     inboxId: string,
     provider: string,
     event: ReturnType<PaymentProvider['verifyWebhook']>['event'],
   ) {
-    // Find payment by provider_order_id
-    const { rows } = await db.query<{
-      id: string; org_id: string; order_id: string; amount_paise: number; status: string;
+    // 1. Resolve payment across tenants via SECURITY DEFINER helper (works under dineflow_app RLS)
+    const { rows } = await inboxClient.query<{
+      id: string; org_id: string; order_id: string; amount_paise: string | number; status: string;
     }>(
       `SELECT id, org_id, order_id, amount_paise, status
-       FROM payments WHERE provider = $1 AND provider_order_id = $2
-       LIMIT 1`,
+       FROM resolve_payment_by_provider_order($1, $2)`,
       [provider, event.providerOrderId],
     );
     const payment = rows[0];
 
     if (!payment) {
-      await db.query(
+      await inboxClient.query(
         `UPDATE webhook_inbox SET status = 'SKIPPED', processed_at = now() WHERE id = $1`,
         [inboxId],
       );
@@ -326,70 +326,68 @@ export class PaymentsService {
       return;
     }
 
-    // AMOUNT MISMATCH check — flag instead of auto-accept (AGENTS §2, ARCH §11)
-    if (event.amountPaise !== payment.amount_paise) {
-      await db.query(
-        `UPDATE payments SET status = 'MISMATCH', raw_response = $1, updated_at = now()
-         WHERE id = $2`,
-        [JSON.stringify(event.raw), payment.id],
-      );
-      this.logger.warn(
-        `AMOUNT MISMATCH: payment=${payment.id} expected=${payment.amount_paise} got=${event.amountPaise}`,
-      );
-      await db.query(
-        `UPDATE webhook_inbox SET status = 'PROCESSED', processed_at = now() WHERE id = $1`,
-        [inboxId],
-      );
-      return;
-    }
+    // 2. Process payment/order state changes inside forced RLS tenant context
+    await withTenantContextRaw(payment.org_id, async (db) => {
+      // AMOUNT MISMATCH check — compare via BigInt so bigint string vs number cannot false-fail
+      if (BigInt(event.amountPaise) !== BigInt(payment.amount_paise)) {
+        await db.query(
+          `UPDATE payments SET status = 'MISMATCH', raw_response = $1, updated_at = now()
+           WHERE id = $2 AND org_id = $3`,
+          [JSON.stringify(event.raw), payment.id, payment.org_id],
+        );
+        this.logger.warn(
+          `AMOUNT MISMATCH: payment=${payment.id} expected=${payment.amount_paise} got=${event.amountPaise}`,
+        );
+        return;
+      }
 
-    // Update payment status
-    const newStatus = event.status === 'PAID' ? 'PAID'
-                    : event.status === 'FAILED' ? 'FAILED'
-                    : payment.status; // no change for PENDING
+      const newStatus = event.status === 'PAID' ? 'PAID'
+                      : event.status === 'FAILED' ? 'FAILED'
+                      : payment.status;
 
-    await db.query(
-      `UPDATE payments SET
-         status = $1,
-         provider_payment_id = COALESCE($2, provider_payment_id),
-         fee_paise = COALESCE($3, fee_paise),
-         settled_at = CASE WHEN $1 = 'PAID' THEN now() ELSE settled_at END,
-         raw_response = $4,
-         updated_at = now()
-       WHERE id = $5`,
-      [
-        newStatus,
-        event.providerPaymentId ?? null,
-        event.feePaise ?? null,
-        JSON.stringify(event.raw),
-        payment.id,
-      ],
-    );
-
-    // On successful payment: move order to CONFIRMED for kitchen new orders queue
-    if (event.status === 'PAID') {
       await db.query(
-        `UPDATE orders SET status = 'CONFIRMED', updated_at = now()
-         WHERE id = $1 AND status NOT IN ('CANCELLED', 'SERVED', 'BILLED')`,
-        [payment.order_id],
-      );
-      // Write to outbox for realtime propagation
-      await db.query(
-        `INSERT INTO outbox_events (org_id, aggregate, aggregate_id, event_type, payload)
-         VALUES ($1, 'payment', $2, 'PAYMENT_CAPTURED', $3)`,
+        `UPDATE payments SET
+           status = $1,
+           provider_payment_id = COALESCE($2, provider_payment_id),
+           fee_paise = COALESCE($3, fee_paise),
+           settled_at = CASE WHEN $1 = 'PAID' THEN now() ELSE settled_at END,
+           raw_response = $4,
+           updated_at = now()
+         WHERE id = $5 AND org_id = $6`,
         [
-          payment.org_id, payment.id,
-          JSON.stringify({ order_id: payment.order_id, amount_paise: event.amountPaise }),
+          newStatus,
+          event.providerPaymentId ?? null,
+          event.feePaise ?? null,
+          JSON.stringify(event.raw),
+          payment.id,
+          payment.org_id,
         ],
       );
-    }
 
-    await db.query(
+      if (event.status === 'PAID') {
+        await db.query(
+          `UPDATE orders SET status = 'CONFIRMED', updated_at = now()
+           WHERE id = $1 AND org_id = $2 AND status NOT IN ('CANCELLED', 'SERVED', 'BILLED')`,
+          [payment.order_id, payment.org_id],
+        );
+        await db.query(
+          `INSERT INTO outbox_events (org_id, aggregate, aggregate_id, event_type, payload)
+           VALUES ($1, 'payment', $2, 'PAYMENT_CAPTURED', $3)`,
+          [
+            payment.org_id,
+            payment.id,
+            JSON.stringify({ order_id: payment.order_id, amount_paise: event.amountPaise }),
+          ],
+        );
+      }
+
+      this.logger.log(`Webhook processed: payment=${payment.id} status=${newStatus}`);
+    });
+
+    await inboxClient.query(
       `UPDATE webhook_inbox SET status = 'PROCESSED', processed_at = now() WHERE id = $1`,
       [inboxId],
     );
-
-    this.logger.log(`Webhook processed: payment=${payment.id} status=${newStatus}`);
   }
 
   // ─── Refund ────────────────────────────────────────────────────────────────
@@ -414,7 +412,8 @@ export class PaymentsService {
         provider: string; provider_payment_id: string;
       }>(
         `SELECT id, order_id, amount_paise, status, provider, provider_payment_id
-         FROM payments WHERE id = $1 AND org_id = $2`,
+         FROM payments WHERE id = $1 AND org_id = $2
+         FOR UPDATE`,
         [paymentId, orgId],
       );
       const payment = payRows[0];
@@ -469,7 +468,7 @@ export class PaymentsService {
       );
       const refundId = refundRows[0]!.id;
 
-      const newPaymentStatus = dto.amount_paise >= payment.amount_paise
+      const newPaymentStatus = (alreadyRefunded + dto.amount_paise) >= payment.amount_paise
         ? 'REFUNDED'
         : 'PARTIALLY_REFUNDED';
 
@@ -515,46 +514,49 @@ export class PaymentsService {
   // ─── Reconciliation (called by scheduled job) ────────────────────────────
 
   async reconcilePendingPayments(): Promise<void> {
-    // Find payments PENDING for > 5 minutes (no org context needed — system job)
+    // Coordinate across replicas with a Redis leader lease
+    if (process.env['NODE_ENV'] !== 'test') {
+      try {
+        const redis = getRedis();
+        const acquired = await redis.set('locks:payment_reconcile', '1', 'EX', 240, 'NX');
+        if (acquired !== 'OK') {
+          this.logger.debug('Skipping payment reconciliation; another replica holds the lease.');
+          return;
+        }
+      } catch (err) {
+        this.logger.warn('Redis lock unavailable for reconciliation; proceeding locally', err);
+      }
+    }
+
     const pool = getPool();
-    const client = await pool.connect();
-    try {
-      const { rows } = await client.query<{
-        id: string; org_id: string; provider: string; provider_order_id: string; order_id: string;
-      }>(
-        `SELECT id, org_id, provider, provider_order_id, order_id
-         FROM payments
-         WHERE status IN ('CREATED', 'PENDING')
-           AND created_at < now() - interval '5 minutes'
-           AND provider NOT IN ('staff', 'cash', 'direct_upi')
-         LIMIT 50`,
-      );
+    const { rows } = await pool.query<{
+      id: string; org_id: string; provider: string; provider_order_id: string; order_id: string;
+    }>(`SELECT id, org_id, provider, provider_order_id, order_id FROM list_pending_payments_for_reconcile($1)`, [50]);
 
-      for (const row of rows) {
-        try {
-          const adapter = row.provider === 'phonepe' ? PhonePeAdapter : RazorpayAdapter;
-          const payment = await adapter.fetchPayment(row.provider_order_id);
+    for (const row of rows) {
+      try {
+        const adapter = row.provider === 'phonepe' ? PhonePeAdapter : RazorpayAdapter;
+        const payment = await adapter.fetchPayment(row.provider_order_id);
 
-          if (payment.status !== 'PENDING') {
-            await client.query(
-              `UPDATE payments SET status = $1, updated_at = now() WHERE id = $2`,
-              [payment.status, row.id],
+        if (payment.status !== 'PENDING') {
+          await withTenantContextRaw(row.org_id, async (db) => {
+            await db.query(
+              `UPDATE payments SET status = $1, updated_at = now() WHERE id = $2 AND org_id = $3`,
+              [payment.status, row.id, row.org_id],
             );
             if (payment.status === 'PAID') {
-              await client.query(
+              await db.query(
                 `UPDATE orders SET status = 'CONFIRMED', updated_at = now()
-                 WHERE id = $1 AND status NOT IN ('CANCELLED', 'SERVED', 'BILLED')`,
-                [row.order_id],
+                 WHERE id = $1 AND org_id = $2 AND status NOT IN ('CANCELLED', 'SERVED', 'BILLED')`,
+                [row.order_id, row.org_id],
               );
             }
-            this.logger.log(`Reconciled: payment=${row.id} → ${payment.status}`);
-          }
-        } catch (err) {
-          this.logger.error(`Reconcile failed for payment=${row.id}`, err);
+          });
+          this.logger.log(`Reconciled: payment=${row.id} → ${payment.status}`);
         }
+      } catch (err) {
+        this.logger.error(`Reconcile failed for payment=${row.id}`, err);
       }
-    } finally {
-      client.release();
     }
   }
 

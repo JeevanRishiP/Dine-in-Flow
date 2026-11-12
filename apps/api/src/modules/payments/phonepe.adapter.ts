@@ -165,14 +165,23 @@ export const PhonePeAdapter: PaymentProvider = {
       return { valid: false, eventId: '', event: buildEmptyEvent() };
     }
 
-    // Verify SHA256 checksum: sha256(responseB64 + saltKey) + '###' + saltIndex
+    // Verify SHA256 checksum using constant-time comparison: sha256(responseB64 + saltKey) + '###' + saltIndex
     const expectedHash = crypto
       .createHash('sha256')
       .update(responseB64 + saltKey)
       .digest('hex');
-    const receivedHash = xVerify.split('###')[0];
+    const receivedHash = (xVerify.split('###')[0] ?? '').toLowerCase();
 
-    if (expectedHash !== receivedHash) {
+    const expectedBuf = Buffer.from(expectedHash, 'hex');
+    const receivedBuf = /^[0-9a-f]+$/i.test(receivedHash)
+      ? Buffer.from(receivedHash, 'hex')
+      : Buffer.alloc(0);
+
+    if (
+      expectedBuf.length === 0 ||
+      expectedBuf.length !== receivedBuf.length ||
+      !crypto.timingSafeEqual(expectedBuf, receivedBuf)
+    ) {
       logger.warn('PhonePe webhook signature mismatch');
       return { valid: false, eventId: '', event: buildEmptyEvent() };
     }
@@ -199,10 +208,14 @@ export const PhonePeAdapter: PaymentProvider = {
     const merchantTransactionId = data.merchantTransactionId || '';
     const state = data.state || decodedJson.code || 'PENDING';
     const amount = typeof data.amount === 'number' ? data.amount : 0;
+    const uniqueEventId = data.transactionId
+      ? `${merchantTransactionId}:${state}:${data.transactionId}`
+      : `${merchantTransactionId}:${state}`;
 
     const normalizedEvent: NormalizedEvent = {
-      eventId: merchantTransactionId,
+      eventId: uniqueEventId,
       providerOrderId: merchantTransactionId,
+      providerPaymentId: data.transactionId,
       status: STATE_MAP[state] ?? 'PENDING',
       amountPaise: amount,
       currency: 'INR',
@@ -211,7 +224,7 @@ export const PhonePeAdapter: PaymentProvider = {
     };
 
     logger.log(`PhonePe webhook verified: orderId=${merchantTransactionId} status=${normalizedEvent.status}`);
-    return { valid: true, eventId: merchantTransactionId, event: normalizedEvent };
+    return { valid: true, eventId: uniqueEventId, event: normalizedEvent };
   },
 
   // ─── Fetch Payment (Reconciliation) ─────────────────────────────────────────

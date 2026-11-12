@@ -34,6 +34,13 @@ export type RefundStatusNormalized =
   | 'SUCCEEDED'
   | 'FAILED';
 
+export interface SplitSettlementConfig {
+  /** Sub-merchant / linked account identifier for SaaS / agency split settlement */
+  linkedAccountId?: string;
+  /** Platform fee or commission deducted in paise (optional) */
+  platformFeePaise?: number;
+}
+
 export interface CreatePaymentInput {
   orderId:         string;
   idempotencyKey:  string;
@@ -44,6 +51,7 @@ export interface CreatePaymentInput {
   customerPhone?:  string;    // E.164 — helps UPI pre-fill
   customerName?:   string;
   notes?:          Record<string, string>;
+  splitSettlement?: SplitSettlementConfig;
 }
 
 export interface CreatePaymentResult {
