@@ -290,6 +290,62 @@ describe('AiService (Phase 10)', () => {
       expect(res.answer).toBeDefined();
       expect(res.answer).toContain('Paneer Butter Masala');
       expect(res.callWaiterSuggested).toBe(false);
+      // Fallback response must never be persisted to ai_qa_cache
+      const cacheInserts = mockClient.query.mock.calls.filter((c: any) =>
+        typeof c[0] === 'string' && c[0].includes('INSERT INTO ai_qa_cache'),
+      );
+      expect(cacheInserts).toHaveLength(0);
+    });
+  });
+
+  describe('Cart Proposal Price Grounding & Identity Replies', () => {
+    it('replaces LLM-supplied proposedCartItems prices with authoritative DB pricePaise and drops unknown IDs', async () => {
+      mockClient.query.mockResolvedValue({ rowCount: 0, rows: [] });
+      mockClient.query.mockResolvedValueOnce({
+        rowCount: 1,
+        rows: [{ id: sessionId, org_id: orgId, outlet_id: outletId, message_count: 0, tokens_used: 0 }],
+      });
+
+      vi.spyOn(retrievalService, 'hybridSearch').mockResolvedValueOnce([
+        {
+          id: '11111111-1111-4111-8111-111111111111',
+          name: 'Butter Naan',
+          pricePaise: 7000,
+          vegType: 'VEG',
+          allergens: ['GLUTEN'],
+          spiceLevel: 0,
+          isAvailable: true,
+        },
+      ]);
+
+      service.setProvider({
+        generateEmbedding: vi.fn().mockResolvedValue([]),
+        chat: vi.fn().mockResolvedValue({
+          answer: 'Suggested Butter Naan for your cart.',
+          proposedCartItems: [
+            { itemId: '11111111-1111-4111-8111-111111111111', name: 'Butter Naan', quantity: 2, pricePaise: 1 },
+            { itemId: '99999999-9999-4999-8999-999999999999', name: 'Free Gold Bar', quantity: 1, pricePaise: 0 },
+          ],
+          tokensUsed: 50,
+          callWaiterSuggested: false,
+        }),
+      });
+
+      const res = await service.chat({ orgId, outletId, message: 'Add 2 butter naan' });
+      expect(res.proposedCartItems).toEqual([
+        { itemId: '11111111-1111-4111-8111-111111111111', name: 'Butter Naan', quantity: 2, pricePaise: 7000 },
+      ]);
+    });
+
+    it('does not append allergen disclaimer to "are you ai" or wipe menu replies mentioning staff', async () => {
+      const adapter = new MockAiAdapter();
+      const identityRes = await adapter.chat([{ role: 'user', content: 'are you ai' }], []);
+      expect(identityRes.answer).not.toContain('Please confirm with staff before consuming');
+      expect(identityRes.callWaiterSuggested).toBe(false);
+
+      const goldRes = await adapter.chat([{ role: 'user', content: "what is today's gold price" }], []);
+      expect(goldRes.answer).toContain("I'm not sure — please ask staff");
+      expect(goldRes.callWaiterSuggested).toBe(true);
     });
   });
 });

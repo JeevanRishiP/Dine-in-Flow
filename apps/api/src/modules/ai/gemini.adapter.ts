@@ -38,7 +38,7 @@ export class GeminiAdapter implements AiProvider {
   private readonly apiKey: string;
   private readonly model: string;
   private readonly embeddingModel = 'gemini-embedding-001';
-  private readonly timeoutMs = 8000;
+  private readonly timeoutMs = 15000;
 
   constructor(apiKey?: string, model = 'gemini-3.5-flash-lite') {
     this.apiKey = apiKey || process.env['GEMINI_API_KEY'] || '';
@@ -131,6 +131,7 @@ ${query}
         temperature: 0.2,
         maxOutputTokens: 800,
         responseMimeType: 'application/json',
+        ...(this.model.includes('gemini-3') ? { thinkingConfig: { thinkingLevel: 'minimal' } } : {}),
       },
     };
 
@@ -165,7 +166,12 @@ ${query}
 
       let parsed: Record<string, unknown> = {};
       try {
-        parsed = JSON.parse(rawText) as Record<string, unknown>;
+        const cleanedJson = rawText
+          .trim()
+          .replace(/^```(?:json)?\s*/i, '')
+          .replace(/\s*```$/i, '')
+          .trim();
+        parsed = JSON.parse(cleanedJson) as Record<string, unknown>;
       } catch {
         parsed = {
           answer: rawText,

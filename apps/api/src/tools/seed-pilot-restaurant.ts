@@ -38,6 +38,7 @@ export interface PilotSeederOptions {
   outletName?: string;
   ownerEmail?: string;
   ownerPassword?: string;
+  staffPassword?: string;
   menuCsvPath?: string;
   tableCount?: number;
   appBaseUrl?: string;
@@ -168,7 +169,17 @@ export async function seedPilotRestaurant(options: PilotSeederOptions = {}) {
   const orgSlug = options.orgSlug || 'royal-spice-bistro';
   const outletName = options.outletName || 'Indiranagar Flagship';
   const ownerEmail = options.ownerEmail || 'pilot.owner@royalspice.in';
-  const ownerPassword = options.ownerPassword || 'PilotLaunch2026!';
+  const ownerPassword =
+    options.ownerPassword ||
+    process.env['PILOT_OWNER_PASSWORD'] ||
+    (process.env['NODE_ENV'] === 'production' ? '' : 'PilotLaunch2026!');
+  const staffPassword =
+    options.staffPassword ||
+    process.env['PILOT_STAFF_PASSWORD'] ||
+    (process.env['NODE_ENV'] === 'production' ? '' : 'PilotStaff2026!');
+  if (!ownerPassword || !staffPassword) {
+    throw new Error('PILOT_OWNER_PASSWORD and PILOT_STAFF_PASSWORD are required when seeding in production.');
+  }
   const tableCount = options.tableCount ?? 20;
   const appBaseUrl = options.appBaseUrl || process.env['APP_BASE_URL'] || 'http://localhost:3003';
 
@@ -218,34 +229,60 @@ export async function seedPilotRestaurant(options: PilotSeederOptions = {}) {
       console.log(`[SEED] Created outlet: ${outletId}`);
     }
 
-    // 3. Create or retrieve Owner Staff User
-    const existingStaffRes = await client.query<{ id: string }>(
-      `SELECT id FROM staff_users WHERE org_id = $1 AND email = $2`,
-      [orgId, ownerEmail],
-    );
-
-    let staffUserId: string;
-    if (existingStaffRes.rows.length > 0) {
-      staffUserId = existingStaffRes.rows[0]!.id;
-      console.log(`[SEED] Found existing owner account: ${ownerEmail}`);
-    } else {
-      const passwordHash = await hashPassword(ownerPassword);
-      const insertStaffRes = await client.query<{ id: string }>(
-        `INSERT INTO staff_users (org_id, email, password_hash, display_name, email_verified, is_active)
-         VALUES ($1, $2, $3, 'Restaurant Owner', true, true)
-         RETURNING id`,
-        [orgId, ownerEmail, passwordHash],
+    // 3. Create or retrieve Owner + Station Staff Users
+    const ensureStaffAccount = async (params: {
+      username: string;
+      email: string;
+      displayName: string;
+      role: 'OWNER' | 'MANAGER' | 'CAPTAIN' | 'KITCHEN' | 'CASHIER';
+      password: string;
+    }) => {
+      const existingStaffRes = await client.query<{ id: string }>(
+        `SELECT id FROM staff_users WHERE org_id = $1 AND (email = $2 OR username = $3)`,
+        [orgId, params.email, params.username],
       );
-      staffUserId = insertStaffRes.rows[0]!.id;
 
-      // Assign OWNER membership
+      let staffUserId: string;
+      if (existingStaffRes.rows.length > 0) {
+        staffUserId = existingStaffRes.rows[0]!.id;
+        console.log(`[SEED] Found existing ${params.role} account: ${params.username} (${params.email})`);
+      } else {
+        const passwordHash = await hashPassword(params.password);
+        const insertStaffRes = await client.query<{ id: string }>(
+          `INSERT INTO staff_users (org_id, username, email, password_hash, display_name, email_verified, is_active)
+           VALUES ($1, $2, $3, $4, $5, true, true)
+           RETURNING id`,
+          [orgId, params.username, params.email, passwordHash, params.displayName],
+        );
+        staffUserId = insertStaffRes.rows[0]!.id;
+        console.log(`[SEED] Created ${params.role} account: ${params.username} (${params.email})`);
+      }
+
       await client.query(
         `INSERT INTO staff_memberships (org_id, user_id, outlet_id, role, is_active)
-         VALUES ($1, $2, $3, 'OWNER', true)
+         VALUES ($1, $2, $3, $4, true)
          ON CONFLICT (org_id, user_id, outlet_id) DO NOTHING`,
-        [orgId, staffUserId, outletId],
+        [orgId, staffUserId, outletId, params.role],
       );
-      console.log(`[SEED] Created owner account: ${ownerEmail} (Role: OWNER)`);
+      return staffUserId;
+    };
+
+    await ensureStaffAccount({
+      username: 'owner',
+      email: ownerEmail,
+      displayName: 'Restaurant Owner',
+      role: 'OWNER',
+      password: ownerPassword,
+    });
+
+    const stationAccounts = [
+      { username: 'manager', email: 'pilot.manager@royalspice.in', displayName: 'Anand Joshi', role: 'MANAGER' as const },
+      { username: 'captain', email: 'pilot.captain@royalspice.in', displayName: 'Rajesh Sharma', role: 'CAPTAIN' as const },
+      { username: 'kitchen', email: 'pilot.kitchen@royalspice.in', displayName: 'Chef Amit Roy', role: 'KITCHEN' as const },
+      { username: 'cashier', email: 'pilot.cashier@royalspice.in', displayName: 'Pooja Iyer', role: 'CASHIER' as const },
+    ];
+    for (const acc of stationAccounts) {
+      await ensureStaffAccount({ ...acc, password: staffPassword });
     }
 
     // 4. Parse and import menu CSV
@@ -389,6 +426,7 @@ export async function seedPilotRestaurant(options: PilotSeederOptions = {}) {
       outletName,
       ownerEmail,
       ownerPassword,
+      staffAccounts: stationAccounts.map((s) => ({ ...s, password: staffPassword })),
       categoriesCount: categoryMap.size,
       itemsCount: parsedItems.length,
       tables: generatedTables,
@@ -406,6 +444,9 @@ if (process.argv[1]?.endsWith('seed-pilot-restaurant.ts') || process.argv[1]?.en
       console.log(`Organization:  ${result.orgName} (${result.orgSlug})`);
       console.log(`Outlet:        ${result.outletName}`);
       console.log(`Owner Login:   ${result.ownerEmail} / ${result.ownerPassword}`);
+      for (const staff of result.staffAccounts) {
+        console.log(`${staff.role.padEnd(14)} ${staff.email} / ${staff.password}`);
+      }
       console.log(`Categories:    ${result.categoriesCount}`);
       console.log(`Menu Items:    ${result.itemsCount}`);
       console.log(`Active Tables: ${result.tables.length}`);

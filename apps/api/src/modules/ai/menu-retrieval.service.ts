@@ -59,10 +59,20 @@ export class MenuRetrievalService {
         }
       }
 
-      // 2. Keyword & Text Search
-      const cleanKeyword = query.replace(/[^\w\s]/gi, ' ').trim();
-      const keywordTerms = cleanKeyword.split(/\s+/).filter(Boolean);
-      const searchParam = `%${keywordTerms.join('%')}%`;
+      // 2. Keyword & Text Search (token-aware with spelling tolerance e.g. biriyani -> biryani)
+      const STOPWORDS = new Set([
+        'do', 'you', 'have', 'want', 'please', 'any', 'is', 'the', 'with', 'for',
+        'what', 'are', 'there', 'me', 'a', 'an', 'can', 'i', 'my', 'your', 'in',
+        'to', 'of', 'on', 'it', 'that', 'this', 'something', 'some', 'give', 'tell',
+      ]);
+      const rawTerms = query
+        .replace(/[^\w\s]/gi, ' ')
+        .toLowerCase()
+        .split(/\s+/)
+        .map((t) => (t === 'biriyani' ? 'biryani' : t))
+        .filter((t) => t.length >= 2 && !STOPWORDS.has(t));
+      const keywordTerms = rawTerms.length > 0 ? rawTerms.slice(0, 5) : [];
+      const likePatterns = keywordTerms.map((t) => `%${t}%`);
 
       const keywordQuery = `
         SELECT id, name, description_i18n, price_paise, veg_type, allergens,
@@ -73,9 +83,11 @@ export class MenuRetrievalService {
           AND is_active = true
           AND is_available = true
           AND (
-            name ILIKE $3
-            OR description_i18n::text ILIKE $3
-            OR array_to_string(allergens, ' ') ILIKE $3
+            (cardinality($3::text[]) > 0 AND (
+              name ILIKE ANY($3::text[])
+              OR description_i18n::text ILIKE ANY($3::text[])
+              OR array_to_string(allergens, ' ') ILIKE ANY($3::text[])
+            ))
             OR (search_vector IS NOT NULL AND search_vector @@ plainto_tsquery('english', $4))
           )
         LIMIT $5;
@@ -86,8 +98,8 @@ export class MenuRetrievalService {
         const res = await client.query(keywordQuery, [
           orgId,
           outletId,
-          searchParam,
-          cleanKeyword || query,
+          likePatterns,
+          keywordTerms.join(' ') || query,
           limit,
         ]);
         keywordRows = res.rows as RawMenuItemRow[];
@@ -95,10 +107,10 @@ export class MenuRetrievalService {
         this.logger.warn(`[AI] Keyword search query failed: ${err instanceof Error ? err.message : String(err)}`);
       }
 
-      // 3. Merge & Deduplicate (Vector items prioritized, then keyword matches)
+      // 3. Merge & Deduplicate (Keyword matches & vector items prioritized)
       const itemMap = new Map<string, RetrievedMenuItem>();
 
-      for (const row of [...vectorRows, ...keywordRows]) {
+      for (const row of [...keywordRows, ...vectorRows]) {
         if (!itemMap.has(row.id)) {
           const desc = row.description_i18n?.['en'] || (row.description_i18n ? Object.values(row.description_i18n)[0] : undefined);
           itemMap.set(row.id, {
@@ -116,8 +128,10 @@ export class MenuRetrievalService {
         }
       }
 
-      // If both searches produced 0 items, fetch top popular active dishes in outlet as context
-      if (itemMap.size === 0) {
+      // Include full active outlet catalog (up to max 40 items) so the assistant knows
+      // every available dish and can accurately say when an item is NOT on the menu.
+      const catalogLimit = Math.max(limit, 40);
+      if (itemMap.size < catalogLimit) {
         const fallbackRes = await client.query(
           `SELECT id, name, description_i18n, price_paise, veg_type, allergens,
                   spice_level, prep_time_min, calories, is_available
@@ -126,29 +140,31 @@ export class MenuRetrievalService {
              AND (outlet_id = $2 OR outlet_id IS NULL)
              AND is_active = true
              AND is_available = true
-           ORDER BY sort_order ASC
+           ORDER BY sort_order ASC, name ASC
            LIMIT $3;`,
-          [orgId, outletId, limit],
+          [orgId, outletId, catalogLimit],
         );
 
         for (const row of fallbackRes.rows as RawMenuItemRow[]) {
-          const desc = row.description_i18n?.['en'] || (row.description_i18n ? Object.values(row.description_i18n)[0] : undefined);
-          itemMap.set(row.id, {
-            id: row.id,
-            name: row.name,
-            description: desc,
-            pricePaise: Number(row.price_paise),
-            vegType: row.veg_type,
-            allergens: row.allergens || [],
-            spiceLevel: Number(row.spice_level) || 0,
-            prepTimeMin: row.prep_time_min ? Number(row.prep_time_min) : undefined,
-            calories: row.calories ? Number(row.calories) : undefined,
-            isAvailable: Boolean(row.is_available),
-          });
+          if (!itemMap.has(row.id)) {
+            const desc = row.description_i18n?.['en'] || (row.description_i18n ? Object.values(row.description_i18n)[0] : undefined);
+            itemMap.set(row.id, {
+              id: row.id,
+              name: row.name,
+              description: desc,
+              pricePaise: Number(row.price_paise),
+              vegType: row.veg_type,
+              allergens: row.allergens || [],
+              spiceLevel: Number(row.spice_level) || 0,
+              prepTimeMin: row.prep_time_min ? Number(row.prep_time_min) : undefined,
+              calories: row.calories ? Number(row.calories) : undefined,
+              isAvailable: Boolean(row.is_available),
+            });
+          }
         }
       }
 
-      return Array.from(itemMap.values()).slice(0, limit);
+      return Array.from(itemMap.values()).slice(0, catalogLimit);
     });
   }
 

@@ -13,7 +13,7 @@ import { getRedis } from '../../common/redis/redis.client.js';
 import type { AiChatDto } from './ai.dto.js';
 
 export const MAX_SESSION_MESSAGES = 20;
-export const MAX_SESSION_TOKENS = 8000;
+export const MAX_SESSION_TOKENS = 40000;
 const ORG_AI_RPM_LIMIT = 120;
 
 interface AiSessionRow {
@@ -176,7 +176,7 @@ export class AiService {
          FROM ai_chat_transcripts
          WHERE org_id = $1 AND session_id = $2
          ORDER BY created_at DESC
-         LIMIT 6;`,
+         LIMIT 10;`,
         [orgId, sessionId],
       );
 
@@ -210,13 +210,15 @@ export class AiService {
       outletId,
       cleanUserMessage,
       queryEmbedding,
-      8,
+      12,
     );
 
     let aiResult: AiChatResponse;
+    let usedFallback = false;
     try {
       aiResult = await this.provider.chat(pastMessages, contextItems);
     } catch (err) {
+      usedFallback = true;
       this.logger.warn(`[AI] Primary provider chat failed: ${err instanceof Error ? err.message : String(err)}, falling back to grounded mock provider`);
       try {
         const fallbackProvider = new MockAiAdapter();
@@ -228,6 +230,25 @@ export class AiService {
           tokensUsed: 0,
         };
       }
+    }
+
+    // Reconcile proposedCartItems against authoritative retrieved catalog (AGENTS §2 rules 1 & 2)
+    if (aiResult.proposedCartItems && aiResult.proposedCartItems.length > 0) {
+      const byId = new Map(contextItems.map((i) => [i.id, i]));
+      const byName = new Map(contextItems.map((i) => [i.name.toLowerCase(), i]));
+      aiResult.proposedCartItems = aiResult.proposedCartItems
+        .map((p) => {
+          const match = byId.get(p.itemId) || (p.name ? byName.get(p.name.toLowerCase()) : undefined);
+          if (!match) return null;
+          return {
+            itemId: match.id,
+            name: match.name,
+            quantity: Math.max(1, Math.min(20, Math.round(Number(p.quantity) || 1))),
+            pricePaise: match.pricePaise,
+            ...(p.notes ? { notes: p.notes } : {}),
+          };
+        })
+        .filter((p): p is NonNullable<typeof p> => p !== null);
     }
 
     const finalResult = applyGuardrails(cleanUserMessage, aiResult);
@@ -261,9 +282,11 @@ export class AiService {
       );
 
       if (
+        !usedFallback &&
+        pastMessages.length === 1 &&
         !finalResult.callWaiterSuggested &&
         !finalResult.answer.includes('I cannot comply') &&
-        normalizedQ.length > 3
+        normalizedQ.split(/\s+/).length >= 3
       ) {
         await client.query(
           `INSERT INTO ai_qa_cache (org_id, outlet_id, question_hash, question_clean, answer, tool_proposals, expires_at)

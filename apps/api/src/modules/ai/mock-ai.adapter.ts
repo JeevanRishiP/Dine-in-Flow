@@ -62,12 +62,22 @@ export class MockAiAdapter implements AiProvider {
       lowerQuery.includes('script') ||
       lowerQuery.includes('python') ||
       lowerQuery.includes('code') ||
-      lowerQuery.includes('capital of')
+      lowerQuery.includes('capital of') ||
+      lowerQuery.includes('gold price')
     ) {
       return applyGuardrails(query, {
         answer: `I'm not sure — please ask staff. I can only assist you with our restaurant's menu items.`,
         callWaiterSuggested: true,
         tokensUsed: 65,
+      });
+    }
+
+    // 2b. Identity / greeting queries
+    if (lowerQuery.includes('are you ai') || lowerQuery.includes('who are you') || /^(hi|hello|hey|namaste)\b/.test(lowerQuery.trim())) {
+      return applyGuardrails(query, {
+        answer: `Yes! I'm Chef AI, your menu assistant. Ask me about dishes, spice levels, vegetarian options, or pairings on our menu.`,
+        callWaiterSuggested: false,
+        tokensUsed: 40,
       });
     }
 
