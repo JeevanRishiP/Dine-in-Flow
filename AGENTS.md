@@ -23,7 +23,7 @@ This repository is `dineflow`, a multi-tenant restaurant dine-in ordering SaaS. 
 8. **Idempotency:** `Idempotency-Key` on order placement, payment creation, refunds, coupon redemption, referral credit.
 9. **Webhooks:** verify signature on the raw body, store in `webhook_inbox` (unique by provider+event_id), process async and idempotently. Never trust browser redirects for payment success.
 10. **No reward, discount, points or credit may be conditional on a public Google review.** Never write code that links customers/orders to Google reviews.
-11. **No unofficial WhatsApp/WhatsApp-Web libraries.** Official Cloud API via the provider interface only.
+11. **No unofficial WhatsApp/WhatsApp-Web libraries.** Official Cloud API via the provider interface only. *(Temporary local dev-only OTP exception recorded in `docs/adr/0002_dev_only_evolution_otp_exception.md`: `WHATSAPP_PROVIDER=evolution_dev` is allowed strictly when `NODE_ENV !== 'production'` against an isolated container; production hard-fails if enabled.)*
 12. **No new dependency without justification.** Before adding a package: confirm it exists on the registry, is actively maintained, has meaningful adoption, and has no better built-in/existing alternative. List it in the report. Never invent package names.
 13. **No `any`, no `@ts-ignore`** without a one-line justification comment and mention in the report.
 14. **No migrations that edit or drop existing columns/tables destructively.** Use expand → migrate → contract. Migrations are forward-only SQL files.
