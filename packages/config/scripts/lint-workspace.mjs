@@ -22,7 +22,7 @@ try {
   ts = rootReq('typescript');
 }
 
-const SKIP_DIRS = new Set(['node_modules', 'dist', '.next', '.turbo', 'coverage']);
+const SKIP_DIRS = new Set(['node_modules', 'dist', '.next', '.next-dev', '.turbo', 'coverage']);
 
 function collectFiles(dir, out = []) {
   if (!fs.existsSync(dir)) return out;

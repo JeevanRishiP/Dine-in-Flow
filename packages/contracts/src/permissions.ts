@@ -37,6 +37,7 @@ export const Permission = {
   TABLE_CREATE: 'table:create',
   TABLE_READ: 'table:read',
   TABLE_UPDATE: 'table:update',
+  TABLE_CLEAN: 'table:clean',
   TABLE_DELETE: 'table:delete',
 
   // ─── Order management ────────────────────────────────────────────────────
@@ -110,11 +111,11 @@ export const ROLE_PERMISSIONS: Record<string, Permission[]> = {
   MANAGER: [
     Permission.ORG_READ,
     Permission.OUTLET_READ, Permission.OUTLET_UPDATE,
-    Permission.STAFF_INVITE, Permission.STAFF_READ, Permission.STAFF_UPDATE, Permission.STAFF_DEACTIVATE,
+    Permission.STAFF_READ,
     Permission.MENU_CREATE, Permission.MENU_READ, Permission.MENU_WRITE,
     Permission.MENU_UPDATE, Permission.MENU_DELETE, Permission.MENU_PUBLISH,
     Permission.STOCK_UPDATE,
-    Permission.TABLE_CREATE, Permission.TABLE_READ, Permission.TABLE_UPDATE, Permission.TABLE_DELETE,
+    Permission.TABLE_CREATE, Permission.TABLE_READ, Permission.TABLE_UPDATE, Permission.TABLE_CLEAN, Permission.TABLE_DELETE,
     Permission.ORDER_READ, Permission.ORDER_UPDATE_STATUS, Permission.ORDER_CANCEL, Permission.ORDER_REFUND,
     Permission.KITCHEN_VIEW, Permission.KITCHEN_UPDATE,
     Permission.PAYMENT_READ, Permission.PAYMENT_REFUND, Permission.PAYMENT_MARK_PAID, Permission.REFUND_CREATE,
@@ -130,7 +131,7 @@ export const ROLE_PERMISSIONS: Record<string, Permission[]> = {
   CASHIER: [
     Permission.OUTLET_READ,
     Permission.MENU_READ,
-    Permission.TABLE_READ,
+    Permission.TABLE_READ, Permission.TABLE_CLEAN,
     Permission.ORDER_READ, Permission.ORDER_UPDATE_STATUS, Permission.ORDER_CANCEL,
     Permission.KITCHEN_VIEW,
     Permission.PAYMENT_READ, Permission.PAYMENT_MARK_PAID,
@@ -149,7 +150,7 @@ export const ROLE_PERMISSIONS: Record<string, Permission[]> = {
     Permission.OUTLET_READ,
     Permission.MENU_READ,
     Permission.STOCK_UPDATE,
-    Permission.TABLE_READ,
+    Permission.TABLE_READ, Permission.TABLE_CLEAN,
     Permission.ORDER_READ, Permission.ORDER_UPDATE_STATUS,
     Permission.KITCHEN_VIEW,
     Permission.CUSTOMER_READ,
@@ -159,7 +160,7 @@ export const ROLE_PERMISSIONS: Record<string, Permission[]> = {
     Permission.OUTLET_READ,
     Permission.MENU_READ,
     Permission.STOCK_UPDATE,
-    Permission.TABLE_READ,
+    Permission.TABLE_READ, Permission.TABLE_CLEAN,
     Permission.ORDER_READ, Permission.ORDER_UPDATE_STATUS,
     Permission.KITCHEN_VIEW,
     Permission.CUSTOMER_READ,
