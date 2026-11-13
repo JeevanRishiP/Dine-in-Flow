@@ -4,9 +4,37 @@ export interface StaffSessionUser {
   orgSlug: string;
   outletId: string | null;
   role: string;
+  username: string;
   email: string;
   name: string;
   avatar?: string;
+}
+
+export interface ConsoleStaffRecord {
+  id: string;
+  orgId: string;
+  username: string;
+  email: string;
+  displayName: string;
+  phone: string | null;
+  role: 'OWNER' | 'MANAGER' | 'CAPTAIN' | 'KITCHEN' | 'CASHIER' | 'WAITER';
+  outletId: string | null;
+  isActive: boolean;
+  lastLoginAt: string | null;
+  createdAt: string;
+}
+
+export interface ConsoleStaffDirectory {
+  orgId: string;
+  orgSlug: string;
+  orgName: string;
+  outlets: Array<{
+    id: string;
+    name: string;
+    address: string | null;
+    isActive: boolean;
+  }>;
+  staff: ConsoleStaffRecord[];
 }
 
 export interface ConsoleAuthState {
@@ -133,13 +161,19 @@ export function clearConsoleAuthState(): void {
 function buildAuthStateFromTokens(params: {
   accessToken: string;
   refreshToken: string;
-  orgSlug: string;
-  email: string;
+  orgSlug?: string;
+  username?: string;
+  email?: string;
   name?: string;
 }): ConsoleAuthState | null {
   const claims = decodeStaffJwtClaims(params.accessToken);
   if (!claims || claims.type !== 'staff_access') return null;
-  const fallbackName = params.email.split('@')[0] || claims.role;
+  const resolvedUsername =
+    params.username?.trim().toLowerCase() ||
+    params.email?.trim().toLowerCase().split('@')[0] ||
+    claims.role.toLowerCase();
+  const resolvedEmail = params.email?.trim().toLowerCase() || resolvedUsername;
+  const fallbackName = params.name?.trim() || resolvedUsername || claims.role;
   return {
     accessToken: params.accessToken,
     refreshToken: params.refreshToken,
@@ -147,11 +181,12 @@ function buildAuthStateFromTokens(params: {
     user: {
       id: claims.sub,
       orgId: claims.org,
-      orgSlug: params.orgSlug.trim().toLowerCase(),
+      orgSlug: (params.orgSlug ?? '').trim().toLowerCase(),
       outletId: claims.outletId,
       role: claims.role.toUpperCase(),
-      email: params.email.trim().toLowerCase(),
-      name: params.name?.trim() || fallbackName,
+      username: resolvedUsername,
+      email: resolvedEmail,
+      name: fallbackName,
     },
   };
 }
@@ -166,32 +201,42 @@ async function extractErrorMessage(res: Response, fallback: string): Promise<str
 }
 
 export async function loginStaffRemote(params: {
-  orgSlug: string;
-  email: string;
+  orgSlug?: string;
+  username?: string;
+  email?: string;
   password: string;
 }): Promise<StaffLoginOutcome> {
-  const orgSlug = params.orgSlug.trim().toLowerCase();
-  const email = params.email.trim().toLowerCase();
+  const orgSlug = (params.orgSlug ?? '').trim().toLowerCase();
+  const identifier = (params.username ?? params.email ?? '').trim().toLowerCase();
   const password = params.password;
 
-  if (!orgSlug || !email || !password) {
-    return { ok: false, error: 'Organization workspace, email, and password are required.' };
+  if (!identifier || !password) {
+    return { ok: false, error: 'Username and password are required.' };
   }
 
   try {
+    const body: Record<string, string> = { username: identifier, password };
+    if (orgSlug) {
+      body['orgSlug'] = orgSlug;
+    }
+
     const res = await fetch('/api/v1/auth/staff/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ orgSlug, email, password }),
+      body: JSON.stringify(body),
     });
     if (!res.ok) {
-      return { ok: false, error: await extractErrorMessage(res, 'Invalid email or password.') };
+      return { ok: false, error: await extractErrorMessage(res, 'Invalid username or password.') };
     }
     const data = (await res.json()) as {
       accessToken?: string;
       refreshToken?: string;
       requiresMfa?: boolean;
       preMfaToken?: string;
+      username?: string;
+      email?: string;
+      displayName?: string;
+      orgSlug?: string;
     };
     if (data.requiresMfa && data.preMfaToken) {
       return { ok: true, requiresMfa: true, preMfaToken: data.preMfaToken };
@@ -202,8 +247,10 @@ export async function loginStaffRemote(params: {
     const state = buildAuthStateFromTokens({
       accessToken: data.accessToken,
       refreshToken: data.refreshToken ?? '',
-      orgSlug,
-      email,
+      orgSlug: data.orgSlug || orgSlug,
+      username: data.username || (!identifier.includes('@') ? identifier : undefined),
+      email: data.email || (identifier.includes('@') ? identifier : undefined),
+      name: data.displayName,
     });
     if (!state) {
       return { ok: false, error: 'Received malformed staff token.' };
@@ -218,8 +265,9 @@ export async function loginStaffRemote(params: {
 export async function verifyStaffMfaRemote(params: {
   preMfaToken: string;
   code: string;
-  orgSlug: string;
-  email: string;
+  orgSlug?: string;
+  username?: string;
+  email?: string;
 }): Promise<StaffLoginOutcome> {
   const code = params.code.trim();
   if (!params.preMfaToken || !code) {
@@ -242,6 +290,7 @@ export async function verifyStaffMfaRemote(params: {
       accessToken: data.accessToken,
       refreshToken: data.refreshToken ?? '',
       orgSlug: params.orgSlug,
+      username: params.username,
       email: params.email,
     });
     if (!state) {
@@ -286,6 +335,7 @@ export async function refreshConsoleSession(): Promise<ConsoleAuthState | null> 
         accessToken: data.accessToken,
         refreshToken: data.refreshToken ?? current.refreshToken,
         orgSlug: current.user.orgSlug,
+        username: current.user.username,
         email: current.user.email,
         name: current.user.name,
       });
@@ -343,4 +393,87 @@ export async function consoleAuthFetch(input: string, init: RequestInit = {}): P
     }
   }
   return res;
+}
+
+export async function fetchConsoleStaffDirectory(): Promise<{
+  ok: boolean;
+  data?: ConsoleStaffDirectory;
+  error?: string;
+}> {
+  try {
+    const res = await consoleAuthFetch('/api/v1/console/staff');
+    if (!res.ok) {
+      return { ok: false, error: await extractErrorMessage(res, 'Failed to load staff directory.') };
+    }
+    const data = (await res.json()) as ConsoleStaffDirectory;
+    return { ok: true, data };
+  } catch {
+    return { ok: false, error: 'Unable to reach server to load staff directory.' };
+  }
+}
+
+export async function createConsoleStaffMember(payload: {
+  name: string;
+  username: string;
+  password: string;
+  role: ConsoleStaffRecord['role'];
+  outletId?: string | null;
+  phone?: string | null;
+}): Promise<{ ok: boolean; staff?: ConsoleStaffRecord; error?: string }> {
+  try {
+    const res = await consoleAuthFetch('/api/v1/console/staff', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      return { ok: false, error: await extractErrorMessage(res, 'Failed to create staff account.') };
+    }
+    return { ok: true, staff: (await res.json()) as ConsoleStaffRecord };
+  } catch {
+    return { ok: false, error: 'Unable to save staff account.' };
+  }
+}
+
+export async function updateConsoleStaffMember(
+  staffId: string,
+  payload: {
+    name?: string;
+    username?: string;
+    password?: string;
+    role?: ConsoleStaffRecord['role'];
+    outletId?: string | null;
+    phone?: string | null;
+    isActive?: boolean;
+  },
+): Promise<{ ok: boolean; staff?: ConsoleStaffRecord; error?: string }> {
+  try {
+    const res = await consoleAuthFetch(`/api/v1/console/staff/${encodeURIComponent(staffId)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      return { ok: false, error: await extractErrorMessage(res, 'Failed to update staff account.') };
+    }
+    return { ok: true, staff: (await res.json()) as ConsoleStaffRecord };
+  } catch {
+    return { ok: false, error: 'Unable to update staff account.' };
+  }
+}
+
+export async function deactivateConsoleStaffMember(
+  staffId: string,
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await consoleAuthFetch(`/api/v1/console/staff/${encodeURIComponent(staffId)}`, {
+      method: 'DELETE',
+    });
+    if (!res.ok) {
+      return { ok: false, error: await extractErrorMessage(res, 'Failed to deactivate staff account.') };
+    }
+    return { ok: true };
+  } catch {
+    return { ok: false, error: 'Unable to deactivate staff account.' };
+  }
 }

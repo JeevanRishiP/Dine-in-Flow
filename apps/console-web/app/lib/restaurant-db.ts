@@ -107,6 +107,7 @@ export interface OrderItem {
   quantity: number;
   status: 'PENDING' | 'CONFIRMED' | 'PREPARING' | 'READY' | 'SERVED' | 'CANCELLED';
   notes?: string;
+  targetTableNumber?: string | null;
   createdAt?: string;
 }
 
@@ -1462,13 +1463,17 @@ export function getLoggedInUser(): StaffMember | null {
       id: session.user.id,
       orgId: session.user.orgId,
       outletId: session.user.outletId,
+      username: session.user.username || known.username,
+      email: session.user.email || known.email,
+      name: session.user.name || known.name,
       role: (session.user.role as StaffMember['role']) || known.role,
     };
   }
   return {
     id: session.user.id,
     orgId: session.user.orgId,
-    name: session.user.name || session.user.email,
+    name: session.user.name || session.user.username || session.user.email,
+    username: session.user.username || session.user.email.split('@')[0],
     email: session.user.email,
     phone: '',
     role: (session.user.role as StaffMember['role']) || 'WAITER',

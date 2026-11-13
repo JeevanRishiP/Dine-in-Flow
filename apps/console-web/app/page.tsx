@@ -17,7 +17,8 @@ export default function CommonLoginPage() {
   const [orgSlug, setOrgSlug] = useState(
     () => process.env['NEXT_PUBLIC_DEFAULT_ORG_SLUG'] || '',
   );
-  const [email, setEmail] = useState('');
+  const [showOrgSlug, setShowOrgSlug] = useState(false);
+  const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [showSecret, setShowSecret] = useState(false);
   const [loginStep, setLoginStep] = useState<'CREDENTIALS' | 'MFA'>('CREDENTIALS');
@@ -48,10 +49,17 @@ export default function CommonLoginPage() {
     setLoading(true);
 
     if (loginStep === 'CREDENTIALS') {
-      const result = await loginStaffRemote({ orgSlug, email, password });
+      const result = await loginStaffRemote({
+        orgSlug: showOrgSlug ? orgSlug : undefined,
+        username,
+        password,
+      });
       setLoading(false);
       if (!result.ok) {
-        setError(result.error || 'Invalid credentials. Please check workspace, email, and password.');
+        if (result.error?.toLowerCase().includes('workspace slug')) {
+          setShowOrgSlug(true);
+        }
+        setError(result.error || 'Invalid username or password.');
         return;
       }
       if (result.requiresMfa && result.preMfaToken) {
@@ -70,7 +78,7 @@ export default function CommonLoginPage() {
       preMfaToken,
       code: mfaCode,
       orgSlug,
-      email,
+      username,
     });
     setLoading(false);
     if (!mfaRes.ok || !mfaRes.session) {
@@ -83,7 +91,7 @@ export default function CommonLoginPage() {
   const handleSignOutExisting = async () => {
     await logoutStaffRemote();
     setActiveSessionUser(null);
-    setEmail('');
+    setUsername('');
     setPassword('');
     setPreMfaToken('');
     setMfaCode('');
@@ -252,44 +260,16 @@ export default function CommonLoginPage() {
                       marginBottom: '6px',
                     }}
                   >
-                    Organization Workspace Slug
+                    Username
                   </label>
                   <input
                     type="text"
                     required
-                    autoComplete="organization"
-                    placeholder="e.g. royal-spice-bistro"
-                    value={orgSlug}
-                    onChange={(e) => setOrgSlug(e.target.value)}
-                    className="form-input"
-                    style={{
-                      width: '100%',
-                      padding: '12px 14px',
-                      fontSize: '0.92rem',
-                      borderRadius: '10px',
-                    }}
-                  />
-                </div>
-
-                <div>
-                  <label
-                    style={{
-                      display: 'block',
-                      fontSize: '0.82rem',
-                      fontWeight: 700,
-                      color: '#cbd5e1',
-                      marginBottom: '6px',
-                    }}
-                  >
-                    Staff Email
-                  </label>
-                  <input
-                    type="email"
-                    required
+                    autoFocus
                     autoComplete="username"
-                    placeholder="staff@restaurant.com"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
+                    placeholder="e.g. kitchen, captain, cashier, owner"
+                    value={username}
+                    onChange={(e) => setUsername(e.target.value)}
                     className="form-input"
                     style={{
                       width: '100%',
@@ -316,9 +296,9 @@ export default function CommonLoginPage() {
                     <input
                       type={showSecret ? 'text' : 'password'}
                       required
-                      minLength={8}
+                      minLength={4}
                       autoComplete="current-password"
-                      placeholder="Enter your password"
+                      placeholder="Enter password"
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
                       className="form-input"
@@ -350,11 +330,46 @@ export default function CommonLoginPage() {
                     </button>
                   </div>
                 </div>
+
+                <div>
+                  <button
+                    type="button"
+                    onClick={() => setShowOrgSlug(!showOrgSlug)}
+                    style={{
+                      background: 'none',
+                      border: 'none',
+                      color: '#64748b',
+                      fontSize: '0.78rem',
+                      cursor: 'pointer',
+                      padding: 0,
+                    }}
+                  >
+                    {showOrgSlug ? '▾ Hide Restaurant Workspace' : '▸ Optional: Specify Restaurant Workspace'}
+                  </button>
+                  {showOrgSlug && (
+                    <div style={{ marginTop: '8px' }}>
+                      <input
+                        type="text"
+                        autoComplete="organization"
+                        placeholder="e.g. royal-spice-bistro"
+                        value={orgSlug}
+                        onChange={(e) => setOrgSlug(e.target.value)}
+                        className="form-input"
+                        style={{
+                          width: '100%',
+                          padding: '10px 12px',
+                          fontSize: '0.88rem',
+                          borderRadius: '10px',
+                        }}
+                      />
+                    </div>
+                  )}
+                </div>
               </>
             ) : (
               <>
                 <div style={{ fontSize: '0.85rem', color: '#cbd5e1' }}>
-                  Enter the 6-digit authenticator code (or recovery code) for <strong>{email}</strong>.
+                  Enter the 6-digit authenticator code (or recovery code) for <strong>{username}</strong>.
                 </div>
                 <div>
                   <label
@@ -442,9 +457,9 @@ export default function CommonLoginPage() {
           </form>
         </div>
 
-        {/* Security & Multi-tenant Note */}
-        <div style={{ marginTop: '20px', fontSize: '0.75rem', color: '#64748b', lineHeight: 1.5 }}>
-          🔒 Multi-tenant JWT & MFA authentication enforced · Server-validated station RBAC and outlet isolation active.
+        {/* Staff Login Note */}
+        <div style={{ marginTop: '20px', fontSize: '0.78rem', color: '#94a3b8', lineHeight: 1.5 }}>
+          Use the username &amp; password assigned by your Restaurant Owner. Roles, usernames, and passwords are managed in the Owner Console.
         </div>
       </div>
     </div>

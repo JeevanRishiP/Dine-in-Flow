@@ -81,6 +81,7 @@ describe('console-web auth-client security invariants', () => {
         orgSlug: 'acme',
         outletId: null,
         role: 'OWNER',
+        username: 'owner',
         email: 'owner@acme.test',
         name: 'Owner',
       },

@@ -35,7 +35,12 @@ import {
   logoutStaffRemote,
   consoleAuthFetch,
   isAuthStateExpired,
+  fetchConsoleStaffDirectory,
+  createConsoleStaffMember,
+  updateConsoleStaffMember,
+  deactivateConsoleStaffMember,
 } from '../lib/auth-client';
+import MenuCatalogManager from '../components/MenuCatalogManager';
 
 export type OwnerScreen =
   | 'DASHBOARD'
@@ -60,8 +65,10 @@ export default function OwnerWebApp() {
   const [orgSlug, setOrgSlug] = useState(
     () => process.env['NEXT_PUBLIC_DEFAULT_ORG_SLUG'] || '',
   );
+  const [showOrgSlug, setShowOrgSlug] = useState(false);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [showOwnerPass, setShowOwnerPass] = useState(false);
   const [preMfaToken, setPreMfaToken] = useState('');
   const [totpCode, setTotpCode] = useState('');
   const [loginStep, setLoginStep] = useState<'CREDENTIALS' | 'TOTP'>('CREDENTIALS');
@@ -115,13 +122,11 @@ export default function OwnerWebApp() {
   const [orderStatusFilter, setOrderStatusFilter] = useState<'ALL' | 'BILLED' | 'ACTIVE' | 'CANCELLED'>('ALL');
   const [selectedOrderDrawer, setSelectedOrderDrawer] = useState<Order | null>(null);
 
-  // Menu State (Screen 3)
+  // Menu State (Screen 3 fallback data for overview analytics)
   const currentBranchData = getBranchData(selectedOutletId);
   const [categories, setCategories] = useState<MenuCategory[]>(currentBranchData.categories);
   const [menuItems, setMenuItems] = useState<MenuItem[]>(currentBranchData.menuItems);
   const [selectedCategoryName, setSelectedCategoryName] = useState<string>('Main Course');
-  const [showItemEditorModal, setShowItemEditorModal] = useState(false);
-  const [editingItem, setEditingItem] = useState<MenuItem | null>(null);
 
   // Tables & QR State (Screen 4)
   const [tables, setTables] = useState<Table[]>(currentBranchData.tables);
@@ -141,31 +146,86 @@ export default function OwnerWebApp() {
   const [selectedFeedbackDrawer, setSelectedFeedbackDrawer] = useState<FeedbackReview | null>(null);
   const [replyInput, setReplyInput] = useState('');
 
-  // Staff Management State (Screen 8)
-  const [staffList, setStaffList] = useState<StaffMember[]>(() =>
-    typeof window !== 'undefined' ? getStoredStaff() : ALL_STAFF_MEMBERS
-  );
+  // Staff Management State (Screen 8 — backed by PostgreSQL via /api/v1/console/staff)
+  const [staffList, setStaffList] = useState<StaffMember[]>([]);
+  const [staffLoading, setStaffLoading] = useState(false);
   const [showStaffModal, setShowStaffModal] = useState(false);
   const [editingStaff, setEditingStaff] = useState<StaffMember | null>(null);
   const [staffName, setStaffName] = useState('');
   const [staffOutletId, setStaffOutletId] = useState<string>('ALL');
   const [staffRole, setStaffRole] = useState<StaffMember['role']>('CAPTAIN');
   const [staffUsername, setStaffUsername] = useState('');
+  const [staffPassword, setStaffPassword] = useState('');
+  const [showStaffModalPass, setShowStaffModalPass] = useState(false);
+  const [staffIsActive, setStaffIsActive] = useState(true);
+  const [staffModalError, setStaffModalError] = useState('');
+  const [staffSaving, setStaffSaving] = useState(false);
   const [staffPhone, setStaffPhone] = useState('');
   const [staffAvatar, setStaffAvatar] = useState('👨‍💼');
   const [staffFilterOutlet, setStaffFilterOutlet] = useState<string>('ALL');
 
+  const loadServerStaffDirectory = async () => {
+    const auth = getConsoleAuthState();
+    if (!auth || auth.user.role !== 'OWNER') return;
+    setStaffLoading(true);
+    const res = await fetchConsoleStaffDirectory();
+    setStaffLoading(false);
+    if (!res.ok || !res.data) {
+      return;
+    }
+    const roleAvatar: Record<string, string> = {
+      OWNER: '👔',
+      MANAGER: '📋',
+      CAPTAIN: '👨‍💼',
+      KITCHEN: '👨‍🍳',
+      CASHIER: '👩‍💼',
+      WAITER: '🤵',
+    };
+    const mappedStaff: StaffMember[] = res.data.staff.map((s) => ({
+      id: s.id,
+      orgId: s.orgId,
+      name: s.displayName,
+      email: s.email,
+      username: s.username,
+      phone: s.phone || '',
+      role: s.role,
+      avatar: roleAvatar[s.role] || '👤',
+      outletId: s.outletId,
+      isActive: s.isActive,
+    }));
+    setStaffList(mappedStaff);
+
+    if (res.data.outlets.length > 0) {
+      const mappedOutlets: Outlet[] = res.data.outlets.map((o) => ({
+        id: o.id,
+        orgId: res.data!.orgId,
+        name: o.name,
+        shortName: o.name,
+        address: o.address || '',
+        timezone: 'Asia/Kolkata',
+        isActive: o.isActive,
+      }));
+      setOutletsList(mappedOutlets);
+      if (!mappedOutlets.some((o) => o.id === selectedOutletId)) {
+        setSelectedOutletId(mappedOutlets[0]!.id);
+      }
+    }
+  };
+
+  useEffect(() => {
+    if (isAuthenticated) {
+      void loadServerStaffDirectory();
+    }
+  }, [isAuthenticated]);
+
   // Listen for dynamic storage updates
   useEffect(() => {
     const handleSync = () => {
-      setOutletsList(getStoredOutlets());
-      setStaffList(getStoredStaff());
+      void loadServerStaffDirectory();
     };
     window.addEventListener('dineflow-data-updated', handleSync);
-    window.addEventListener('storage', handleSync);
     return () => {
       window.removeEventListener('dineflow-data-updated', handleSync);
-      window.removeEventListener('storage', handleSync);
     };
   }, []);
 
@@ -220,13 +280,17 @@ export default function OwnerWebApp() {
     }
   };
 
-  // Staff creation / edit handlers
+  // Staff creation / edit handlers (Owner-only via PostgreSQL API)
   const openAddStaffModal = () => {
     setEditingStaff(null);
     setStaffName('');
-    setStaffOutletId(selectedOutletId);
+    setStaffOutletId(selectedOutletId || 'ALL');
     setStaffRole('CAPTAIN');
     setStaffUsername('');
+    setStaffPassword('');
+    setShowStaffModalPass(false);
+    setStaffIsActive(true);
+    setStaffModalError('');
     setStaffPhone('');
     setStaffAvatar('👨‍💼');
     setShowStaffModal(true);
@@ -238,50 +302,79 @@ export default function OwnerWebApp() {
     setStaffOutletId(staff.outletId || 'ALL');
     setStaffRole(staff.role);
     setStaffUsername(staff.username || staff.email.split('@')[0] || '');
+    setStaffPassword('');
+    setShowStaffModalPass(false);
+    setStaffIsActive(staff.isActive !== false);
+    setStaffModalError('');
     setStaffPhone(staff.phone || '');
     setStaffAvatar(staff.avatar || '👤');
     setShowStaffModal(true);
   };
 
-  const handleSaveStaff = (e: React.FormEvent) => {
+  const handleSaveStaff = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!staffName.trim()) {
-      showToast('⚠️ Please enter staff name');
+    setStaffModalError('');
+    const cleanName = staffName.trim();
+    const cleanUsername = staffUsername.trim().toLowerCase();
+    if (!cleanName || !cleanUsername) {
+      setStaffModalError('Staff name and username are required.');
       return;
     }
-    const cleanUsername = staffUsername.trim() || staffName.trim().toLowerCase().replace(/\s+/g, '.');
-    const staffToSave: StaffMember = {
-      id: editingStaff ? editingStaff.id : `staff-${Date.now()}`,
-      orgId: getLoggedInUser()?.orgId || ORGANIZATION.id,
-      name: staffName.trim(),
-      email: cleanUsername.includes('@') ? cleanUsername : `${cleanUsername}@royalspice.in`,
-      username: cleanUsername,
-      phone: staffPhone.trim() || '+91 98860 00000',
-      role: staffRole,
-      avatar: staffAvatar || '👤',
-      outletId: staffOutletId === 'ALL' ? null : staffOutletId,
-      isActive: true,
-      mfaEnrolled: editingStaff?.mfaEnrolled ?? (staffRole === 'OWNER' || staffRole === 'MANAGER'),
-    };
-    const updated = saveStoredStaffMember(staffToSave);
-    setStaffList(updated);
+    if (!editingStaff && staffPassword.length < 4) {
+      setStaffModalError('Password must be at least 4 characters.');
+      return;
+    }
+    if (editingStaff && staffPassword.length > 0 && staffPassword.length < 4) {
+      setStaffModalError('New password must be at least 4 characters.');
+      return;
+    }
+
+    setStaffSaving(true);
+    const outletPayload = staffOutletId === 'ALL' ? null : staffOutletId;
+
+    const result = editingStaff
+      ? await updateConsoleStaffMember(editingStaff.id, {
+          name: cleanName,
+          username: cleanUsername,
+          ...(staffPassword.length > 0 ? { password: staffPassword } : {}),
+          role: staffRole,
+          outletId: outletPayload,
+          phone: staffPhone.trim() || null,
+          isActive: staffIsActive,
+        })
+      : await createConsoleStaffMember({
+          name: cleanName,
+          username: cleanUsername,
+          password: staffPassword,
+          role: staffRole,
+          outletId: outletPayload,
+          phone: staffPhone.trim() || null,
+        });
+
+    setStaffSaving(false);
+    if (!result.ok || !result.staff) {
+      setStaffModalError(result.error || 'Could not save staff credentials.');
+      return;
+    }
+
+    await loadServerStaffDirectory();
     setShowStaffModal(false);
     setEditingStaff(null);
-    showToast(`✅ Saved profile for ${staffToSave.name} (${staffToSave.role}). Credentials are provisioned server-side.`);
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(new CustomEvent('dineflow-data-updated'));
-    }
+    setStaffPassword('');
+    showToast(
+      `✅ ${editingStaff ? 'Updated' : 'Created'} ${result.staff.displayName} (@${result.staff.username} · ${result.staff.role})`,
+    );
   };
 
-  const handleDeleteStaff = (staffId: string, name: string) => {
-    if (confirm(`Are you sure you want to delete credentials for ${name}?`)) {
-      const updated = deleteStoredStaffMember(staffId);
-      setStaffList(updated);
-      showToast(`🗑️ Deleted staff member ${name}`);
-      if (typeof window !== 'undefined') {
-        window.dispatchEvent(new CustomEvent('dineflow-data-updated'));
-      }
+  const handleDeleteStaff = async (staffId: string, name: string) => {
+    if (!confirm(`Deactivate login access for ${name}?`)) return;
+    const res = await deactivateConsoleStaffMember(staffId);
+    if (!res.ok) {
+      showToast(`⚠️ ${res.error || 'Could not deactivate staff member.'}`);
+      return;
     }
+    await loadServerStaffDirectory();
+    showToast(`🗑️ Deactivated staff login for ${name}`);
   };
 
   // Active Outlet Info
@@ -371,10 +464,17 @@ export default function OwnerWebApp() {
     setLoginLoading(true);
 
     if (loginStep === 'CREDENTIALS') {
-      const res = await loginStaffRemote({ orgSlug, email, password });
+      const res = await loginStaffRemote({
+        orgSlug: showOrgSlug ? orgSlug : undefined,
+        username: email,
+        password,
+      });
       setLoginLoading(false);
       if (!res.ok) {
-        setLoginError(res.error || 'Invalid organization slug, email, or password.');
+        if (res.error?.toLowerCase().includes('workspace slug')) {
+          setShowOrgSlug(true);
+        }
+        setLoginError(res.error || 'Invalid username or password.');
         return;
       }
       if (res.requiresMfa && res.preMfaToken) {
@@ -485,37 +585,71 @@ export default function OwnerWebApp() {
             {loginStep === 'CREDENTIALS' ? (
               <>
                 <div>
-                  <label className="form-label">Workspace Slug</label>
+                  <label className="form-label">Owner Username</label>
                   <input
                     type="text"
-                    value={orgSlug}
-                    onChange={(e) => setOrgSlug(e.target.value)}
-                    placeholder="e.g. royal-spice-bistro"
-                    required
-                    className="form-input"
-                  />
-                </div>
-                <div>
-                  <label className="form-label">Owner Email</label>
-                  <input
-                    type="email"
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
-                    placeholder="owner@restaurant.com"
+                    placeholder="e.g. owner"
                     required
                     className="form-input"
                   />
                 </div>
                 <div>
                   <label className="form-label">Password</label>
-                  <input
-                    type="password"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    minLength={8}
-                    required
-                    className="form-input"
-                  />
+                  <div style={{ position: 'relative' }}>
+                    <input
+                      type={showOwnerPass ? 'text' : 'password'}
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      minLength={4}
+                      required
+                      className="form-input"
+                      style={{ paddingRight: '40px' }}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowOwnerPass(!showOwnerPass)}
+                      style={{
+                        position: 'absolute',
+                        right: '10px',
+                        top: '50%',
+                        transform: 'translateY(-50%)',
+                        background: 'none',
+                        border: 'none',
+                        cursor: 'pointer',
+                        fontSize: '15px',
+                      }}
+                    >
+                      {showOwnerPass ? '🙈' : '👁️'}
+                    </button>
+                  </div>
+                </div>
+                <div>
+                  <button
+                    type="button"
+                    onClick={() => setShowOrgSlug(!showOrgSlug)}
+                    style={{
+                      background: 'none',
+                      border: 'none',
+                      color: '#64748b',
+                      fontSize: '0.78rem',
+                      cursor: 'pointer',
+                      padding: 0,
+                    }}
+                  >
+                    {showOrgSlug ? '▾ Hide Workspace Slug' : '▸ Optional: Restaurant Workspace Slug'}
+                  </button>
+                  {showOrgSlug && (
+                    <input
+                      type="text"
+                      value={orgSlug}
+                      onChange={(e) => setOrgSlug(e.target.value)}
+                      placeholder="e.g. royal-spice-bistro"
+                      className="form-input"
+                      style={{ marginTop: '8px' }}
+                    />
+                  )}
                 </div>
                 <button
                   type="submit"
@@ -1186,129 +1320,13 @@ export default function OwnerWebApp() {
             </div>
           )}
 
-          {/* SCREEN 3: MENU CATALOG */}
+          {/* SCREEN 3: MENU CATALOG (PostgreSQL + Food Photo Editor) */}
           {activeScreen === 'MENU' && (
-            <div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', flexWrap: 'wrap', gap: '12px' }}>
-                <div>
-                  <h2 style={{ fontSize: '1.6rem', fontWeight: 900 }}>Menu Catalog Management</h2>
-                  <p style={{ color: 'var(--text-secondary)', fontSize: '0.88rem' }}>
-                    {categories.length} Categories · {menuItems.length} Dishes in {currentOutlet.shortName}
-                  </p>
-                </div>
-
-                <div style={{ display: 'flex', gap: '10px' }}>
-                  <button
-                    onClick={() => {
-                      setEditingItem(null);
-                      setShowItemEditorModal(true);
-                    }}
-                    className="btn-primary"
-                  >
-                    + Add New Dish
-                  </button>
-                </div>
-              </div>
-
-              {/* Category tabs */}
-              <div style={{ display: 'flex', gap: '8px', marginBottom: '20px', overflowX: 'auto', paddingBottom: '4px' }}>
-                {categories.map((cat) => (
-                  <button
-                    key={cat.id}
-                    onClick={() => setSelectedCategoryName(cat.name)}
-                    style={{
-                      padding: '8px 16px',
-                      borderRadius: 'var(--radius-sm)',
-                      fontWeight: 700,
-                      fontSize: '0.85rem',
-                      background: selectedCategoryName === cat.name ? 'var(--accent-cyan)' : 'var(--bg-surface)',
-                      color: selectedCategoryName === cat.name ? '#000' : 'var(--text-secondary)',
-                      border: '1px solid var(--border-light)',
-                      whiteSpace: 'nowrap',
-                    }}
-                  >
-                    {cat.name} ({menuItems.filter((i) => i.categoryName === cat.name).length})
-                  </button>
-                ))}
-              </div>
-
-              {/* Dishes Table */}
-              <div className="data-table-container">
-                <table className="data-table">
-                  <thead>
-                    <tr>
-                      <th>Dish Name</th>
-                      <th>Hindi Name</th>
-                      <th>Diet</th>
-                      <th>Portions & Price</th>
-                      <th>Prep Time</th>
-                      <th>Calories</th>
-                      <th>Status</th>
-                      <th>Action</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {menuItems
-                      .filter((i) => i.categoryName === selectedCategoryName)
-                      .map((item) => (
-                        <tr key={item.id}>
-                          <td>
-                            <div style={{ fontWeight: 800 }}>{item.name}</div>
-                            <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>{item.description}</div>
-                          </td>
-                          <td style={{ color: 'var(--text-secondary)' }}>{item.nameHindi}</td>
-                          <td>
-                            <span
-                              style={{
-                                fontSize: '0.75rem',
-                                fontWeight: 800,
-                                color: item.vegType === 'VEG' ? '#10b981' : item.vegType === 'VEGAN' ? '#06b6d4' : '#f43f5e',
-                              }}
-                            >
-                              ● {item.vegType}
-                            </span>
-                          </td>
-                          <td>
-                            <div style={{ fontWeight: 800, color: 'var(--accent-cyan)' }}>
-                              Full: {formatPaise(item.pricePaise)}
-                            </div>
-                            {item.allowHalfPortion && (
-                              <div style={{ fontSize: '0.74rem', color: '#fbbf24', marginTop: '2px', fontWeight: 600 }}>
-                                Half: {formatPaise(item.halfPricePaise ?? Math.round(item.pricePaise * 0.62))}
-                              </div>
-                            )}
-                          </td>
-                          <td style={{ color: 'var(--text-muted)' }}>{item.prepTimeMin} mins</td>
-                          <td style={{ color: 'var(--text-muted)' }}>{item.calories} kcal</td>
-                          <td>
-                            <span className={`status-chip ${item.isAvailable ? 'chip-green' : 'chip-red'}`}>
-                              {item.isAvailable ? 'ACTIVE' : '86 OUT'}
-                            </span>
-                          </td>
-                          <td>
-                            <button
-                              onClick={() => {
-                                setEditingItem(item);
-                                setShowItemEditorModal(true);
-                              }}
-                              style={{
-                                background: 'rgba(255, 255, 255, 0.06)',
-                                border: '1px solid var(--border-light)',
-                                padding: '4px 10px',
-                                borderRadius: '4px',
-                                fontSize: '0.78rem',
-                                color: '#fff',
-                              }}
-                            >
-                              ✏️ Edit
-                            </button>
-                          </td>
-                        </tr>
-                      ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
+            <MenuCatalogManager
+              outletId={selectedOutletId}
+              outletName={currentOutlet.shortName || currentOutlet.name}
+              onToast={showToast}
+            />
           )}
 
           {/* SCREEN 4: TABLES & QR CODES */}
@@ -1595,66 +1613,6 @@ export default function OwnerWebApp() {
                   </tbody>
                 </table>
               </div>
-
-              {/* Customer Taste Profiles & Dining Preferences Section */}
-              <div style={{ marginTop: '28px', background: 'var(--bg-surface)', padding: '20px', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-light)' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
-                  <div>
-                    <h3 style={{ fontSize: '1.15rem', fontWeight: 800, color: '#fff' }}>
-                      👤 Guest Dining Profiles & Taste Preferences
-                    </h3>
-                    <p style={{ fontSize: '0.80rem', color: 'var(--text-secondary)' }}>
-                      Saved diner profiles with spice tolerance and kitchen instructions used for auto-customising plates.
-                    </p>
-                  </div>
-                  <span style={{ fontSize: '0.74rem', background: 'rgba(6, 182, 212, 0.15)', color: 'var(--accent-cyan)', padding: '3px 8px', borderRadius: '4px', fontWeight: 700 }}>
-                    4 Active Table Profiles
-                  </span>
-                </div>
-
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: '12px' }}>
-                  {[
-                    { name: 'Rahul', tag: 'ME', spice: 'MEDIUM', prep: 'Extra Crispy, Less Oil', diet: 'NON_VEG' },
-                    { name: 'Priya', tag: 'PARTNER', spice: 'MILD', prep: 'Mild, No Onion / Garlic, Less Oil', diet: 'VEG' },
-                    { name: 'Dad', tag: 'DAD', spice: 'HOT', prep: 'Extra Spicy / Kadak, Extra Onions', diet: 'NON_VEG' },
-                    { name: 'Mom', tag: 'MOM', spice: 'MILD', prep: 'Mild, Less Oil, No Garlic (Jain Prep)', diet: 'VEG' },
-                  ].map((prof) => (
-                    <div
-                      key={prof.name}
-                      style={{
-                        padding: '12px 14px',
-                        background: 'rgba(255,255,255,0.03)',
-                        borderRadius: '8px',
-                        border: '1px solid var(--border-light)',
-                      }}
-                    >
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
-                        <span style={{ fontWeight: 800, color: '#fff', fontSize: '0.92rem' }}>
-                          {prof.name} ({prof.tag})
-                        </span>
-                        <span
-                          style={{
-                            fontSize: '0.68rem',
-                            fontWeight: 700,
-                            padding: '1px 6px',
-                            borderRadius: '4px',
-                            background: prof.spice === 'MILD' ? 'rgba(16, 185, 129, 0.2)' : prof.spice === 'HOT' ? 'rgba(239, 68, 68, 0.2)' : 'rgba(245, 158, 11, 0.2)',
-                            color: prof.spice === 'MILD' ? '#34d399' : prof.spice === 'HOT' ? '#f87171' : '#fbbf24',
-                          }}
-                        >
-                          {prof.spice === 'MILD' ? '🍃 Mild' : prof.spice === 'HOT' ? '🔥 Hot' : '🌶️ Medium'}
-                        </span>
-                      </div>
-                      <div style={{ fontSize: '0.74rem', color: 'var(--text-secondary)' }}>
-                        <strong>Instructions:</strong> {prof.prep}
-                      </div>
-                      <div style={{ fontSize: '0.70rem', color: prof.diet === 'VEG' ? '#10b981' : '#f43f5e', marginTop: '4px', fontWeight: 600 }}>
-                        ● {prof.diet}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
             </div>
           )}
 
@@ -1869,22 +1827,22 @@ export default function OwnerWebApp() {
                             <td>
                               <span
                                 style={{
-                                  background: s.mfaEnrolled
-                                    ? 'rgba(16, 185, 129, 0.14)'
-                                    : 'rgba(6, 182, 212, 0.14)',
-                                  color: s.mfaEnrolled ? '#10b981' : 'var(--accent-cyan)',
+                                  background: 'rgba(6, 182, 212, 0.14)',
+                                  color: 'var(--accent-cyan)',
                                   fontWeight: 800,
                                   padding: '3px 8px',
                                   borderRadius: '6px',
                                   fontSize: '0.78rem',
                                 }}
                               >
-                                {s.mfaEnrolled ? '🔐 Password + MFA' : '🔑 Argon2id Password'}
+                                🔑 Username + Password
                               </span>
                             </td>
-                            <td style={{ fontSize: '0.82rem', color: 'var(--text-secondary)' }}>{s.phone}</td>
+                            <td style={{ fontSize: '0.82rem', color: 'var(--text-secondary)' }}>{s.phone || '—'}</td>
                             <td>
-                              <span className="status-chip chip-green">ACTIVE</span>
+                              <span className={`status-chip ${s.isActive ? 'chip-green' : 'chip-yellow'}`}>
+                                {s.isActive ? 'ACTIVE' : 'DISABLED'}
+                              </span>
                             </td>
                             <td style={{ textAlign: 'right' }}>
                               <div style={{ display: 'inline-flex', gap: '6px' }}>
@@ -2210,216 +2168,6 @@ export default function OwnerWebApp() {
         </div>
       )}
 
-      {/* MENU ITEM EDITOR MODAL (Half/Full Portion & Dish Settings) */}
-      {showItemEditorModal && (
-        <div className="modal-overlay" onClick={() => setShowItemEditorModal(false)}>
-          <div
-            className="modal-content"
-            style={{ maxWidth: '520px', background: '#0f172a', border: '1px solid var(--accent-cyan)' }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h3 style={{ fontSize: '1.25rem', fontWeight: 900, marginBottom: '6px' }}>
-              {editingItem ? `Edit Dish: ${editingItem.name}` : 'Create New Menu Item'}
-            </h3>
-            <p style={{ color: 'var(--text-secondary)', fontSize: '0.80rem', marginBottom: '16px' }}>
-              Configure portion sizing (Half / Full plate pricing) and kitchen prep parameters.
-            </p>
-
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                const formData = new FormData(e.currentTarget);
-                const name = formData.get('name') as string;
-                const nameHindi = formData.get('nameHindi') as string;
-                const pricePaise = Math.round(parseFloat(formData.get('priceRupees') as string || '0') * 100);
-                const allowHalf = formData.get('allowHalfPortion') === 'on';
-                const halfPricePaise = allowHalf
-                  ? Math.round(parseFloat(formData.get('halfPriceRupees') as string || '0') * 100)
-                  : undefined;
-                const prepTimeMin = parseInt(formData.get('prepTimeMin') as string || '15', 10);
-                const calories = parseInt(formData.get('calories') as string || '350', 10);
-                const vegType = formData.get('vegType') as 'VEG' | 'NON_VEG' | 'VEGAN';
-
-                if (editingItem) {
-                  setMenuItems((prev) =>
-                    prev.map((i) =>
-                      i.id === editingItem.id
-                        ? {
-                            ...i,
-                            name,
-                            nameHindi,
-                            pricePaise,
-                            allowHalfPortion: allowHalf,
-                            halfPricePaise,
-                            prepTimeMin,
-                            calories,
-                            vegType,
-                          }
-                        : i
-                    )
-                  );
-                } else {
-                  const newItem: MenuItem = {
-                    id: `dish-custom-${Date.now()}`,
-                    categoryId: categories.find((c) => c.name === selectedCategoryName)?.id || 'cat-main',
-                    categoryName: selectedCategoryName,
-                    name,
-                    nameHindi: nameHindi || name,
-                    description: 'Artisanal freshly prepared dish',
-                    pricePaise,
-                    allowHalfPortion: allowHalf,
-                    halfPricePaise,
-                    vegType,
-                    allergens: [],
-                    spiceLevel: 1,
-                    isAvailable: true,
-                    isActive: true,
-                    sortOrder: 99,
-                    prepTimeMin,
-                    calories,
-                  };
-                  setMenuItems((prev) => [...prev, newItem]);
-                }
-                setShowItemEditorModal(false);
-              }}
-              style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}
-            >
-              <div>
-                <label style={{ display: 'block', fontSize: '0.74rem', color: '#cbd5e1', fontWeight: 700, marginBottom: '4px' }}>
-                  Dish Name (English):
-                </label>
-                <input
-                  type="text"
-                  name="name"
-                  defaultValue={editingItem?.name || ''}
-                  required
-                  className="owner-input"
-                  style={{ width: '100%', padding: '8px 12px', background: 'rgba(255,255,255,0.06)', borderRadius: '6px', color: '#fff' }}
-                />
-              </div>
-
-              <div>
-                <label style={{ display: 'block', fontSize: '0.74rem', color: '#cbd5e1', fontWeight: 700, marginBottom: '4px' }}>
-                  Hindi Name (for Bilingual Menu):
-                </label>
-                <input
-                  type="text"
-                  name="nameHindi"
-                  defaultValue={editingItem?.nameHindi || ''}
-                  className="owner-input"
-                  style={{ width: '100%', padding: '8px 12px', background: 'rgba(255,255,255,0.06)', borderRadius: '6px', color: '#fff' }}
-                />
-              </div>
-
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
-                <div>
-                  <label style={{ display: 'block', fontSize: '0.74rem', color: '#cbd5e1', fontWeight: 700, marginBottom: '4px' }}>
-                    Full Plate Price (₹):
-                  </label>
-                  <input
-                    type="number"
-                    step="1"
-                    name="priceRupees"
-                    defaultValue={editingItem ? (editingItem.pricePaise / 100).toFixed(0) : '320'}
-                    required
-                    className="owner-input"
-                    style={{ width: '100%', padding: '8px 12px', background: 'rgba(255,255,255,0.06)', borderRadius: '6px', color: '#fff' }}
-                  />
-                </div>
-                <div>
-                  <label style={{ display: 'block', fontSize: '0.74rem', color: '#cbd5e1', fontWeight: 700, marginBottom: '4px' }}>
-                    Dietary Type:
-                  </label>
-                  <select
-                    name="vegType"
-                    defaultValue={editingItem?.vegType || 'NON_VEG'}
-                    className="owner-input"
-                    style={{ width: '100%', padding: '8px 12px', background: 'rgba(255,255,255,0.06)', borderRadius: '6px', color: '#fff' }}
-                  >
-                    <option value="VEG">VEG (Green)</option>
-                    <option value="NON_VEG">NON_VEG (Red)</option>
-                    <option value="VEGAN">VEGAN (Cyan)</option>
-                  </select>
-                </div>
-              </div>
-
-              {/* Portion Sizing Toggle & Half Plate Price */}
-              <div style={{ background: 'rgba(245, 158, 11, 0.08)', padding: '12px', borderRadius: '8px', border: '1px solid rgba(245, 158, 11, 0.25)' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
-                  <input
-                    type="checkbox"
-                    id="allowHalfPortionCheck"
-                    name="allowHalfPortion"
-                    defaultChecked={editingItem ? !!editingItem.allowHalfPortion : true}
-                    style={{ width: '16px', height: '16px', accentColor: '#f59e0b', cursor: 'pointer' }}
-                  />
-                  <label htmlFor="allowHalfPortionCheck" style={{ fontSize: '0.82rem', fontWeight: 700, color: '#fbbf24', cursor: 'pointer' }}>
-                    Allow Half Plate Portion Option
-                  </label>
-                </div>
-                <p style={{ fontSize: '0.70rem', color: '#94a3b8', marginBottom: '10px' }}>
-                  Enable for Biryani, Curries, Kebabs, Chicken Fry. Disable for Coffee, Desserts, Breads.
-                </p>
-
-                <div>
-                  <label style={{ display: 'block', fontSize: '0.72rem', color: '#cbd5e1', fontWeight: 600, marginBottom: '4px' }}>
-                    Half Plate Price (₹) — Recommended ~60-65% of full plate:
-                  </label>
-                  <input
-                    type="number"
-                    step="1"
-                    name="halfPriceRupees"
-                    defaultValue={editingItem?.halfPricePaise ? (editingItem.halfPricePaise / 100).toFixed(0) : '200'}
-                    className="owner-input"
-                    style={{ width: '100%', padding: '8px 12px', background: 'rgba(255,255,255,0.06)', borderRadius: '6px', color: '#fff' }}
-                  />
-                </div>
-              </div>
-
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
-                <div>
-                  <label style={{ display: 'block', fontSize: '0.74rem', color: '#cbd5e1', fontWeight: 700, marginBottom: '4px' }}>
-                    Prep Time (minutes):
-                  </label>
-                  <input
-                    type="number"
-                    name="prepTimeMin"
-                    defaultValue={editingItem?.prepTimeMin || 15}
-                    className="owner-input"
-                    style={{ width: '100%', padding: '8px 12px', background: 'rgba(255,255,255,0.06)', borderRadius: '6px', color: '#fff' }}
-                  />
-                </div>
-                <div>
-                  <label style={{ display: 'block', fontSize: '0.74rem', color: '#cbd5e1', fontWeight: 700, marginBottom: '4px' }}>
-                    Calories (kcal):
-                  </label>
-                  <input
-                    type="number"
-                    name="calories"
-                    defaultValue={editingItem?.calories || 420}
-                    className="owner-input"
-                    style={{ width: '100%', padding: '8px 12px', background: 'rgba(255,255,255,0.06)', borderRadius: '6px', color: '#fff' }}
-                  />
-                </div>
-              </div>
-
-              <div style={{ display: 'flex', gap: '10px', marginTop: '10px' }}>
-                <button type="submit" className="btn-primary" style={{ flex: 1 }}>
-                  💾 Save Dish Configuration
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setShowItemEditorModal(false)}
-                  className="btn-secondary"
-                >
-                  Cancel
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
       {/* ========================================================
           ADD NEW HOTEL / RESTAURANT MODAL
           ======================================================== */}
@@ -2518,7 +2266,7 @@ export default function OwnerWebApp() {
                   {editingStaff ? '✏️ Edit Staff Credentials' : '➕ Add Staff Member'}
                 </h3>
                 <p style={{ color: 'var(--text-secondary)', fontSize: '0.82rem' }}>
-                  Credentials and PIN set here are used by staff to unlock floor stations
+                  Only the Owner assigns or changes staff role, username, and password
                 </p>
               </div>
               <button
@@ -2529,6 +2277,22 @@ export default function OwnerWebApp() {
                 ✕
               </button>
             </div>
+
+            {staffModalError && (
+              <div
+                style={{
+                  background: 'rgba(244, 63, 94, 0.15)',
+                  border: '1px solid var(--accent-rose)',
+                  color: '#fff',
+                  padding: '8px 12px',
+                  borderRadius: '8px',
+                  fontSize: '0.82rem',
+                  marginBottom: '12px',
+                }}
+              >
+                ⚠️ {staffModalError}
+              </div>
+            )}
 
             <form onSubmit={handleSaveStaff} style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
               <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '12px', alignItems: 'center' }}>
@@ -2583,48 +2347,82 @@ export default function OwnerWebApp() {
                   </select>
                 </div>
                 <div>
-                  <label className="form-label">Staff Role</label>
+                  <label className="form-label">Assigned Role *</label>
                   <select
                     value={staffRole}
                     onChange={(e) => setStaffRole(e.target.value as StaffMember['role'])}
                     className="form-input"
                   >
-                    <option value="CAPTAIN">👨‍💼 Captain / Waiter</option>
+                    <option value="CAPTAIN">👨‍💼 Captain</option>
                     <option value="KITCHEN">👨‍🍳 Kitchen Chef / Cook</option>
                     <option value="CASHIER">👩‍💼 Cashier / POS</option>
+                    <option value="WAITER">🤵 Waiter / Server</option>
                     <option value="MANAGER">👔 Branch Manager</option>
-                    <option value="WAITER">🤵 Table Server</option>
+                    <option value="OWNER">👑 Owner</option>
                   </select>
                 </div>
               </div>
 
-              <div>
-                <label className="form-label">Staff Login Username or Email *</label>
-                <input
-                  type="text"
-                  required
-                  placeholder="e.g. rajesh.captain"
-                  value={staffUsername}
-                  onChange={(e) => setStaffUsername(e.target.value)}
-                  className="form-input"
-                />
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                <div>
+                  <label className="form-label">Login Username *</label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="e.g. rajesh1"
+                    value={staffUsername}
+                    onChange={(e) => setStaffUsername(e.target.value)}
+                    className="form-input"
+                  />
+                </div>
+                <div>
+                  <label className="form-label">
+                    {editingStaff ? 'New Password (optional)' : 'Password *'}
+                  </label>
+                  <div style={{ position: 'relative' }}>
+                    <input
+                      type={showStaffModalPass ? 'text' : 'password'}
+                      required={!editingStaff}
+                      minLength={4}
+                      placeholder={editingStaff ? 'Blank = keep existing' : 'Min 4 characters'}
+                      value={staffPassword}
+                      onChange={(e) => setStaffPassword(e.target.value)}
+                      className="form-input"
+                      style={{ paddingRight: '38px' }}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowStaffModalPass(!showStaffModalPass)}
+                      style={{
+                        position: 'absolute',
+                        right: '10px',
+                        top: '50%',
+                        transform: 'translateY(-50%)',
+                        background: 'none',
+                        border: 'none',
+                        cursor: 'pointer',
+                        fontSize: '14px',
+                      }}
+                    >
+                      {showStaffModalPass ? '🙈' : '👁️'}
+                    </button>
+                  </div>
+                </div>
               </div>
 
-              <div
-                style={{
-                  padding: '10px 12px',
-                  borderRadius: '8px',
-                  background: 'rgba(6, 182, 212, 0.08)',
-                  border: '1px solid rgba(6, 182, 212, 0.2)',
-                  fontSize: '0.78rem',
-                  color: 'var(--text-secondary)',
-                }}
-              >
-                🔐 Credentials and TOTP MFA enrollment are provisioned securely via the Identity API and are never persisted or exposed in client storage.
-              </div>
+              {editingStaff && (
+                <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.84rem', color: '#cbd5e1', cursor: 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={staffIsActive}
+                    onChange={(e) => setStaffIsActive(e.target.checked)}
+                  />
+                  Account Active (uncheck to disable staff login)
+                </label>
+              )}
 
               <div>
-                <label className="form-label">Phone Number</label>
+                <label className="form-label">Phone Number (optional)</label>
                 <input
                   type="text"
                   placeholder="e.g. +91 98860 12345"
@@ -2635,8 +2433,13 @@ export default function OwnerWebApp() {
               </div>
 
               <div style={{ display: 'flex', gap: '10px', marginTop: '12px' }}>
-                <button type="submit" className="btn-primary" style={{ flex: 1, padding: '12px' }}>
-                  💾 Save Staff Credentials
+                <button
+                  type="submit"
+                  disabled={staffSaving}
+                  className="btn-primary"
+                  style={{ flex: 1, padding: '12px', opacity: staffSaving ? 0.7 : 1 }}
+                >
+                  {staffSaving ? 'Saving...' : '💾 Save Staff Credentials'}
                 </button>
                 <button
                   type="button"

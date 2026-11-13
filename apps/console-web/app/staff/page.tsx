@@ -30,8 +30,9 @@ import {
   consoleAuthFetch,
   isAuthStateExpired,
 } from '../lib/auth-client';
+import MenuCatalogManager from '../components/MenuCatalogManager';
 
-type StaffTab = 'ORDERS' | 'TABLES' | 'PASS' | 'STOCK' | 'CALLS' | 'POS' | 'MORE';
+type StaffTab = 'ORDERS' | 'TABLES' | 'PASS' | 'STOCK' | 'MENU' | 'CALLS' | 'POS' | 'MORE';
 
 interface RoleWorkstationConfig {
   defaultTab: StaffTab;
@@ -77,19 +78,19 @@ const ROLE_CONFIGS: Record<StaffMember['role'], RoleWorkstationConfig> = {
   },
   MANAGER: {
     defaultTab: 'TABLES',
-    allowedTabs: ['ORDERS', 'TABLES', 'PASS', 'STOCK', 'CALLS', 'POS'],
+    allowedTabs: ['ORDERS', 'TABLES', 'PASS', 'STOCK', 'MENU', 'CALLS', 'POS'],
     stationTitle: 'Floor Operations Cockpit',
     stationBadge: '👔 GENERAL MANAGER',
     stationEmoji: '👔',
-    stationDescription: 'Full multi-station access across Kitchen, Floor, Pass, and POS',
+    stationDescription: 'Full multi-station access across Kitchen, Floor, Pass, Menu, and POS',
   },
   OWNER: {
     defaultTab: 'TABLES',
-    allowedTabs: ['ORDERS', 'TABLES', 'PASS', 'STOCK', 'CALLS', 'POS'],
+    allowedTabs: ['ORDERS', 'TABLES', 'PASS', 'STOCK', 'MENU', 'CALLS', 'POS'],
     stationTitle: 'Executive Floor Operations',
     stationBadge: '👑 GROUP OWNER',
     stationEmoji: '👑',
-    stationDescription: 'Complete organizational oversight across all floor stations',
+    stationDescription: 'Complete organizational oversight across all floor stations & Menu',
   },
 };
 
@@ -102,6 +103,8 @@ export default function StaffWebApp() {
   );
   const [selectedOutletId, setSelectedOutletId] = useState<string>(() => {
     if (typeof window !== 'undefined') {
+      const authOutlet = getConsoleAuthState()?.user.outletId;
+      if (authOutlet) return authOutlet;
       const stored = getStoredOutlets();
       return stored[0]?.id ?? OUTLETS[0]!.id;
     }
@@ -203,6 +206,93 @@ export default function StaffWebApp() {
   const [sessions, setSessions] = useState<TableSession[]>(branchData.sessions);
   const [stock, setStock] = useState<MenuItem[]>(branchData.menuItems);
   const [calls, setCalls] = useState<ServiceCall[]>(branchData.serviceCalls);
+  const [needsCleaningTableIds, setNeedsCleaningTableIds] = useState<Set<string>>(new Set());
+  const [cleaningTableLoading, setCleaningTableLoading] = useState(false);
+  const [staffToast, setStaffToast] = useState<string | null>(null);
+
+  const showStaffToast = (msg: string) => {
+    setStaffToast(msg);
+    setTimeout(() => setStaffToast(null), 4000);
+  };
+
+  const fetchLiveFloor = async () => {
+    try {
+      const res = await consoleAuthFetch(
+        `/api/v1/console/tables/floor?outlet_id=${encodeURIComponent(selectedOutletId)}`,
+      );
+      if (!res.ok) return;
+      const data = await res.json();
+      if (!Array.isArray(data) || data.length === 0) return;
+
+      const liveTables: Table[] = data.map((t: any, idx: number) => ({
+        id: t.id,
+        outletId: t.outlet_id || selectedOutletId,
+        number: t.table_number,
+        section: (t.section || 'Main Dining Hall') as Table['section'],
+        capacity: Number(t.capacity || 4),
+        qrTokenVersion: Number(t.qr_token_version || 1),
+        isActive: true,
+        x: idx % 4,
+        y: Math.floor(idx / 4),
+      }));
+      const cleaningSet = new Set<string>();
+      const liveSessions: TableSession[] = data
+        .filter((t: any) => t.needs_cleaning || Number(t.open_sessions_count || 0) > 0)
+        .map((t: any) => {
+          cleaningSet.add(t.id);
+          return {
+            id: `live-sess-${t.id}`,
+            tableId: t.id,
+            tableNumber: t.table_number,
+            status: 'OPEN' as const,
+            guestCount: Math.max(1, Number(t.active_guest_pax || 2)),
+            openedAt: t.first_opened_at ? formatOrderDateTime(t.first_opened_at) : 'Active',
+            closedAt: null,
+            tableCode: String(t.qr_token_version || 1),
+          };
+        });
+
+      setTables(liveTables);
+      setSessions(liveSessions);
+      setNeedsCleaningTableIds(cleaningSet);
+    } catch {
+      // Keep previous floor state on transient network errors
+    }
+  };
+
+  const handleMarkTableCleaned = async (table: Table) => {
+    if (cleaningTableLoading) return;
+    setCleaningTableLoading(true);
+    try {
+      const res = await consoleAuthFetch(`/api/v1/console/tables/${encodeURIComponent(table.id)}/clean`, {
+        method: 'POST',
+      });
+      if (!res.ok) {
+        showStaffToast('Unable to mark table cleaned. Verify captain/waiter permission.');
+        return;
+      }
+      const data = (await res.json()) as {
+        tableNumber?: string;
+        dissolvedTempCustomerIds?: string[];
+        stillActiveOtherTablesCount?: number;
+      };
+      const dissolvedCount = data.dissolvedTempCustomerIds?.length ?? 0;
+      const stillOther = data.stillActiveOtherTablesCount ?? 0;
+      const note =
+        dissolvedCount > 0
+          ? `Guest temp ID dissolved (${dissolvedCount}).`
+          : stillOther > 0
+          ? `Guest remains active on ${stillOther} other table(s).`
+          : 'Ready for next diner.';
+      showStaffToast(`🧹 Table ${data.tableNumber || table.number} cleaned & ready! ${note}`);
+      setSelectedTable(null);
+      await Promise.all([fetchLiveFloor(), fetchLiveOrders()]);
+    } catch {
+      showStaffToast('Network error marking table cleaned.');
+    } finally {
+      setCleaningTableLoading(false);
+    }
+  };
 
   // Live Database Orders Sync
   const fetchLiveOrders = async () => {
@@ -242,6 +332,7 @@ export default function StaffWebApp() {
               quantity: it.quantity,
               status: it.status,
               notes: it.notes,
+              targetTableNumber: it.target_table_number ?? null,
               createdAt: formatOrderDateTime(it.created_at || d.created_at),
             })),
             events: [
@@ -300,12 +391,16 @@ export default function StaffWebApp() {
     setCalls(data.serviceCalls);
 
     fetchLiveOrders();
-    const interval = setInterval(fetchLiveOrders, 3000);
+    void fetchLiveFloor();
+    const interval = setInterval(() => {
+      fetchLiveOrders();
+      void fetchLiveFloor();
+    }, 3000);
     return () => clearInterval(interval);
   }, [selectedOutletId]);
 
   // Filters & Views
-  const [selectedSection, setSelectedSection] = useState<'ALL' | 'Main Dining Hall' | 'Verandah / Terrace' | 'Family Lounge'>('ALL');
+  const [selectedSection, setSelectedSection] = useState<string>('ALL');
   const [stockSearch, setStockSearch] = useState('');
   const [orderFilter, setOrderFilter] = useState<'ALL' | 'MY_TABLES'>('ALL');
 
@@ -406,25 +501,27 @@ export default function StaffWebApp() {
     setPinError('');
   };
 
-  // Handle server-verified Staff Email + Password (+ MFA) unlock on Lock Screen
+  // Handle server-verified Staff Username + Password unlock on Lock Screen
   const handlePasswordLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     const state = getConsoleAuthState();
     const orgSlug = state?.user.orgSlug || '';
-    const emailToVerify = (staffLoginUser || state?.user.email || '').trim().toLowerCase();
-
-    if (!orgSlug) {
-      await logoutStaffRemote();
-      router.push('/');
-      return;
-    }
+    const identifierToVerify = (
+      staffLoginUser ||
+      state?.user.username ||
+      state?.user.email ||
+      ''
+    )
+      .trim()
+      .toLowerCase();
 
     if (lockMfaToken) {
       const mfaResult = await verifyStaffMfaRemote({
         preMfaToken: lockMfaToken,
         code: lockMfaCode,
         orgSlug,
-        email: emailToVerify,
+        username: state?.user.username,
+        email: state?.user.email || identifierToVerify,
       });
       if (!mfaResult.ok || !mfaResult.session) {
         setPinError(mfaResult.error || 'Invalid authenticator code.');
@@ -438,24 +535,33 @@ export default function StaffWebApp() {
       return;
     }
 
-    if (!emailToVerify || !staffLoginPass) {
-      setPinError('Please enter your staff email and password.');
+    if (!identifierToVerify || !staffLoginPass) {
+      setPinError('Please enter your username and password.');
       return;
     }
 
     // Prevent switching accounts from a locked non-owner terminal without explicit Sign Out
-    if (!isOwnerMode && state?.user.email && emailToVerify !== state.user.email.toLowerCase()) {
-      setPinError(`Please unlock as ${state.user.email} or Sign Out to switch staff.`);
+    const currentUsername = state?.user.username?.toLowerCase();
+    const currentEmail = state?.user.email?.toLowerCase();
+    if (
+      !isOwnerMode &&
+      (currentUsername || currentEmail) &&
+      identifierToVerify !== currentUsername &&
+      identifierToVerify !== currentEmail
+    ) {
+      setPinError(
+        `Please unlock as ${currentUsername || currentEmail} or Sign Out to switch staff.`,
+      );
       return;
     }
 
     const authResult = await loginStaffRemote({
-      orgSlug,
-      email: emailToVerify,
+      orgSlug: orgSlug || undefined,
+      username: identifierToVerify,
       password: staffLoginPass,
     });
     if (!authResult.ok) {
-      setPinError(authResult.error || 'Invalid email or password.');
+      setPinError(authResult.error || 'Invalid username or password.');
       return;
     }
     if (authResult.requiresMfa && authResult.preMfaToken) {
@@ -632,6 +738,21 @@ export default function StaffWebApp() {
                   {item.quantity}×
                 </span>
                 <span style={{ fontWeight: 700 }}>{item.name}</span>
+                {item.targetTableNumber && item.targetTableNumber !== order.tableNumber && (
+                  <span
+                    style={{
+                      background: 'rgba(245, 158, 11, 0.2)',
+                      color: '#fbbf24',
+                      border: '1px solid rgba(245, 158, 11, 0.45)',
+                      padding: '1px 6px',
+                      borderRadius: '4px',
+                      fontSize: '0.7rem',
+                      fontWeight: 800,
+                    }}
+                  >
+                    → Table {item.targetTableNumber}
+                  </span>
+                )}
                 {currentUser?.role !== 'KITCHEN' && (
                   <span style={{ color: 'var(--text-muted)', fontSize: '0.78rem' }}>
                     ({formatPaise(item.pricePaise * item.quantity)})
@@ -1786,7 +1907,7 @@ export default function StaffWebApp() {
 
               {/* Section Filters */}
               <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-                {(['ALL', 'Main Dining Hall', 'Verandah / Terrace', 'Family Lounge'] as const).map((sec) => (
+                {(['ALL', ...Array.from(new Set(tables.map((t) => t.section).filter(Boolean)))]).map((sec) => (
                   <button
                     key={sec}
                     onClick={() => setSelectedSection(sec)}
@@ -1845,8 +1966,15 @@ export default function StaffWebApp() {
                   .filter((t) => selectedSection === 'ALL' || t.section === selectedSection)
                   .map((table) => {
                     const session = sessions.find((s) => s.tableId === table.id && s.status === 'OPEN');
-                    const activeOrder = orders.find((o) => o.tableNumber === table.number);
-                    const isOccupied = !!session;
+                    const activeOrder = orders.find(
+                      (o) =>
+                        o.status !== 'CANCELLED' &&
+                        o.status !== 'BILLED' &&
+                        (o.tableNumber === table.number ||
+                          o.items?.some((it) => it.targetTableNumber === table.number)),
+                    );
+                    const needsCleaning = needsCleaningTableIds.has(table.id) || !!session;
+                    const isOccupied = needsCleaning || !!activeOrder;
 
                     return (
                       <div
@@ -1891,8 +2019,10 @@ export default function StaffWebApp() {
                           >
                             {activeOrder?.status === 'READY'
                               ? 'READY'
+                              : needsCleaning
+                              ? 'OCCUPIED / CLEAN'
                               : isOccupied
-                              ? `${session.guestCount} GUESTS`
+                              ? 'ORDER ACTIVE'
                               : 'AVAILABLE'}
                           </span>
                         </div>
@@ -2088,6 +2218,16 @@ export default function StaffWebApp() {
         )}
 
         {/* TAB 4: TABLE CALL BELLS */}
+        {activeTab === 'MENU' && (currentRole === 'MANAGER' || currentRole === 'OWNER') && (
+          <div style={{ padding: '20px 24px' }}>
+            <MenuCatalogManager
+              outletId={selectedOutletId}
+              outletName={currentOutlet.shortName || currentOutlet.name}
+              onToast={showStaffToast}
+            />
+          </div>
+        )}
+
         {activeTab === 'CALLS' && (
           <div style={{ padding: '20px 24px', maxWidth: '800px', margin: '0 auto' }}>
             <div style={{ marginBottom: '20px' }}>
@@ -2413,6 +2553,16 @@ export default function StaffWebApp() {
           </button>
         )}
 
+        {roleConfig.allowedTabs.includes('MENU') && (
+          <button
+            onClick={() => setActiveTab('MENU')}
+            className={`staff-nav-item ${activeTab === 'MENU' ? 'active' : ''}`}
+          >
+            <span style={{ fontSize: '20px' }}>🍴</span>
+            <span>Menu Editor</span>
+          </button>
+        )}
+
         {roleConfig.allowedTabs.includes('CALLS') && (
           <button
             onClick={() => setActiveTab('CALLS')}
@@ -2459,7 +2609,7 @@ export default function StaffWebApp() {
             <div style={{ fontSize: '48px', marginBottom: '12px' }}>{currentUser?.avatar || '🔒'}</div>
             <h2 style={{ fontSize: '1.4rem', fontWeight: 800 }}>Station Locked</h2>
             <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginBottom: '18px' }}>
-              Verify credentials to unlock {currentRole} floor station ({currentUser?.email})
+              Verify credentials to unlock {currentRole} floor station ({currentUser?.username || currentUser?.email})
             </p>
 
             {pinError && (
@@ -2472,12 +2622,12 @@ export default function StaffWebApp() {
               {!lockMfaToken ? (
                 <>
                   <div>
-                    <label className="form-label" style={{ fontSize: '0.8rem' }}>Staff Email</label>
+                    <label className="form-label" style={{ fontSize: '0.8rem' }}>Username</label>
                     <input
-                      type="email"
+                      type="text"
                       required
-                      placeholder={currentUser?.email || 'staff@restaurant.com'}
-                      value={staffLoginUser || currentUser?.email || ''}
+                      placeholder={currentUser?.username || 'e.g. captain'}
+                      value={staffLoginUser || currentUser?.username || currentUser?.email || ''}
                       onChange={(e) => setStaffLoginUser(e.target.value)}
                       className="form-input"
                       style={{ padding: '10px 12px' }}
@@ -2489,8 +2639,8 @@ export default function StaffWebApp() {
                       <input
                         type={showStaffPass ? 'text' : 'password'}
                         required
-                        minLength={8}
-                        placeholder="••••••••"
+                        minLength={4}
+                        placeholder="Enter password"
                         value={staffLoginPass}
                         onChange={(e) => setStaffLoginPass(e.target.value)}
                         className="form-input"
@@ -2735,25 +2885,48 @@ export default function StaffWebApp() {
                       </button>
                     )}
 
-                    <div style={{ display: 'flex', gap: '8px' }}>
-                      {activeOrder && (
-                        <button
-                          onClick={() => {
-                            setCollectPaymentOrder(activeOrder);
-                            setSelectedTable(null);
-                          }}
-                          className="btn-primary"
-                          style={{ flex: 1 }}
-                        >
-                          💳 Collect Payment / Settle
-                        </button>
-                      )}
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                       <button
-                        onClick={() => setSelectedTable(null)}
-                        className="btn-secondary"
+                        type="button"
+                        disabled={cleaningTableLoading}
+                        onClick={() => void handleMarkTableCleaned(selectedTable)}
+                        style={{
+                          width: '100%',
+                          padding: '11px 14px',
+                          borderRadius: 'var(--radius-sm)',
+                          background: 'linear-gradient(135deg, #06b6d4, #0284c7)',
+                          color: '#fff',
+                          fontWeight: 800,
+                          fontSize: '0.86rem',
+                          border: 'none',
+                          cursor: cleaningTableLoading ? 'not-allowed' : 'pointer',
+                          opacity: cleaningTableLoading ? 0.65 : 1,
+                        }}
                       >
-                        Close
+                        {cleaningTableLoading
+                          ? 'Updating Table...'
+                          : `🧹 Mark Table ${selectedTable.number} Cleaned & Ready`}
                       </button>
+                      <div style={{ display: 'flex', gap: '8px' }}>
+                        {activeOrder && (
+                          <button
+                            onClick={() => {
+                              setCollectPaymentOrder(activeOrder);
+                              setSelectedTable(null);
+                            }}
+                            className="btn-primary"
+                            style={{ flex: 1 }}
+                          >
+                            💳 Collect Payment / Settle
+                          </button>
+                        )}
+                        <button
+                          onClick={() => setSelectedTable(null)}
+                          className="btn-secondary"
+                        >
+                          Close
+                        </button>
+                      </div>
                     </div>
                   </div>
                 );
@@ -2764,6 +2937,25 @@ export default function StaffWebApp() {
                   <p style={{ color: 'var(--text-secondary)', marginBottom: '16px' }}>
                     Table {selectedTable.number} is currently vacant and ready for seating.
                   </p>
+                  <button
+                    type="button"
+                    disabled={cleaningTableLoading}
+                    onClick={() => void handleMarkTableCleaned(selectedTable)}
+                    style={{
+                      width: '100%',
+                      marginBottom: '10px',
+                      padding: '10px 14px',
+                      borderRadius: 'var(--radius-sm)',
+                      background: 'rgba(6, 182, 212, 0.16)',
+                      border: '1px solid rgba(6, 182, 212, 0.4)',
+                      color: '#67e8f9',
+                      fontWeight: 700,
+                      fontSize: '0.82rem',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    {cleaningTableLoading ? 'Cleaning...' : `🧹 Confirm Table ${selectedTable.number} Cleaned & Ready`}
+                  </button>
                   <button
                     onClick={() => {
                       // Seat new guests
@@ -2855,6 +3047,28 @@ export default function StaffWebApp() {
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {staffToast && (
+        <div
+          style={{
+            position: 'fixed',
+            bottom: '84px',
+            left: '50%',
+            transform: 'translateX(-50%)',
+            background: '#0f172a',
+            border: '1px solid rgba(6, 182, 212, 0.5)',
+            color: '#f8fafc',
+            padding: '10px 18px',
+            borderRadius: '999px',
+            fontWeight: 700,
+            fontSize: '0.85rem',
+            zIndex: 9999,
+            boxShadow: '0 10px 30px rgba(0,0,0,0.6)',
+          }}
+        >
+          {staffToast}
         </div>
       )}
     </div>
