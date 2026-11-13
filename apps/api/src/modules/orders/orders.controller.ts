@@ -3,7 +3,7 @@ import {
   Param, Body, Query, HttpCode, HttpStatus,
 } from '@nestjs/common';
 import { OrdersService } from './orders.service.js';
-import { PlaceOrderDto, QuoteOrderDto, UpdateOrderStatusDto, UpdateItemStatusDto, OrderQueryDto } from './orders.dto.js';
+import { PlaceOrderDto, QuoteOrderDto, UpdateOrderStatusDto, UpdateItemStatusDto, OrderQueryDto, ReassignItemTableDto } from './orders.dto.js';
 
 import {
   Require,
@@ -110,6 +110,12 @@ export class CustomerOrdersController {
     );
   }
 
+  @Get('my')
+  @Require(Permission.GUEST_SESSION)
+  getMyOrders(@CurrentUser() user: GuestSessionJwtPayload | CustomerJwtPayload) {
+    return this.ordersService.getMyOrders(user.org, toCustomerAccessScope(user));
+  }
+
   @Get('session/:sessionId')
   @Require(Permission.GUEST_SESSION)
   getSessionOrders(
@@ -130,5 +136,24 @@ export class CustomerOrdersController {
     @Param('id') id: string,
   ) {
     return this.ordersService.getOrder(user.org, id, toCustomerAccessScope(user));
+  }
+
+  /** Change destination table for an individual plate (item) before SERVED/BILLED. */
+  @Patch(':id/items/:itemId/table')
+  @Require(Permission.GUEST_SESSION)
+  reassignItemTable(
+    @CurrentUser() user: GuestSessionJwtPayload | CustomerJwtPayload,
+    @Param('id') orderId: string,
+    @Param('itemId') itemId: string,
+    @Body() dto: ReassignItemTableDto,
+  ) {
+    return this.ordersService.reassignItemTable(
+      user.org,
+      orderId,
+      itemId,
+      dto,
+      user.sub,
+      toCustomerAccessScope(user),
+    );
   }
 }

@@ -29,6 +29,7 @@ import type {
   UpdateOrderStatusSchema,
   UpdateItemStatusSchema,
   OrderQuerySchema,
+  ReassignItemTableSchema,
 } from './orders.dto.js';
 import type { z } from 'zod';
 
@@ -37,6 +38,7 @@ type PlaceOrderInput    = z.infer<typeof PlaceOrderSchema>;
 type UpdateOrderStatusInput = z.infer<typeof UpdateOrderStatusSchema>;
 type UpdateItemStatusInput  = z.infer<typeof UpdateItemStatusSchema>;
 type OrderQueryInput    = z.infer<typeof OrderQuerySchema>;
+type ReassignItemTableInput = z.infer<typeof ReassignItemTableSchema>;
 
 /**
  * Orders Service
@@ -57,7 +59,7 @@ type OrderQueryInput    = z.infer<typeof OrderQuerySchema>;
  * Reference: ARCH §8, AGENTS §2 rule 1+2+6+8
  */
 const ORDER_ITEM_SELECT_FIELDS =
-  'id, menu_item_id, name_snapshot, unit_price_paise, quantity, line_total_paise, modifiers, notes, status, created_at, updated_at';
+  'oi.id, oi.menu_item_id, oi.name_snapshot, oi.unit_price_paise, oi.quantity, oi.line_total_paise, oi.modifiers, oi.notes, oi.status, oi.target_table_id, tt.table_number AS target_table_number, oi.created_at, oi.updated_at';
 
 @Injectable()
 export class OrdersService {
@@ -135,20 +137,71 @@ export class OrdersService {
       }
       if (scope) {
         let sessionCustomerId: string | null = null;
+        let sessionTempCustomerId: string | null = null;
         if (order.session_id) {
-          const { rows: sRows } = await db.query<{ customer_id: string | null }>(
-            `SELECT customer_id FROM table_sessions WHERE id = $1 AND org_id = $2`,
+          const { rows: sRows } = await db.query<{
+            customer_id: string | null;
+            temp_customer_id?: string | null;
+          }>(
+            `SELECT customer_id, temp_customer_id FROM table_sessions WHERE id = $1 AND org_id = $2`,
             [order.session_id, targetOrgId],
           );
           sessionCustomerId = sRows[0]?.customer_id ?? null;
+          sessionTempCustomerId = sRows[0]?.temp_customer_id ?? null;
         }
         assertCustomerAccessScope(scope, {
           session_id: order.session_id,
           customer_id: order.customer_id,
           session_customer_id: sessionCustomerId,
+          temp_customer_id: order.temp_customer_id ?? null,
+          session_temp_customer_id: sessionTempCustomerId,
         });
       }
       return order;
+    });
+  }
+
+  async getMyOrders(orgId: string, scope: CustomerAccessScope) {
+    if (!orgId) {
+      throw domainError(ErrorCode.UNAUTHORIZED, 'Tenant context required.', 401);
+    }
+    return withTenantContextRaw(orgId, async (db) => {
+      let whereClause = '';
+      const params: unknown[] = [orgId];
+
+      if (scope.customerId) {
+        params.push(scope.customerId);
+        whereClause = `o.customer_id = $${params.length}`;
+      } else if (scope.tempCustomerId) {
+        const { rows: tcRows } = await db.query<{ status: string }>(
+          `SELECT status FROM temp_customers WHERE id = $1 AND org_id = $2`,
+          [scope.tempCustomerId, orgId],
+        );
+        if (tcRows[0]?.status === 'DISSOLVED') {
+          return [];
+        }
+        params.push(scope.tempCustomerId);
+        whereClause = `o.temp_customer_id = $${params.length}`;
+      } else if (scope.sessionId) {
+        params.push(scope.sessionId);
+        whereClause = `o.session_id = $${params.length}`;
+      } else {
+        throw domainError(ErrorCode.UNAUTHORIZED, 'Customer or table session identity required.', 401);
+      }
+
+      const { rows: orders } = await db.query(
+        `SELECT o.*, t.table_number,
+                (SELECT p.status FROM payments p WHERE p.order_id = o.id ORDER BY p.created_at DESC LIMIT 1) as payment_status,
+                (SELECT p.method FROM payments p WHERE p.order_id = o.id ORDER BY p.created_at DESC LIMIT 1) as payment_method,
+                (SELECT p.settled_at FROM payments p WHERE p.order_id = o.id ORDER BY p.created_at DESC LIMIT 1) as payment_settled_at
+         FROM orders o
+         LEFT JOIN tables t ON t.id = o.table_id
+         WHERE o.org_id = $1 AND ${whereClause}
+         ORDER BY o.created_at DESC`,
+        params,
+      );
+      await this.attachItemsToOrders(orgId, orders, db);
+      return orders;
     });
   }
 
@@ -162,8 +215,12 @@ export class OrdersService {
 
     return withTenantContextRaw(orgId, async (db) => {
       if (scope) {
-        const { rows: sRows } = await db.query<{ id: string; customer_id: string | null }>(
-          `SELECT id, customer_id FROM table_sessions WHERE id = $1 AND org_id = $2`,
+        const { rows: sRows } = await db.query<{
+          id: string;
+          customer_id: string | null;
+          temp_customer_id: string | null;
+        }>(
+          `SELECT id, customer_id, temp_customer_id FROM table_sessions WHERE id = $1 AND org_id = $2`,
           [sessionId, orgId],
         );
         const sess = sRows[0];
@@ -171,7 +228,18 @@ export class OrdersService {
         assertCustomerAccessScope(scope, {
           session_id: sess.id,
           session_customer_id: sess.customer_id,
+          session_temp_customer_id: sess.temp_customer_id,
         });
+      }
+
+      const params: unknown[] = [sessionId, orgId];
+      let ownerFilter = '';
+      if (scope?.customerId) {
+        params.push(scope.customerId);
+        ownerFilter = ` AND o.customer_id = $${params.length}`;
+      } else if (scope?.tempCustomerId) {
+        params.push(scope.tempCustomerId);
+        ownerFilter = ` AND o.temp_customer_id = $${params.length}`;
       }
 
       const { rows: orders } = await db.query(
@@ -181,9 +249,9 @@ export class OrdersService {
                 (SELECT p.settled_at FROM payments p WHERE p.order_id = o.id ORDER BY p.created_at DESC LIMIT 1) as payment_settled_at
          FROM orders o
          LEFT JOIN tables t ON t.id = o.table_id
-         WHERE o.session_id = $1 AND o.org_id = $2
+         WHERE o.session_id = $1 AND o.org_id = $2 ${ownerFilter}
          ORDER BY o.created_at DESC`,
-        [sessionId, orgId],
+        params,
       );
       await this.attachItemsToOrders(orgId, orders, db);
       return orders;
@@ -219,9 +287,14 @@ export class OrdersService {
 
       // ── 2. Verify session is open ─────────────────────────────────────────────
       const { rows: sessionRows } = await db.query<{
-        id: string; table_id: string; outlet_id: string; status: string; customer_id: string | null;
+        id: string;
+        table_id: string;
+        outlet_id: string;
+        status: string;
+        customer_id: string | null;
+        temp_customer_id?: string | null;
       }>(
-        `SELECT id, table_id, outlet_id, status, customer_id FROM table_sessions
+        `SELECT id, table_id, outlet_id, status, customer_id, temp_customer_id FROM table_sessions
          WHERE id = $1 AND org_id = $2`,
         [dto.session_id, targetOrgId],
       );
@@ -234,6 +307,7 @@ export class OrdersService {
         assertCustomerAccessScope(scope, {
           session_id: session.id,
           session_customer_id: session.customer_id,
+          session_temp_customer_id: session.temp_customer_id,
         });
       }
       if (session.status !== 'OPEN') {
@@ -255,14 +329,41 @@ export class OrdersService {
         );
       }
 
+      // ── 4.5 Validate optional per-plate target_table_id within same outlet ────
+      const requestedTargetTableIds = [
+        ...new Set(
+          dto.items
+            .map((i) => i.target_table_id)
+            .filter((tid): tid is string => Boolean(tid)),
+        ),
+      ];
+      if (requestedTargetTableIds.length > 0) {
+        const { rows: tRows } = await db.query<{ id: string }>(
+          `SELECT id FROM tables WHERE org_id = $1 AND outlet_id = $2 AND id = ANY($3) AND is_active = true`,
+          [targetOrgId, session.outlet_id, requestedTargetTableIds],
+        );
+        const validIds = new Set(tRows.map((r) => r.id));
+        for (const tid of requestedTargetTableIds) {
+          if (!validIds.has(tid)) {
+            throw domainError(
+              ErrorCode.VALIDATION_ERROR,
+              'Selected per-plate table does not belong to this outlet or is inactive.',
+              400,
+            );
+          }
+        }
+      }
+
       // ── 5. Write order + items + events atomically ──────────────────────────
+      const customerId = scope?.customerId ?? session.customer_id ?? null;
+      const tempCustomerId = scope?.tempCustomerId ?? session.temp_customer_id ?? null;
       const { rows: orderRows } = await db.query<{ id: string }>(
-        `INSERT INTO orders (org_id, outlet_id, table_id, session_id, idempotency_key,
+        `INSERT INTO orders (org_id, outlet_id, table_id, session_id, customer_id, temp_customer_id, idempotency_key,
                              status, subtotal_paise, tax_paise, discount_paise, total_paise, notes)
-         VALUES ($1, $2, $3, $4, $5, 'PENDING', $6, $7, 0, $8, $9)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'PENDING', $8, $9, 0, $10, $11)
          RETURNING id`,
         [
-          targetOrgId, session.outlet_id, session.table_id, session.id,
+          targetOrgId, session.outlet_id, session.table_id, session.id, customerId, tempCustomerId,
           dto.idempotency_key,
           quote.subtotal_paise, quote.tax_paise,
           quote.total_paise,
@@ -273,17 +374,24 @@ export class OrdersService {
 
       for (let idx = 0; idx < quote.lines.length; idx++) {
         const line = quote.lines[idx]!;
+        const targetTableId = dto.items[idx]?.target_table_id ?? session.table_id;
         await db.query(
           `INSERT INTO order_items (org_id, order_id, menu_item_id, name_snapshot,
-                                    unit_price_paise, quantity, line_total_paise, modifiers, notes)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+                                    unit_price_paise, quantity, line_total_paise, modifiers, notes, target_table_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
           [
             targetOrgId, orderId, line.menu_item_id, line.name_snapshot,
             line.unit_price_paise, line.quantity, line.line_total_paise,
             JSON.stringify(line.modifiers),
             dto.items[idx]?.notes ?? null,
+            targetTableId,
           ],
         );
+      }
+
+      if (tempCustomerId) {
+        const touchedTableIds = [...new Set([session.table_id, ...requestedTargetTableIds])];
+        await this.linkTempCustomerTables(targetOrgId, session.outlet_id, tempCustomerId, touchedTableIds, db);
       }
 
       // ── 6. Audit + outbox in same TX (AGENTS §2 rule 6) ───────────────────────
@@ -306,6 +414,189 @@ export class OrdersService {
           targetOrgId,
           orderId,
           JSON.stringify({ session_id: session.id, outlet_id: session.outlet_id, total_paise: quote.total_paise }),
+        ],
+      );
+
+      return this.getOrderInTx(targetOrgId, orderId, db);
+    });
+  }
+
+  // ─── Reassign Per-Plate Table (Customer, pre-SERVED/BILLED) ────────────────
+
+  async reassignItemTable(
+    orgId: string,
+    orderId: string,
+    itemId: string,
+    dto: ReassignItemTableInput,
+    actorId: string,
+    scope: CustomerAccessScope,
+  ) {
+    if (!OrdersService.UUID_RE.test(itemId)) {
+      throw domainError(ErrorCode.NOT_FOUND, 'Order item not found.', 404);
+    }
+    const targetOrgId = await this.resolveOrderOrgId(orgId, orderId);
+
+    return withTenantContextRaw(targetOrgId, async (db) => {
+      const { rows: ordRows } = await db.query<{
+        id: string;
+        outlet_id: string;
+        table_id: string;
+        session_id: string | null;
+        customer_id: string | null;
+        temp_customer_id?: string | null;
+        status: OrderStatus;
+      }>(
+        `SELECT id, outlet_id, table_id, session_id, customer_id, temp_customer_id, status
+         FROM orders WHERE id = $1 AND org_id = $2`,
+        [orderId, targetOrgId],
+      );
+      const order = ordRows[0];
+      if (!order) throw domainError(ErrorCode.NOT_FOUND, 'Order not found.', 404);
+
+      let sessionCustomerId: string | null = null;
+      let sessionTempCustomerId: string | null = null;
+      if (order.session_id) {
+        const { rows: sRows } = await db.query<{
+          customer_id: string | null;
+          temp_customer_id?: string | null;
+        }>(
+          `SELECT customer_id, temp_customer_id FROM table_sessions WHERE id = $1 AND org_id = $2`,
+          [order.session_id, targetOrgId],
+        );
+        sessionCustomerId = sRows[0]?.customer_id ?? null;
+        sessionTempCustomerId = sRows[0]?.temp_customer_id ?? null;
+      }
+      assertCustomerAccessScope(scope, {
+        session_id: order.session_id,
+        customer_id: order.customer_id,
+        session_customer_id: sessionCustomerId,
+        temp_customer_id: order.temp_customer_id ?? null,
+        session_temp_customer_id: sessionTempCustomerId,
+      });
+
+      if (order.status === 'BILLED' || order.status === 'CANCELLED') {
+        throw domainError(
+          ErrorCode.VALIDATION_ERROR,
+          `Cannot change table once order is '${order.status}'.`,
+          400,
+        );
+      }
+
+      const { rows: itemRows } = await db.query<{
+        id: string;
+        order_id: string;
+        menu_item_id: string;
+        name_snapshot: string;
+        unit_price_paise: number;
+        quantity: number;
+        line_total_paise: number;
+        modifiers: unknown;
+        notes: string | null;
+        status: ItemStatus;
+        target_table_id: string | null;
+      }>(
+        `SELECT id, order_id, menu_item_id, name_snapshot, unit_price_paise,
+                quantity, line_total_paise, modifiers, notes, status, target_table_id
+         FROM order_items WHERE id = $1 AND org_id = $2 FOR UPDATE`,
+        [itemId, targetOrgId],
+      );
+      const item = itemRows[0];
+      if (!item || item.order_id !== orderId) {
+        throw domainError(ErrorCode.NOT_FOUND, 'Order item not found.', 404);
+      }
+      if (item.status === 'SERVED' || item.status === 'CANCELLED') {
+        throw domainError(
+          ErrorCode.VALIDATION_ERROR,
+          `Cannot change table after plate is '${item.status}'.`,
+          400,
+        );
+      }
+
+      const { rows: outletTables } = await db.query<{ id: string; table_number: string }>(
+        `SELECT id, table_number FROM tables WHERE org_id = $1 AND outlet_id = $2 AND is_active = true`,
+        [targetOrgId, order.outlet_id],
+      );
+      const norm = (val: string) => val.replace(/\D/g, '').replace(/^0+/, '') || '0';
+      const destTable = dto.target_table_id
+        ? outletTables.find((t) => t.id === dto.target_table_id)
+        : outletTables.find(
+            (t) =>
+              t.table_number.toUpperCase() === dto.target_table_number!.trim().toUpperCase() ||
+              norm(t.table_number) === norm(dto.target_table_number!),
+          );
+      if (!destTable) {
+        throw domainError(ErrorCode.NOT_FOUND, 'Wrong table number for this hotel.', 404);
+      }
+
+      if (item.quantity > 1 && dto.plate_index !== undefined) {
+        if (dto.plate_index > item.quantity) {
+          throw domainError(ErrorCode.VALIDATION_ERROR, 'plate_index exceeds item quantity.', 400);
+        }
+        const singleLinePaise = Math.floor(item.line_total_paise / item.quantity);
+        const remainingLinePaise = item.line_total_paise - singleLinePaise;
+        await db.query(
+          `UPDATE order_items
+           SET quantity = $1, line_total_paise = $2, updated_at = now()
+           WHERE id = $3 AND org_id = $4`,
+          [item.quantity - 1, remainingLinePaise, itemId, targetOrgId],
+        );
+        await db.query(
+          `INSERT INTO order_items (org_id, order_id, menu_item_id, name_snapshot,
+                                    unit_price_paise, quantity, line_total_paise, modifiers, notes, status, target_table_id)
+           VALUES ($1, $2, $3, $4, $5, 1, $6, $7, $8, $9, $10)`,
+          [
+            targetOrgId,
+            orderId,
+            item.menu_item_id,
+            item.name_snapshot,
+            item.unit_price_paise,
+            singleLinePaise,
+            JSON.stringify(item.modifiers ?? []),
+            item.notes,
+            item.status,
+            destTable.id,
+          ],
+        );
+      } else {
+        await db.query(
+          `UPDATE order_items SET target_table_id = $1, updated_at = now() WHERE id = $2 AND org_id = $3`,
+          [destTable.id, itemId, targetOrgId],
+        );
+      }
+
+      const activeTempCustomerId = order.temp_customer_id || sessionTempCustomerId || scope.tempCustomerId || null;
+      if (activeTempCustomerId) {
+        await this.linkTempCustomerTables(targetOrgId, order.outlet_id, activeTempCustomerId, [destTable.id], db);
+      }
+
+      const validActorUuid = this.toValidUuidOrNull(actorId);
+      await db.query(
+        `INSERT INTO order_events (org_id, order_id, event_type, actor_type, actor_id, payload)
+         VALUES ($1, $2, 'ITEM_TABLE_CHANGED', 'CUSTOMER', $3, $4)`,
+        [
+          targetOrgId,
+          orderId,
+          validActorUuid,
+          JSON.stringify({
+            item_id: itemId,
+            from_table_id: item.target_table_id ?? order.table_id,
+            to_table_id: destTable.id,
+            to_table_number: destTable.table_number,
+          }),
+        ],
+      );
+      await db.query(
+        `INSERT INTO outbox_events (org_id, aggregate, aggregate_id, event_type, payload)
+         VALUES ($1, 'order', $2, 'ITEM_TABLE_CHANGED', $3)`,
+        [
+          targetOrgId,
+          orderId,
+          JSON.stringify({
+            item_id: itemId,
+            outlet_id: order.outlet_id,
+            to_table_id: destTable.id,
+            to_table_number: destTable.table_number,
+          }),
         ],
       );
 
@@ -352,6 +643,7 @@ export class OrdersService {
           [dto.status, orderId, targetOrgId],
         );
       }
+
       const validActorUuid = this.toValidUuidOrNull(actorId);
 
       await db.query(
@@ -418,6 +710,7 @@ export class OrdersService {
         [orderId, targetOrgId],
       );
       const derivedStatus = deriveOrderStatus(allItems.map((i) => i.status as ItemStatus));
+
       const validActorUuid = this.toValidUuidOrNull(actorId);
 
       if (derivedStatus) {
@@ -494,8 +787,10 @@ export class OrdersService {
     if (orders.length === 0) return;
     const orderIds = orders.map((o) => o['id'] as string);
     const { rows: allItems } = await db.query<Record<string, unknown>>(
-      `SELECT order_id, ${ORDER_ITEM_SELECT_FIELDS}
-       FROM order_items WHERE order_id = ANY($1) AND org_id = $2 ORDER BY created_at`,
+      `SELECT oi.order_id, ${ORDER_ITEM_SELECT_FIELDS}
+       FROM order_items oi
+       LEFT JOIN tables tt ON tt.id = oi.target_table_id
+       WHERE oi.order_id = ANY($1) AND oi.org_id = $2 ORDER BY oi.created_at`,
       [orderIds, orgId],
     );
     const itemsByOrder = new Map<string, Array<Record<string, unknown>>>();
@@ -667,6 +962,26 @@ export class OrdersService {
     });
   }
 
+  /** Link every table touched by a temporary customer order/reassignment cleanly until Captain cleans it. */
+  private async linkTempCustomerTables(
+    orgId: string,
+    outletId: string,
+    tempCustomerId: string,
+    tableIds: string[],
+    db: PoolClient,
+  ): Promise<void> {
+    const uniqueTableIds = [...new Set(tableIds.filter(Boolean))];
+    for (const tableId of uniqueTableIds) {
+      await db.query(
+        `INSERT INTO temp_customer_tables (org_id, outlet_id, temp_customer_id, table_id, status)
+         VALUES ($1, $2, $3, $4, 'ACTIVE')
+         ON CONFLICT (org_id, temp_customer_id, table_id)
+         DO UPDATE SET status = 'ACTIVE', cleaned_at = NULL, cleaned_by = NULL, updated_at = now()`,
+        [orgId, outletId, tempCustomerId, tableId],
+      );
+    }
+  }
+
   /** Fetch the full order + items within an already-open tenant context. */
   private async getOrderInTx(orgId: string, orderId: string, db: PoolClient) {
     const { rows: orderRows } = await db.query(
@@ -678,7 +993,9 @@ export class OrdersService {
     if (!orderRows[0]) throw domainError(ErrorCode.NOT_FOUND, 'Order not found.', 404);
     const { rows: itemRows } = await db.query(
       `SELECT ${ORDER_ITEM_SELECT_FIELDS}
-       FROM order_items WHERE order_id = $1 AND org_id = $2 ORDER BY created_at`,
+       FROM order_items oi
+       LEFT JOIN tables tt ON tt.id = oi.target_table_id
+       WHERE oi.order_id = $1 AND oi.org_id = $2 ORDER BY oi.created_at`,
       [orderId, orgId],
     );
     return { ...orderRows[0], items: itemRows };

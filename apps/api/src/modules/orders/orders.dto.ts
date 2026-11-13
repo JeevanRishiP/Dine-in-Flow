@@ -15,6 +15,7 @@ const OrderLineSchema = z.object({
   modifiers: z.array(OrderModifierSchema).default([]),
   portion: z.enum(['FULL', 'HALF']).optional().default('FULL'),
   notes: z.string().max(500).optional(),
+  target_table_id: z.string().uuid().optional(),
 }).strict();
 
 // ─── Quote Order ──────────────────────────────────────────────────────────────
@@ -79,6 +80,23 @@ export const UpdateItemStatusSchema = z.object({
 }).strict();
 
 export class UpdateItemStatusDto extends createZodDto(UpdateItemStatusSchema) {}
+
+// ─── Reassign Per-Plate Table (Customer) ──────────────────────────────────────
+
+export const ReassignItemTableSchema = z
+  .object({
+    target_table_id: z.string().uuid().optional(),
+    target_table_number: z.string().trim().min(1).max(20).regex(/^(?:T)?0*[0-9]{1,4}$/i, {
+      message: 'Enter a numeric table number (digits only).',
+    }).optional(),
+    plate_index: z.number().int().min(1).max(100).optional(),
+  })
+  .strict()
+  .refine((d) => Boolean(d.target_table_id || d.target_table_number), {
+    message: 'target_table_id or target_table_number is required',
+  });
+
+export class ReassignItemTableDto extends createZodDto(ReassignItemTableSchema) {}
 
 // ─── Query ────────────────────────────────────────────────────────────────────
 

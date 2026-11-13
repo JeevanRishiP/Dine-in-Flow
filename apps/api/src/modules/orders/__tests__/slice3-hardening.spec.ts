@@ -73,17 +73,23 @@ describe('Slice 3 Hardening — QR Tokens, Orders Validation, Loyalty, Refunds, 
       vi.spyOn(dbClient, 'withTenantContextRaw').mockImplementation(
         async <T>(_o: string, fn: (c: PoolClient) => Promise<T>) =>
           fn({
-            query: vi.fn().mockResolvedValueOnce({
-              rows: [{
-                id: sessionId,
-                org_id: orgId,
-                outlet_id: outletId,
-                table_id: tableId,
-                status: 'OPEN',
-                pax: 2,
-                opened_at: new Date(),
-                table_number: 'T04',
-              }],
+            query: vi.fn().mockImplementation(async (sql: string) => {
+              if (sql.includes('INSERT INTO temp_customers')) {
+                return { rows: [{ id: 'temp-cust-1' }] };
+              }
+              return {
+                rows: [{
+                  id: sessionId,
+                  org_id: orgId,
+                  outlet_id: outletId,
+                  table_id: tableId,
+                  status: 'OPEN',
+                  pax: 2,
+                  opened_at: new Date(),
+                  table_number: 'T04',
+                  temp_customer_id: 'temp-cust-1',
+                }],
+              };
             }),
           } as unknown as PoolClient),
       );
