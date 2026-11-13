@@ -3347,3 +3347,105 @@ input, textarea, select {
   font-weight: 700;
   box-shadow: 0 0 8px rgba(245, 158, 11, 0.25);
 }
+
+/* ============================================================================
+   Top-Quarter Table Drawer (slides down from top; glides toward Table pill on close)
+   ============================================================================ */
+
+@keyframes slideDownQuarter {
+  from {
+    transform: translateY(-100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+@keyframes slideUpBottomSheet {
+  from {
+    transform: translateY(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+.top-table-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(6, 10, 18, 0.62);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  z-index: 1200;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  transition: opacity 0.3s ease;
+}
+
+.top-table-overlay.closing {
+  opacity: 0;
+}
+
+.top-table-sheet {
+  width: 100%;
+  max-width: 600px;
+  min-height: 24vh;
+  background: linear-gradient(180deg, #131b2e 0%, #0f172a 100%);
+  border-bottom: 1.5px solid rgba(245, 158, 11, 0.45);
+  border-bottom-left-radius: 22px;
+  border-bottom-right-radius: 22px;
+  padding: 18px 20px 20px;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.72);
+  animation: slideDownQuarter 0.28s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+  transform-origin: 18% top;
+  transition: transform 0.32s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.28s ease;
+}
+
+.top-table-sheet.closing-to-badge {
+  animation: none;
+  transform: translate(-28%, -95%) scale(0.18);
+  opacity: 0;
+}
+
+.bottom-auth-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(6, 10, 18, 0.65);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  z-index: 1150;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  transition: opacity 0.28s ease;
+}
+
+.bottom-auth-overlay.closing {
+  opacity: 0;
+}
+
+.bottom-auth-sheet {
+  width: 100%;
+  max-width: 560px;
+  background: linear-gradient(180deg, #131b2e 0%, #0b1120 100%);
+  border-top: 1.5px solid rgba(245, 158, 11, 0.45);
+  border-top-left-radius: 24px;
+  border-top-right-radius: 24px;
+  padding: 20px 20px 28px;
+  box-shadow: 0 -20px 50px rgba(0, 0, 0, 0.75);
+  animation: slideUpBottomSheet 0.28s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+  transition: transform 0.26s ease, opacity 0.26s ease;
+  max-height: 85vh;
+  overflow-y: auto;
+}
+
+.bottom-auth-sheet.closing {
+  animation: none;
+  transform: translateY(100%);
+  opacity: 0;
+}

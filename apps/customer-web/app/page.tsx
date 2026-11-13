@@ -3,14 +3,24 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import {
   buildSignedQrTokenFromSearch,
+  extractUrlTableAndOutlet,
+  fetchOutletTableDirectory,
+  fetchCurrentGuestSessionRemote,
   openSignedTableSession,
+  openManualTableSession,
+  type GuestSessionState,
   loadGuestSession,
   clearGuestSession,
   loadCustomerAuth,
   saveCustomerAuth,
   clearCustomerAuth,
+  refreshCustomerSessionRemote,
+  logoutCustomerRemote,
   resolveTenantIds,
   customerApiFetch,
+  sanitizeTableDigits,
+  matchHotelTable,
+  type OutletTableInfo,
 } from './lib/guest-session';
 
 // ============================================================================
@@ -141,6 +151,8 @@ export interface CartLineItem {
   spiceLevel?: 'MILD' | 'MEDIUM' | 'HOT' | 'NONE';
   notes?: string;
   selectedModifiers: ModifierOption[];
+  targetTableId?: string;
+  targetTableNumber?: string;
 }
 
 interface TableOrderRecord {
@@ -163,6 +175,8 @@ interface TableOrderRecord {
     notes?: string;
     status?: string;
     created_at?: string;
+    target_table_id?: string | null;
+    target_table_number?: string | null;
     modifiers?: Array<{
       modifier_id?: string;
       name: string;
@@ -175,6 +189,7 @@ interface FlattenedPlateItem {
   plateKey: string;
   orderId: string;
   orderNumber: string;
+  tableId?: string | null;
   tableNumber: string;
   orderCreatedAt: string;
   itemCreatedAt: string;
@@ -1408,6 +1423,17 @@ export default function CustomerDineInPage() {
   const [manualQrInput, setManualQrInput] = useState('');
   const [isTableVerified, setIsTableVerified] = useState(false);
   const [isTableModalOpen, setIsTableModalOpen] = useState(false);
+  const [isTopTableClosing, setIsTopTableClosing] = useState(false);
+  const [outletTables, setOutletTables] = useState<OutletTableInfo[]>([]);
+  const [outletTablesLoaded, setOutletTablesLoaded] = useState(false);
+  const [tableNumberInput, setTableNumberInput] = useState('');
+  const [tableSubmitLoading, setTableSubmitLoading] = useState(false);
+  const [cartCheckoutTableDigits, setCartCheckoutTableDigits] = useState('');
+  const [cartPlateEditingId, setCartPlateEditingId] = useState<string | null>(null);
+  const [cartPlateDigits, setCartPlateDigits] = useState('');
+  const [editingOrderPlateKey, setEditingOrderPlateKey] = useState<string | null>(null);
+  const [editingOrderPlateDigits, setEditingOrderPlateDigits] = useState('');
+  const [editingOrderPlateLoading, setEditingOrderPlateLoading] = useState(false);
 
   // Hero Carousel State
   const [heroIndex, setHeroIndex] = useState(0);
@@ -1553,8 +1579,18 @@ export default function CustomerDineInPage() {
 
   // Customer Authentication & Profile State
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  const [isAuthClosing, setIsAuthClosing] = useState(false);
+  const [authMode, setAuthMode] = useState<'SIGNIN' | 'SIGNUP'>('SIGNIN');
   const [isProfileOpen, setIsProfileOpen] = useState(false);
-  const [customerPhoneInput, setCustomerPhoneInput] = useState('9876543210');
+  const [customerPhoneInput, setCustomerPhoneInput] = useState('');
+  const [authEmailInput, setAuthEmailInput] = useState('');
+  const [authEmailLocked, setAuthEmailLocked] = useState(false);
+  const [authDisplayNameInput, setAuthDisplayNameInput] = useState('');
+  const [googlePreRegToken, setGooglePreRegToken] = useState<string | null>(null);
+  const [authChannelLabel, setAuthChannelLabel] = useState<'WhatsApp' | 'SMS' | null>(null);
+  const [showDevGooglePicker, setShowDevGooglePicker] = useState(false);
+  const [devGoogleEmailInput, setDevGoogleEmailInput] = useState('');
+  const [devGoogleNameInput, setDevGoogleNameInput] = useState('');
   const [customerOtpInput, setCustomerOtpInput] = useState('');
   const [authStep, setAuthStep] = useState<'PHONE' | 'OTP'>('PHONE');
   const [authLoading, setAuthLoading] = useState(false);
@@ -1564,6 +1600,7 @@ export default function CustomerDineInPage() {
   const [customerId, setCustomerId] = useState<string | null>(null);
   const [customerProfile, setCustomerProfile] = useState<{
     phone: string;
+    email?: string | null;
     displayName: string;
     loyaltyPoints: number;
     loyaltyTier: string;
@@ -1641,7 +1678,107 @@ export default function CustomerDineInPage() {
     return () => clearInterval(timer);
   }, []);
 
-  // ── 2. Establish Signed Table Session ──────────────────────────────────────
+  // ── 2. Table Directory, Manual / NFC / Signed QR Session & Drawers ──────────
+  const [activeSlug, setActiveSlug] = useState<string | undefined>(undefined);
+
+  const loadOutletTablesForTenant = useCallback(async (outletIdToLoad?: string, slugToLoad?: string) => {
+    const dir = await fetchOutletTableDirectory(outletIdToLoad, slugToLoad);
+    if (dir) {
+      setOutletTables(dir.tables);
+      setOutletTablesLoaded(true);
+      if (dir.outletId) setActiveOutletId(dir.outletId);
+      if (dir.orgId) setActiveOrgId(dir.orgId);
+      return dir;
+    }
+    setOutletTablesLoaded(true);
+    return null;
+  }, []);
+
+  const openTopTableDrawer = useCallback(() => {
+    setIsTopTableClosing(false);
+    setTableNumberInput((prev) => prev || (selectedTable !== '--' ? sanitizeTableDigits(selectedTable) : ''));
+    setIsTableModalOpen(true);
+    const tenant = resolveTenantIds(loadGuestSession());
+    const targetOutlet = activeOutletId || tenant.outletId || undefined;
+    if (!outletTablesLoaded || outletTables.length === 0) {
+      void loadOutletTablesForTenant(targetOutlet, activeSlug);
+    }
+  }, [activeOutletId, activeSlug, loadOutletTablesForTenant, outletTables.length, outletTablesLoaded, selectedTable]);
+
+  const closeTopTableDrawer = useCallback(() => {
+    if (!isTableModalOpen || isTopTableClosing) return;
+    setIsTopTableClosing(true);
+    setTimeout(() => {
+      setIsTableModalOpen(false);
+      setIsTopTableClosing(false);
+    }, 300);
+  }, [isTableModalOpen, isTopTableClosing]);
+
+  const openBottomAuthSheet = useCallback(
+    (mode: 'SIGNIN' | 'SIGNUP' = 'SIGNIN') => {
+      setIsAuthClosing(false);
+      setAuthMode(mode);
+      setAuthStep('PHONE');
+      setAuthError('');
+      setAuthDevCode(null);
+      setShowDevGooglePicker(false);
+      if (mode === 'SIGNIN') {
+        setAuthEmailLocked(false);
+        setGooglePreRegToken(null);
+      }
+      setIsAuthModalOpen(true);
+    },
+    [],
+  );
+
+  const closeBottomAuthSheet = useCallback(() => {
+    if (!isAuthModalOpen || isAuthClosing) return;
+    setIsAuthClosing(true);
+    setTimeout(() => {
+      setIsAuthModalOpen(false);
+      setIsAuthClosing(false);
+    }, 260);
+  }, [isAuthClosing, isAuthModalOpen]);
+
+  const getLiveTableValidation = useCallback(
+    (digits: string): { matched: OutletTableInfo | null; error: string } => {
+      if (!digits) return { matched: null, error: '' };
+      const matched = matchHotelTable(digits, outletTables);
+      if (!outletTablesLoaded) return { matched, error: '' };
+      if (outletTables.length === 0) {
+        return { matched: null, error: 'Table directory unavailable for this hotel outlet.' };
+      }
+      if (!matched) {
+        return {
+          matched: null,
+          error: `Table ${digits} is wrong — please enter a valid table number at this hotel.`,
+        };
+      }
+      return { matched, error: '' };
+    },
+    [outletTables, outletTablesLoaded],
+  );
+
+  const topTableValidation = useMemo(
+    () => getLiveTableValidation(tableNumberInput),
+    [getLiveTableValidation, tableNumberInput],
+  );
+
+  const cartCheckoutTableValidation = useMemo(
+    () => getLiveTableValidation(cartCheckoutTableDigits),
+    [cartCheckoutTableDigits, getLiveTableValidation],
+  );
+
+  const cartPlateValidation = useMemo(
+    () => getLiveTableValidation(cartPlateDigits),
+    [cartPlateDigits, getLiveTableValidation],
+  );
+
+  const orderPlateValidation = useMemo(
+    () => getLiveTableValidation(editingOrderPlateDigits),
+    [editingOrderPlateDigits, getLiveTableValidation],
+  );
+
   const establishSignedTableSession = async (qrToken: string, pax: number = 2) => {
     const res = await openSignedTableSession(qrToken, pax);
     if (!res.ok) {
@@ -1657,30 +1794,115 @@ export default function CustomerDineInPage() {
       setSelectedTable(res.session.tableNumber);
     }
     setIsTableVerified(true);
+    void loadOutletTablesForTenant(res.session.outletId);
     fetchSessionOrders(res.session.sessionId);
     return res.session;
   };
 
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-    const urlParams = new URLSearchParams(window.location.search);
-    const qrFromUrl = buildSignedQrTokenFromSearch(urlParams);
-    if (qrFromUrl) {
-      establishSignedTableSession(qrFromUrl, tablePax);
-      return;
+  const establishManualTableSession = async (
+    outletIdToUse: string | undefined,
+    tableNumber: string,
+    pax: number = 2,
+    slugToUse?: string,
+  ) => {
+    const res = await openManualTableSession(outletIdToUse, tableNumber, pax, slugToUse ?? activeSlug);
+    if (!res.ok) {
+      showToast(res.error);
+      return null;
     }
-    const existing = loadGuestSession();
-    if (existing) {
-      setActiveSessionId(existing.sessionId);
-      setActiveTableId(existing.tableId);
-      setActiveOrgId(existing.orgId);
-      setActiveOutletId(existing.outletId);
-      if (existing.tableNumber) {
-        setSelectedTable(existing.tableNumber);
+    setActiveSessionId(res.session.sessionId);
+    setActiveTableId(res.session.tableId);
+    setActiveOrgId(res.session.orgId);
+    setActiveOutletId(res.session.outletId);
+    setSelectedTable(res.session.tableNumber || tableNumber);
+    setIsTableVerified(true);
+    void loadOutletTablesForTenant(res.session.outletId, slugToUse ?? activeSlug);
+    fetchSessionOrders(res.session.sessionId);
+    return res.session;
+  };
+
+  const applyActiveGuestSession = useCallback(
+    (sess: GuestSessionState, slugHint?: string) => {
+      setActiveSessionId(sess.sessionId);
+      setActiveTableId(sess.tableId);
+      setActiveOrgId(sess.orgId);
+      setActiveOutletId(sess.outletId);
+      if (sess.tableNumber) {
+        setSelectedTable(sess.tableNumber);
       }
       setIsTableVerified(true);
-      fetchSessionOrders(existing.sessionId);
+      void loadOutletTablesForTenant(sess.outletId, slugHint);
+    },
+    [loadOutletTablesForTenant],
+  );
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    let active = true;
+
+    async function initializeSession() {
+      const urlParams = new URLSearchParams(window.location.search);
+      const { signedQrToken, tableNumberParam, outletIdParam, slugParam } = extractUrlTableAndOutlet(urlParams);
+      const tenant = resolveTenantIds(loadGuestSession());
+      const targetOutletId = outletIdParam || tenant.outletId || undefined;
+      if (slugParam) setActiveSlug(slugParam);
+
+      if (targetOutletId) {
+        setActiveOutletId(targetOutletId);
+      }
+      void loadOutletTablesForTenant(targetOutletId, slugParam || undefined);
+
+      if (signedQrToken) {
+        await establishSignedTableSession(signedQrToken, tablePax);
+        return;
+      }
+
+      if (tableNumberParam) {
+        await establishManualTableSession(targetOutletId, tableNumberParam, tablePax, slugParam || undefined);
+        return;
+      }
+
+      // Restore persistent temporary customer & active table from HttpOnly cookie (survives refresh & PhonePe tabs)
+      const remote = await fetchCurrentGuestSessionRemote();
+      if (!active) return;
+
+      if (remote?.active && remote.session) {
+        applyActiveGuestSession(remote.session, slugParam || undefined);
+        void fetchSessionOrders(remote.session.sessionId);
+        return;
+      }
+
+      if (remote?.dissolved) {
+        setActiveSessionId('');
+        setActiveTableId('');
+        setSelectedTable('--');
+        setIsTableVerified(false);
+        if (!loadCustomerAuth()) {
+          setSessionOrders([]);
+        }
+        if (!urlParams.get('payment_success')) {
+          setIsTableModalOpen(true);
+        }
+        return;
+      }
+
+      const existing = loadGuestSession();
+      if (existing && remote === null) {
+        applyActiveGuestSession(existing, slugParam || undefined);
+        void fetchSessionOrders(existing.sessionId);
+        return;
+      }
+
+      // No table detected from QR, NFC link, or active cookie -> slide down top table drawer BEFORE login UI.
+      if (!urlParams.get('payment_success')) {
+        setIsTableModalOpen(true);
+      }
     }
+
+    void initializeSession();
+    return () => {
+      active = false;
+    };
   }, []);
 
   // ── 3. Fetch Live Menu from API ───────────────────────────────────────────
@@ -1696,10 +1918,7 @@ export default function CustomerDineInPage() {
         setIsOrdersHistoryOpen(true);
         showToast('Payment confirmed via PhonePe! Kitchen is preparing your dishes 🍳');
         window.history.replaceState({}, '', window.location.pathname);
-        const existing = loadGuestSession();
-        if (existing?.sessionId) {
-          fetchSessionOrders(existing.sessionId);
-        }
+        void fetchSessionOrders();
       } else if (urlParams.get('payment_cancelled') || urlParams.get('payment_failed')) {
         setIsCartOpen(true);
         showToast('⚠️ Payment was not completed. Your dishes are saved in your cart — tap below to retry!');
@@ -1804,6 +2023,9 @@ export default function CustomerDineInPage() {
               } else if (itLower.includes('steamed') && itLower.includes('rice')) {
                 resolvedImage = 'https://images.unsplash.com/photo-1516684732162-798a0062be99?auto=format&fit=crop&w=600&q=80';
               }
+              if (typeof it.image_url === 'string' && it.image_url.trim().length > 0) {
+                resolvedImage = it.image_url.trim();
+              }
 
               return {
                 id: it.id,
@@ -1844,15 +2066,20 @@ export default function CustomerDineInPage() {
       }
     }
     fetchLiveMenu();
-  }, []);
+  }, [activeOrgId, activeOutletId]);
 
-  // ── 4. Fetch Session Orders History ────────────────────────────────────────
-  const fetchSessionOrders = async (sessionId?: string) => {
-    const sId = sessionId || activeSessionId;
-    if (!sId || !loadGuestSession()?.guestSessionToken) return;
+  // ── 4. Fetch Orders History (Scoped strictly to logged-in account OR active temp customer ID) ──
+  const fetchSessionOrders = async (_sessionId?: string, customerTokenOverride?: string) => {
+    const custAuth = loadCustomerAuth();
+    const guestSess = loadGuestSession();
+    const hasCustomer = Boolean(customerTokenOverride || custAuth?.accessToken);
+    const hasGuest = Boolean(guestSess?.guestSessionToken);
+    if (!hasCustomer && !hasGuest) return;
+
     try {
-      const res = await customerApiFetch(`/api/v1/customer/orders/session/${encodeURIComponent(sId)}`, undefined, {
-        preferToken: 'guest',
+      const res = await customerApiFetch('/api/v1/customer/orders/my', undefined, {
+        preferToken: hasCustomer ? 'customer' : 'guest',
+        ...(customerTokenOverride ? { tokenOverride: customerTokenOverride } : {}),
       });
       if (res.ok) {
         const data = await res.json();
@@ -1864,11 +2091,12 @@ export default function CustomerDineInPage() {
   };
 
   useEffect(() => {
-    if (activeSessionId) {
-      const timer = setInterval(() => fetchSessionOrders(activeSessionId), 4000);
-      return () => clearInterval(timer);
-    }
-  }, [activeSessionId]);
+    if (!activeSessionId && !customerToken) return;
+    const timer = setInterval(() => {
+      void fetchSessionOrders(activeSessionId);
+    }, 4000);
+    return () => clearInterval(timer);
+  }, [activeSessionId, customerToken]);
 
   // ── 5. Fetch Diner Profiles Strictly from Real Database ─────────────────
   const fetchCustomerDinerProfiles = useCallback(async (custTargetId?: string | null, tokenOverride?: string | null) => {
@@ -1907,29 +2135,64 @@ export default function CustomerDineInPage() {
     }
   }, [customerId, customerToken, activeOrgId]);
 
-  // Restore Customer Profile & Diner Profiles from Database on mount
+  // Restore Customer Profile & Diner Profiles on mount (via sessionStorage OR HttpOnly refresh cookie)
   useEffect(() => {
-    try {
-      const auth = loadCustomerAuth();
-      if (auth?.accessToken && auth?.customerId) {
-        setCustomerToken(auth.accessToken);
-        setCustomerId(auth.customerId);
-        customerApiFetch(
+    let active = true;
+    async function restoreCustomerSession() {
+      try {
+        const auth = loadCustomerAuth();
+        if (auth?.accessToken && auth?.customerId) {
+          setCustomerToken(auth.accessToken);
+          setCustomerId(auth.customerId);
+          const profRes = await customerApiFetch(
+            '/api/v1/auth/customer/profile',
+            undefined,
+            { preferToken: 'customer', tokenOverride: auth.accessToken, orgIdOverride: activeOrgId },
+          ).catch(() => null);
+          if (profRes && profRes.ok) {
+            const prof = await profRes.json();
+            if (!active) return;
+            setCustomerProfile(prof);
+            setEditDisplayName(prof.displayName || '');
+            fetchCustomerDinerProfiles(auth.customerId, auth.accessToken);
+            void fetchSessionOrders(undefined, auth.accessToken);
+            return;
+          }
+        }
+
+        // Silent mobile session restore using persistent HttpOnly refresh cookie (`df_cust_rt`)
+        const refreshed = await refreshCustomerSessionRemote(activeOrgId || undefined);
+        if (!active || !refreshed) return;
+        setCustomerToken(refreshed.accessToken);
+        setCustomerId(refreshed.customerId);
+        const profRes = await customerApiFetch(
           '/api/v1/auth/customer/profile',
           undefined,
-          { preferToken: 'customer', tokenOverride: auth.accessToken, orgIdOverride: activeOrgId },
-        )
-          .then((r) => (r.ok ? r.json() : null))
-          .then((prof) => {
-            if (prof) {
-              setCustomerProfile(prof);
-              setEditDisplayName(prof.displayName || '');
-            }
-          })
-          .catch(() => {});
-        fetchCustomerDinerProfiles(auth.customerId, auth.accessToken);
-      }
-    } catch {}
+          { preferToken: 'customer', tokenOverride: refreshed.accessToken, orgIdOverride: activeOrgId },
+        ).catch(() => null);
+        if (profRes && profRes.ok) {
+          const prof = await profRes.json();
+          if (!active) return;
+          setCustomerProfile(prof);
+          setEditDisplayName(prof.displayName || '');
+        } else if (active) {
+          setCustomerProfile({
+            phone: refreshed.phone || '',
+            email: refreshed.email ?? null,
+            displayName: refreshed.displayName || '',
+            loyaltyPoints: refreshed.loyaltyPoints ?? 0,
+            loyaltyTier: 'Silver Club',
+          });
+          setEditDisplayName(refreshed.displayName || '');
+        }
+        fetchCustomerDinerProfiles(refreshed.customerId, refreshed.accessToken);
+        void fetchSessionOrders(undefined, refreshed.accessToken);
+      } catch {}
+    }
+    void restoreCustomerSession();
+    return () => {
+      active = false;
+    };
   }, [fetchCustomerDinerProfiles, activeOrgId]);
 
   // Sync Diner Profiles: Only active when a customer is authenticated, strictly from database
@@ -2218,7 +2481,8 @@ export default function CustomerDineInPage() {
             plateKey,
             orderId: ord.id,
             orderNumber,
-            tableNumber: ord.table_number || selectedTable || 'T04',
+            tableId: it.target_table_id || null,
+            tableNumber: it.target_table_number || ord.table_number || selectedTable || '--',
             orderCreatedAt: ord.created_at,
             itemCreatedAt: it.created_at || ord.created_at,
             orderStatus: isPlateServed ? 'SERVED' : isPlateCancelled ? 'CANCELLED' : ord.status,
@@ -3357,14 +3621,96 @@ export default function CustomerDineInPage() {
   // Full payment logic (PhonePe UPI QR, Simulator, Webhooks) is preserved below.
   const REQUIRE_UPFRONT_PAYMENT = false;
 
+  const handleAssignCartLineTable = (cartLineId: string, targetTable: OutletTableInfo) => {
+    setCartLines((prev) => {
+      const next: CartLineItem[] = [];
+      for (const line of prev) {
+        if (line.cartLineId !== cartLineId) {
+          next.push(line);
+          continue;
+        }
+        if (line.quantity > 1) {
+          // Split 1 plate onto the newly chosen table while keeping remaining plates on current table
+          next.push({ ...line, quantity: line.quantity - 1 });
+          next.push({
+            ...line,
+            cartLineId: `${line.cartLineId}-tbl-${Date.now()}`,
+            plateLabel: line.plateLabel ? `${line.plateLabel} (Split)` : `Table ${targetTable.table_number} Plate`,
+            quantity: 1,
+            targetTableId: targetTable.id,
+            targetTableNumber: targetTable.table_number,
+          });
+        } else {
+          next.push({
+            ...line,
+            targetTableId: targetTable.id,
+            targetTableNumber: targetTable.table_number,
+          });
+        }
+      }
+      return next;
+    });
+    setCartPlateEditingId(null);
+    setCartPlateDigits('');
+    showToast(`Assigned plate to Table ${targetTable.table_number} ✓`);
+  };
+
+  const handleMoveOrderPlateTable = async (plate: FlattenedPlateItem, targetTable: OutletTableInfo) => {
+    if (editingOrderPlateLoading) return;
+    setEditingOrderPlateLoading(true);
+    try {
+      const res = await customerApiFetch(
+        `/api/v1/customer/orders/${encodeURIComponent(plate.orderId)}/items/${encodeURIComponent(plate.itemId)}/table`,
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            target_table_id: targetTable.id,
+            plate_index: plate.plateIndex,
+          }),
+        },
+        { preferToken: 'guest' },
+      );
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        showToast(err.detail || err.message || 'Unable to change plate table right now.');
+        return;
+      }
+      setEditingOrderPlateKey(null);
+      setEditingOrderPlateDigits('');
+      if (activeSessionId) {
+        await fetchSessionOrders(activeSessionId);
+      }
+      showToast(`Moved ${plate.itemName} (${plate.plateName}) to Table ${targetTable.table_number} ✓`);
+    } catch {
+      showToast('Network error updating plate table.');
+    } finally {
+      setEditingOrderPlateLoading(false);
+    }
+  };
+
   const handlePlaceOrder = async () => {
     if (cartLines.length === 0 || isPlacingOrder) return;
-    const guestSession = loadGuestSession();
-    const currentSessionId = activeSessionId || guestSession?.sessionId || '';
+    let guestSession = loadGuestSession();
+    let currentSessionId = activeSessionId || guestSession?.sessionId || '';
+
+    // If user closed the top table prompt earlier without choosing a table, require & save at checkout.
     if (!currentSessionId || !guestSession?.guestSessionToken) {
-      showToast('Please scan your table QR code before placing an order.');
-      setIsTableModalOpen(true);
-      return;
+      const tenant = resolveTenantIds(guestSession);
+      const targetOutlet = activeOutletId || tenant.outletId || undefined;
+      if (!cartCheckoutTableValidation.matched) {
+        showToast('Please enter a valid hotel table number in the checkout box below before paying.');
+        return;
+      }
+      const created = await establishManualTableSession(
+        targetOutlet,
+        cartCheckoutTableValidation.matched.table_number,
+        tablePax,
+      );
+      if (!created) return;
+      guestSession = created;
+      currentSessionId = created.sessionId;
+      setCartCheckoutTableDigits('');
     }
 
     setIsPlacingOrder(true);
@@ -3405,6 +3751,9 @@ export default function CustomerDineInPage() {
             portion: c.portion || 'FULL',
             modifiers: validModifiers,
             notes: noteWithPlate || undefined,
+            ...(c.targetTableId && uuidPattern.test(c.targetTableId)
+              ? { target_table_id: c.targetTableId }
+              : {}),
           };
         })
         .filter((x): x is NonNullable<typeof x> => x !== null);
@@ -3428,7 +3777,7 @@ export default function CustomerDineInPage() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(orderBody),
         },
-        { preferToken: 'guest' },
+        { preferToken: loadCustomerAuth() ? 'customer' : 'guest' },
       );
 
       if (res.ok) {
@@ -3453,6 +3802,8 @@ export default function CustomerDineInPage() {
                   quantity: it.quantity,
                   line_total_paise: it.line_total_paise,
                   notes: it.notes,
+                  target_table_id: it.target_table_id || null,
+                  target_table_number: it.target_table_number || null,
                   modifiers: it.modifiers || [],
                 }))
               : cartLines.map((c, cIdx) => ({
@@ -3462,6 +3813,8 @@ export default function CustomerDineInPage() {
                   quantity: c.quantity,
                   line_total_paise: c.item.pricePaise * c.quantity,
                   notes: c.notes,
+                  target_table_id: c.targetTableId || null,
+                  target_table_number: c.targetTableNumber || null,
                   modifiers: (c.selectedModifiers || []).map((m) => ({ name: m.name, price_paise: m.pricePaise })),
                 })),
           };
@@ -3527,35 +3880,121 @@ export default function CustomerDineInPage() {
     }
   };
 
-  // ── 11. Customer Authentication (Backend OTP Verification) ─────────────────
+  // ── 11. Customer Authentication (WhatsApp OTP + Google + Persistent Session) ─
+  const applyAuthenticatedCustomer = async (
+    data: {
+      accessToken: string;
+      customerId: string;
+      phone?: string;
+      email?: string | null;
+      displayName?: string | null;
+      loyaltyPoints?: number;
+    },
+    fallbackPhone: string,
+    targetOrgId: string,
+  ) => {
+    saveCustomerAuth({ accessToken: data.accessToken, customerId: data.customerId });
+    setCustomerToken(data.accessToken);
+    setCustomerId(data.customerId);
+
+    const profRes = await customerApiFetch(
+      '/api/v1/auth/customer/profile',
+      undefined,
+      { preferToken: 'customer', tokenOverride: data.accessToken, orgIdOverride: targetOrgId },
+    ).catch(() => null);
+
+    if (profRes && profRes.ok) {
+      const prof = await profRes.json();
+      setCustomerProfile(prof);
+      setEditDisplayName(prof.displayName || '');
+    } else {
+      setCustomerProfile({
+        phone: data.phone || fallbackPhone,
+        email: data.email ?? null,
+        displayName: data.displayName || '',
+        loyaltyPoints: data.loyaltyPoints ?? 0,
+        loyaltyTier: 'Silver Club',
+      });
+      setEditDisplayName(data.displayName || '');
+    }
+
+    await fetchCustomerDinerProfiles(data.customerId, data.accessToken);
+    void fetchSessionOrders(undefined, data.accessToken);
+    closeBottomAuthSheet();
+    setAuthStep('PHONE');
+    setAuthDevCode(null);
+    setCustomerOtpInput('');
+    setGooglePreRegToken(null);
+    setAuthEmailLocked(false);
+    setShowDevGooglePicker(false);
+    showToast(
+      data.displayName
+        ? `Signed in as ${data.displayName}!`
+        : 'Signed in successfully! Your mobile session is saved.'
+    );
+  };
+
+  const resolveCustomerAuthOrgId = (): string => {
+    const tenant = resolveTenantIds(loadGuestSession());
+    return activeOrgId || tenant.orgId;
+  };
+
+  const formatNormalizedPhone = (raw: string): string => {
+    const cleaned = raw.trim().replace(/[^\d+]/g, '');
+    if (!cleaned) return '';
+    return cleaned.startsWith('+') ? cleaned : `+91${cleaned}`;
+  };
+
   const handleRequestOtp = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     setAuthLoading(true);
     setAuthError('');
     setAuthDevCode(null);
-    const tenant = resolveTenantIds(loadGuestSession());
-    const targetOrgId = activeOrgId || tenant.orgId;
+    setAuthChannelLabel(null);
+    const targetOrgId = resolveCustomerAuthOrgId();
     if (!targetOrgId) {
-      setAuthError('Scan your table QR code before signing in.');
+      setAuthError('Select a hotel table first before signing in.');
       setAuthLoading(false);
       return;
     }
-    const rawPhone = customerPhoneInput.trim();
-    const formattedPhone = rawPhone.startsWith('+') ? rawPhone : `+91${rawPhone}`;
+
+    const formattedPhone = formatNormalizedPhone(customerPhoneInput);
+    if (!/^\+\d{10,15}$/.test(formattedPhone)) {
+      setAuthError('Enter a valid 10-digit mobile number.');
+      setAuthLoading(false);
+      return;
+    }
+
+    const emailTrimmed = authEmailInput.trim();
+    if (authMode === 'SIGNUP' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailTrimmed)) {
+      setAuthError('Enter a valid email ID to link to your mobile number.');
+      setAuthLoading(false);
+      return;
+    }
 
     try {
       const res = await fetch('/api/v1/auth/customer/otp/request', {
         method: 'POST',
+        credentials: 'include',
         headers: {
           'Content-Type': 'application/json',
           'x-org-id': targetOrgId,
         },
-        body: JSON.stringify({ phone: formattedPhone }),
+        body: JSON.stringify({
+          phone: formattedPhone,
+          mode: authMode,
+          ...(authMode === 'SIGNUP' ? { email: emailTrimmed } : {}),
+        }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setAuthError(data.detail || data.message || 'Unable to send OTP code.');
+        setAuthError(data.detail || data.message || 'Unable to send WhatsApp OTP code.');
         return;
+      }
+      if (data.channel === 'WHATSAPP') {
+        setAuthChannelLabel('WhatsApp');
+      } else {
+        setAuthChannelLabel('SMS');
       }
       if (data.devCode) {
         setAuthDevCode(data.devCode);
@@ -3575,72 +4014,149 @@ export default function CustomerDineInPage() {
     if (e) e.preventDefault();
     setAuthLoading(true);
     setAuthError('');
-    const tenant = resolveTenantIds(loadGuestSession());
-    const targetOrgId = activeOrgId || tenant.orgId;
+    const targetOrgId = resolveCustomerAuthOrgId();
     if (!targetOrgId) {
-      setAuthError('Scan your table QR code before verifying OTP.');
+      setAuthError('Select a hotel table first before verifying OTP.');
       setAuthLoading(false);
       return;
     }
-    const rawPhone = customerPhoneInput.trim();
-    const formattedPhone = rawPhone.startsWith('+') ? rawPhone : `+91${rawPhone}`;
+    const formattedPhone = formatNormalizedPhone(customerPhoneInput);
     const enteredCode = customerOtpInput.trim();
+    const emailTrimmed = authEmailInput.trim();
 
     try {
       const res = await fetch('/api/v1/auth/customer/otp/verify', {
         method: 'POST',
+        credentials: 'include',
         headers: {
           'Content-Type': 'application/json',
           'x-org-id': targetOrgId,
         },
-        body: JSON.stringify({ phone: formattedPhone, code: enteredCode }),
+        body: JSON.stringify({
+          phone: formattedPhone,
+          code: enteredCode,
+          ...(authMode === 'SIGNUP' && emailTrimmed ? { email: emailTrimmed } : {}),
+          ...(authDisplayNameInput.trim() ? { displayName: authDisplayNameInput.trim() } : {}),
+          ...(googlePreRegToken ? { googlePreRegToken } : {}),
+        }),
       });
       const data = await res.json().catch(() => ({}));
       if (res.ok && data.accessToken && data.customerId) {
-        saveCustomerAuth({ accessToken: data.accessToken, customerId: data.customerId });
-        setCustomerToken(data.accessToken);
-        setCustomerId(data.customerId);
-
-        const profRes = await customerApiFetch(
-          '/api/v1/auth/customer/profile',
-          undefined,
-          { preferToken: 'customer', tokenOverride: data.accessToken, orgIdOverride: targetOrgId },
-        ).catch(() => null);
-
-        if (profRes && profRes.ok) {
-          const prof = await profRes.json();
-          setCustomerProfile(prof);
-          setEditDisplayName(prof.displayName || '');
-        } else {
-          setCustomerProfile({
-            phone: formattedPhone,
-            displayName: data.displayName || '',
-            loyaltyPoints: data.loyaltyPoints ?? 0,
-            loyaltyTier: 'Silver Club',
-          });
-          setEditDisplayName(data.displayName || '');
-        }
-
-        await fetchCustomerDinerProfiles(data.customerId, data.accessToken);
-
-        setIsAuthModalOpen(false);
-        setAuthStep('PHONE');
-        setAuthDevCode(null);
-        setCustomerOtpInput('');
-        showToast(
-          data.displayName
-            ? `Signed in as ${data.displayName}!`
-            : 'Signed in successfully! Welcome back.'
-        );
+        await applyAuthenticatedCustomer(data, formattedPhone, targetOrgId);
         return;
-      } else {
-        setAuthError(data.detail || data.message || 'Invalid verification code. Please check and try again.');
       }
+      setAuthError(data.detail || data.message || 'Invalid verification code. Please check and try again.');
     } catch {
       setAuthError('Network error connecting to authentication API.');
     } finally {
       setAuthLoading(false);
     }
+  };
+
+  const submitGoogleAuthPayload = async (payload: {
+    idToken?: string;
+    devMockEmail?: string;
+    devMockName?: string;
+  }) => {
+    const targetOrgId = resolveCustomerAuthOrgId();
+    if (!targetOrgId) {
+      setAuthError('Select a hotel table first before signing in with Google.');
+      return;
+    }
+    setAuthLoading(true);
+    setAuthError('');
+    try {
+      const res = await fetch('/api/v1/auth/customer/google', {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-org-id': targetOrgId,
+        },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setAuthError(data.detail || data.message || 'Google sign-in failed.');
+        return;
+      }
+      if (data.registered && data.accessToken && data.customerId) {
+        await applyAuthenticatedCustomer(data, data.phone || '', targetOrgId);
+        return;
+      }
+      // Email is not registered -> route directly to registration to link mobile via WhatsApp OTP.
+      setAuthMode('SIGNUP');
+      setAuthStep('PHONE');
+      setAuthEmailInput(data.email || payload.devMockEmail || '');
+      setAuthEmailLocked(true);
+      setGooglePreRegToken(data.googlePreRegToken || null);
+      if (data.suggestedName || payload.devMockName) {
+        setAuthDisplayNameInput(data.suggestedName || payload.devMockName || '');
+      }
+      setShowDevGooglePicker(false);
+      setAuthError(
+        `${data.email || 'This Google email'} is not registered yet. Enter your mobile number to verify via WhatsApp OTP and complete sign up.`,
+      );
+    } catch {
+      setAuthError('Network error during Google sign-in.');
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleGoogleLoginClick = () => {
+    setAuthError('');
+    const googleClientId = process.env['NEXT_PUBLIC_GOOGLE_CLIENT_ID'] || '';
+    if (!googleClientId) {
+      if (process.env.NODE_ENV !== 'production') {
+        setShowDevGooglePicker((prev) => !prev);
+      } else {
+        setAuthError('Google Sign-In is not configured for this environment yet.');
+      }
+      return;
+    }
+
+    interface GoogleAccountsGlobal {
+      accounts?: {
+        id?: {
+          initialize: (cfg: { client_id: string; callback: (resp: { credential?: string }) => void }) => void;
+          prompt: () => void;
+        };
+      };
+    }
+
+    const startGisPrompt = () => {
+      const googleGlobal = (window as unknown as { google?: GoogleAccountsGlobal }).google;
+      if (!googleGlobal?.accounts?.id) {
+        setAuthError('Google Identity Services could not initialize.');
+        return;
+      }
+      googleGlobal.accounts.id.initialize({
+        client_id: googleClientId,
+        callback: (resp: { credential?: string }) => {
+          if (resp.credential) {
+            void submitGoogleAuthPayload({ idToken: resp.credential });
+          } else {
+            setAuthError('No Google credential returned.');
+          }
+        },
+      });
+      googleGlobal.accounts.id.prompt();
+    };
+
+    const existingGoogle = (window as unknown as { google?: GoogleAccountsGlobal }).google;
+    if (existingGoogle?.accounts?.id) {
+      startGisPrompt();
+      return;
+    }
+
+    const script = document.createElement('script');
+    script.src = 'https://accounts.google.com/gsi/client';
+    script.async = true;
+    script.defer = true;
+    script.onload = startGisPrompt;
+    script.onerror = () => setAuthError('Failed to load Google Sign-In script.');
+    document.head.appendChild(script);
   };
 
   // Profile Name Update in Database
@@ -3758,14 +4274,14 @@ export default function CustomerDineInPage() {
   };
 
   // Auto-polling for active QR payment: when user scans QR on mobile and approves,
-  // desktop detects it automatically without needing manual click!
+  // desktop detects it automatically via interval + window focus!
   useEffect(() => {
     if (!isPaymentModalOpen || !paymentQrData?.paymentId || paymentLoading) return;
     const paymentId = paymentQrData.paymentId;
     if (paymentId.startsWith('pay_')) return;
 
     let isSubscribed = true;
-    const pollInterval = setInterval(async () => {
+    const checkPaymentOnce = async () => {
       try {
         const vRes = await customerApiFetch(
           `/api/v1/customer/payments/${encodeURIComponent(paymentId)}/verify`,
@@ -3780,11 +4296,22 @@ export default function CustomerDineInPage() {
           }
         }
       } catch {}
-    }, 2500);
+    };
+
+    const pollInterval = setInterval(() => void checkPaymentOnce(), 2500);
+    const onFocusOrVisible = () => {
+      if (document.visibilityState === 'visible') {
+        void checkPaymentOnce();
+      }
+    };
+    window.addEventListener('focus', onFocusOrVisible);
+    document.addEventListener('visibilitychange', onFocusOrVisible);
 
     return () => {
       isSubscribed = false;
       clearInterval(pollInterval);
+      window.removeEventListener('focus', onFocusOrVisible);
+      document.removeEventListener('visibilitychange', onFocusOrVisible);
     };
   }, [isPaymentModalOpen, paymentQrData?.paymentId, paymentLoading]);
 
@@ -3809,27 +4336,34 @@ export default function CustomerDineInPage() {
     setAiLoading(true);
 
     try {
-      const payload: Record<string, unknown> = {
-        org_id: targetOrgId,
-        outlet_id: targetOutletId,
-        message: userMsg,
+      const sendRequest = async (sessionIdToUse: string | null) => {
+        const payload: Record<string, unknown> = {
+          org_id: targetOrgId,
+          outlet_id: targetOutletId,
+          message: userMsg,
+        };
+        if (sessionIdToUse) {
+          payload['session_id'] = sessionIdToUse;
+        }
+        if (activeSessionId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(activeSessionId)) {
+          payload['table_session_id'] = activeSessionId;
+        }
+        return customerApiFetch(
+          '/api/v1/public/ai/chat',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          },
+          { preferToken: 'guest' },
+        );
       };
-      if (aiSessionId) {
-        payload['session_id'] = aiSessionId;
-      }
-      if (activeSessionId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(activeSessionId)) {
-        payload['table_session_id'] = activeSessionId;
-      }
 
-      const res = await customerApiFetch(
-        '/api/v1/public/ai/chat',
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        },
-        { preferToken: 'guest' },
-      );
+      let res = await sendRequest(aiSessionId);
+      if (res.status === 404 && aiSessionId) {
+        setAiSessionId(null);
+        res = await sendRequest(null);
+      }
 
       if (res.ok) {
         const data = await res.json();
@@ -3840,7 +4374,7 @@ export default function CustomerDineInPage() {
           data.answer ||
           data.reply ||
           data.message ||
-          "Here are great dishes to enjoy: our Old Delhi Butter Chicken paired with Butter Garlic Naan is a house favorite!";
+          'How can I help you explore our menu today?';
         setAiMessages((prev) => [
           ...prev,
           {
@@ -3852,13 +4386,15 @@ export default function CustomerDineInPage() {
           },
         ]);
       } else {
+        const errBody = (await res.json().catch(() => null)) as { detail?: string; message?: string } | null;
         setAiMessages((prev) => [
           ...prev,
           {
             role: 'assistant',
-            text: `Chef recommends pairing ${
-              userMsg.toLowerCase().includes('veg') ? 'Paneer Tikka with Garlic Naan' : 'Dum Biryani with Butter Chicken'
-            }! Both are slow-cooked in our traditional tandoor.`,
+            text:
+              errBody?.detail ||
+              errBody?.message ||
+              'Chef AI had trouble reaching the kitchen assistant right now. Please try again in a moment.',
           },
         ]);
       }
@@ -3867,7 +4403,7 @@ export default function CustomerDineInPage() {
         ...prev,
         {
           role: 'assistant',
-          text: 'Our signature Dal Makhani Bukhara (simmered 18 hours) and Murgh Malai Kebab are the most popular pairing right now!',
+          text: 'Network error while reaching Chef AI. Please try sending your question again.',
         },
       ]);
     } finally {
@@ -4001,7 +4537,7 @@ export default function CustomerDineInPage() {
                 <div className="brand-title">Royal Spice Bistro</div>
                 <button
                   className="table-badge-btn"
-                  onClick={() => setIsTableModalOpen(true)}
+                  onClick={openTopTableDrawer}
                   title="Click to change or verify table"
                 >
                   <span
@@ -4571,7 +5107,7 @@ export default function CustomerDineInPage() {
                 <div className="brand-title">Royal Spice Bistro</div>
                 <button
                   className="table-badge-btn"
-                  onClick={() => setIsTableModalOpen(true)}
+                  onClick={openTopTableDrawer}
                   style={{ padding: '2px 8px', fontSize: '0.72rem' }}
                 >
                   <span>Table {selectedTable}</span>
@@ -6397,6 +6933,37 @@ export default function CustomerDineInPage() {
                                 </span>
                               )}
                               {line.plateLabel && <span className="plate-badge-pill">{line.plateLabel}</span>}
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (cartPlateEditingId === line.cartLineId) {
+                                    setCartPlateEditingId(null);
+                                    setCartPlateDigits('');
+                                  } else {
+                                    setCartPlateEditingId(line.cartLineId);
+                                    setCartPlateDigits(
+                                      sanitizeTableDigits(line.targetTableNumber || (selectedTable !== '--' ? selectedTable : '')),
+                                    );
+                                  }
+                                }}
+                                style={{
+                                  fontSize: '0.68rem',
+                                  fontWeight: 700,
+                                  padding: '2px 7px',
+                                  borderRadius: '999px',
+                                  background: line.targetTableNumber
+                                    ? 'rgba(16, 185, 129, 0.16)'
+                                    : 'rgba(255, 255, 255, 0.08)',
+                                  border: line.targetTableNumber
+                                    ? '1px solid rgba(16, 185, 129, 0.45)'
+                                    : '1px solid rgba(255, 255, 255, 0.16)',
+                                  color: line.targetTableNumber ? '#34d399' : '#cbd5e1',
+                                  cursor: 'pointer',
+                                }}
+                                title="Change table number for this plate before checkout"
+                              >
+                                🪑 Table {line.targetTableNumber || (selectedTable !== '--' ? selectedTable : 'Select')} ✎
+                              </button>
                             </div>
                             <div style={{ fontSize: '0.85rem', color: '#fbbf24', fontWeight: 700, marginTop: '2px' }}>
                               ₹{(linePricePaise / 100).toFixed(0)}
@@ -6411,6 +6978,92 @@ export default function CustomerDineInPage() {
                             🗑️
                           </button>
                         </div>
+
+                        {cartPlateEditingId === line.cartLineId && (
+                          <div
+                            style={{
+                              background: 'rgba(15, 23, 42, 0.9)',
+                              border: '1px solid rgba(245, 158, 11, 0.35)',
+                              borderRadius: '8px',
+                              padding: '8px 10px',
+                              display: 'flex',
+                              flexDirection: 'column',
+                              gap: '6px',
+                            }}
+                          >
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                              <input
+                                type="text"
+                                inputMode="numeric"
+                                pattern="[0-9]*"
+                                placeholder="Table #"
+                                value={cartPlateDigits}
+                                onChange={(e) => setCartPlateDigits(sanitizeTableDigits(e.target.value))}
+                                style={{
+                                  width: '90px',
+                                  padding: '5px 8px',
+                                  borderRadius: '6px',
+                                  background: 'rgba(255,255,255,0.08)',
+                                  border: '1px solid rgba(255,255,255,0.18)',
+                                  color: '#fff',
+                                  fontSize: '0.82rem',
+                                  fontWeight: 700,
+                                }}
+                              />
+                              <button
+                                type="button"
+                                disabled={!cartPlateValidation.matched}
+                                onClick={() => {
+                                  if (cartPlateValidation.matched) {
+                                    handleAssignCartLineTable(line.cartLineId, cartPlateValidation.matched);
+                                  }
+                                }}
+                                style={{
+                                  padding: '5px 10px',
+                                  borderRadius: '6px',
+                                  border: 'none',
+                                  background: cartPlateValidation.matched
+                                    ? 'linear-gradient(135deg, #f59e0b, #d97706)'
+                                    : 'rgba(255,255,255,0.08)',
+                                  color: cartPlateValidation.matched ? '#000' : '#64748b',
+                                  fontSize: '0.74rem',
+                                  fontWeight: 800,
+                                  cursor: cartPlateValidation.matched ? 'pointer' : 'not-allowed',
+                                }}
+                              >
+                                {line.quantity > 1 ? 'Move 1 Plate' : 'Save Table'}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setCartPlateEditingId(null);
+                                  setCartPlateDigits('');
+                                }}
+                                style={{
+                                  padding: '5px 8px',
+                                  borderRadius: '6px',
+                                  background: 'transparent',
+                                  border: '1px solid rgba(255,255,255,0.14)',
+                                  color: '#94a3b8',
+                                  fontSize: '0.72rem',
+                                  cursor: 'pointer',
+                                }}
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                            {cartPlateValidation.error && (
+                              <div style={{ fontSize: '0.72rem', color: '#f87171', fontWeight: 600 }}>
+                                {cartPlateValidation.error}
+                              </div>
+                            )}
+                            {cartPlateValidation.matched && (
+                              <div style={{ fontSize: '0.72rem', color: '#34d399', fontWeight: 600 }}>
+                                ✓ Table {cartPlateValidation.matched.table_number} matched
+                              </div>
+                            )}
+                          </div>
+                        )}
 
                         {/* Modifiers & Notes Badges */}
                         {(line.spiceLevel || line.notes || line.selectedModifiers.length > 0) && (
@@ -6532,10 +7185,93 @@ export default function CustomerDineInPage() {
 
             {cartLines.length > 0 && (
               <div className="drawer-footer" style={{ padding: '16px', borderTop: '1px solid rgba(255, 255, 255, 0.08)' }}>
+                {(!isTableVerified || !activeSessionId) && (
+                  <div
+                    style={{
+                      background: 'rgba(245, 158, 11, 0.09)',
+                      border: '1px solid rgba(245, 158, 11, 0.35)',
+                      borderRadius: '10px',
+                      padding: '10px 12px',
+                      marginBottom: '12px',
+                    }}
+                  >
+                    <div style={{ fontSize: '0.78rem', fontWeight: 800, color: '#fbbf24', marginBottom: '6px' }}>
+                      🪑 Enter Your Table Number to Checkout
+                    </div>
+                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        pattern="[0-9]*"
+                        placeholder="Digits only (e.g. 4)"
+                        value={cartCheckoutTableDigits}
+                        onChange={(e) => setCartCheckoutTableDigits(sanitizeTableDigits(e.target.value))}
+                        style={{
+                          flex: 1,
+                          padding: '8px 10px',
+                          borderRadius: '8px',
+                          background: 'rgba(0, 0, 0, 0.35)',
+                          border: cartCheckoutTableValidation.error
+                            ? '1px solid #ef4444'
+                            : '1px solid rgba(255,255,255,0.18)',
+                          color: '#fff',
+                          fontSize: '0.86rem',
+                          fontWeight: 700,
+                        }}
+                      />
+                      <button
+                        type="button"
+                        disabled={!cartCheckoutTableValidation.matched}
+                        onClick={async () => {
+                          const targetOutlet = activeOutletId || resolveTenantIds().outletId || undefined;
+                          if (cartCheckoutTableValidation.matched) {
+                            const session = await establishManualTableSession(
+                              targetOutlet,
+                              cartCheckoutTableValidation.matched.table_number,
+                              tablePax,
+                            );
+                            if (session) {
+                              setCartCheckoutTableDigits('');
+                              showToast(`Saved Table ${session.tableNumber}!`);
+                            }
+                          }
+                        }}
+                        style={{
+                          padding: '8px 12px',
+                          borderRadius: '8px',
+                          border: 'none',
+                          background: cartCheckoutTableValidation.matched
+                            ? 'linear-gradient(135deg, #10b981, #059669)'
+                            : 'rgba(255,255,255,0.08)',
+                          color: cartCheckoutTableValidation.matched ? '#fff' : '#64748b',
+                          fontWeight: 800,
+                          fontSize: '0.76rem',
+                          cursor: cartCheckoutTableValidation.matched ? 'pointer' : 'not-allowed',
+                        }}
+                      >
+                        Save Table
+                      </button>
+                    </div>
+                    {cartCheckoutTableValidation.error && (
+                      <div style={{ fontSize: '0.73rem', color: '#f87171', fontWeight: 600, marginTop: '5px' }}>
+                        {cartCheckoutTableValidation.error}
+                      </div>
+                    )}
+                    {cartCheckoutTableValidation.matched && (
+                      <div style={{ fontSize: '0.73rem', color: '#34d399', fontWeight: 600, marginTop: '5px' }}>
+                        ✓ Found Table {cartCheckoutTableValidation.matched.table_number}
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 <button
                   className="accordion-add-action-btn"
                   onClick={handlePlaceOrder}
-                  disabled={isPlacingOrder}
+                  disabled={
+                    isPlacingOrder ||
+                    ((!isTableVerified || !activeSessionId) && !cartCheckoutTableValidation.matched)
+                  }
                   style={{ width: '100%', margin: 0, padding: '12px 16px', fontSize: '0.92rem' }}
                 >
                   {isPlacingOrder ? 'Initiating Payment...' : `💳 Pay ₹${(cartGrandTotalPaise / 100).toFixed(0)} & Send to Kitchen`}
@@ -7184,7 +7920,7 @@ export default function CustomerDineInPage() {
                             </button>
                           </div>
 
-                          {/* Order & Item Date/Time */}
+                          {/* Order & Item Date/Time + Per-Plate Table */}
                           <div
                             style={{
                               fontSize: '0.72rem',
@@ -7199,7 +7935,137 @@ export default function CustomerDineInPage() {
                             <span>🕒 {formatOrderDateTime(plate.itemCreatedAt || plate.orderCreatedAt)}</span>
                             <span>·</span>
                             <span>Order #{plate.orderNumber}</span>
+                            <span>·</span>
+                            <span
+                              style={{
+                                color: '#fbbf24',
+                                fontWeight: 700,
+                                background: 'rgba(245, 158, 11, 0.12)',
+                                border: '1px solid rgba(245, 158, 11, 0.28)',
+                                borderRadius: '999px',
+                                padding: '1px 7px',
+                              }}
+                            >
+                              🪑 Table {plate.tableNumber}
+                            </span>
+                            {plate.orderStatus !== 'CANCELLED' && (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  if (editingOrderPlateKey === plate.plateKey) {
+                                    setEditingOrderPlateKey(null);
+                                    setEditingOrderPlateDigits('');
+                                  } else {
+                                    setEditingOrderPlateKey(plate.plateKey);
+                                    setEditingOrderPlateDigits(sanitizeTableDigits(plate.tableNumber));
+                                  }
+                                }}
+                                style={{
+                                  background: 'rgba(255,255,255,0.06)',
+                                  border: '1px solid rgba(255,255,255,0.16)',
+                                  borderRadius: '999px',
+                                  color: '#e2e8f0',
+                                  fontSize: '0.68rem',
+                                  fontWeight: 700,
+                                  padding: '1px 7px',
+                                  cursor: 'pointer',
+                                }}
+                              >
+                                Move Table
+                              </button>
+                            )}
                           </div>
+
+                          {editingOrderPlateKey === plate.plateKey && (
+                            <div
+                              onClick={(e) => e.stopPropagation()}
+                              style={{
+                                marginTop: '6px',
+                                padding: '8px 10px',
+                                borderRadius: '8px',
+                                background: 'rgba(15, 23, 42, 0.9)',
+                                border: '1px solid rgba(245, 158, 11, 0.35)',
+                                display: 'flex',
+                                flexDirection: 'column',
+                                gap: '6px',
+                              }}
+                            >
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                <input
+                                  type="text"
+                                  inputMode="numeric"
+                                  pattern="[0-9]*"
+                                  placeholder="Table #"
+                                  value={editingOrderPlateDigits}
+                                  onChange={(e) => setEditingOrderPlateDigits(sanitizeTableDigits(e.target.value))}
+                                  style={{
+                                    width: '88px',
+                                    padding: '5px 8px',
+                                    borderRadius: '6px',
+                                    background: 'rgba(255,255,255,0.08)',
+                                    border: orderPlateValidation.error
+                                      ? '1px solid #ef4444'
+                                      : '1px solid rgba(255,255,255,0.18)',
+                                    color: '#fff',
+                                    fontSize: '0.8rem',
+                                    fontWeight: 700,
+                                  }}
+                                />
+                                <button
+                                  type="button"
+                                  disabled={!orderPlateValidation.matched || editingOrderPlateLoading}
+                                  onClick={() => {
+                                    if (orderPlateValidation.matched) {
+                                      void handleMoveOrderPlateTable(plate, orderPlateValidation.matched);
+                                    }
+                                  }}
+                                  style={{
+                                    padding: '5px 10px',
+                                    borderRadius: '6px',
+                                    border: 'none',
+                                    background: orderPlateValidation.matched
+                                      ? 'linear-gradient(135deg, #f59e0b, #d97706)'
+                                      : 'rgba(255,255,255,0.08)',
+                                    color: orderPlateValidation.matched ? '#000' : '#64748b',
+                                    fontSize: '0.74rem',
+                                    fontWeight: 800,
+                                    cursor: orderPlateValidation.matched ? 'pointer' : 'not-allowed',
+                                  }}
+                                >
+                                  {editingOrderPlateLoading ? 'Saving...' : 'Confirm'}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setEditingOrderPlateKey(null);
+                                    setEditingOrderPlateDigits('');
+                                  }}
+                                  style={{
+                                    padding: '5px 8px',
+                                    borderRadius: '6px',
+                                    background: 'transparent',
+                                    border: '1px solid rgba(255,255,255,0.14)',
+                                    color: '#94a3b8',
+                                    fontSize: '0.72rem',
+                                    cursor: 'pointer',
+                                  }}
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                              {orderPlateValidation.error && (
+                                <div style={{ fontSize: '0.72rem', color: '#f87171', fontWeight: 600 }}>
+                                  {orderPlateValidation.error}
+                                </div>
+                              )}
+                              {orderPlateValidation.matched && (
+                                <div style={{ fontSize: '0.72rem', color: '#34d399', fontWeight: 600 }}>
+                                  ✓ Moving plate to Table {orderPlateValidation.matched.table_number}
+                                </div>
+                              )}
+                            </div>
+                          )}
 
                           {/* Collapsed Preview Hint */}
                           {!isExpanded && (
@@ -7627,149 +8493,488 @@ export default function CustomerDineInPage() {
         </div>
       )}
 
-      {/* Table QR Verification Modal */}
+      {/* Top-Quarter Table Number Slide-Down Drawer */}
       {isTableModalOpen && (
-        <div className="filter-sheet-overlay" onClick={() => setIsTableModalOpen(false)}>
-          <div className="modal-center-card" onClick={(e) => e.stopPropagation()}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
-              <h3 style={{ fontSize: '1.1rem', fontWeight: 800, color: '#fff' }}>Table QR Verification</h3>
-              <button onClick={() => setIsTableModalOpen(false)} style={{ color: '#94a3b8', fontSize: '1.1rem' }}>
+        <div
+          className={`top-table-overlay ${isTopTableClosing ? 'closing' : ''}`}
+          onClick={closeTopTableDrawer}
+        >
+          <div
+            className={`top-table-sheet ${isTopTableClosing ? 'closing-to-badge' : ''}`}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+              <div>
+                <h3 style={{ fontSize: '1.05rem', fontWeight: 800, color: '#fff', margin: 0 }}>
+                  🪑 Select Your Table Number
+                </h3>
+                <p style={{ fontSize: '0.78rem', color: '#94a3b8', margin: '3px 0 0' }}>
+                  {isTableVerified
+                    ? `Currently seated at Table ${selectedTable}. Type a new table number below or tap outside to close.`
+                    : 'Enter the numeric table number printed on your table (digits only).'}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={closeTopTableDrawer}
+                style={{ color: '#94a3b8', fontSize: '1.1rem', padding: '4px 8px', cursor: 'pointer' }}
+                aria-label="Close table drawer"
+              >
                 ✕
               </button>
             </div>
-
-            <p style={{ fontSize: '0.82rem', color: '#94a3b8', marginBottom: '14px', lineHeight: 1.5 }}>
-              {isTableVerified
-                ? `Active verified session for Table ${selectedTable}. To change tables, scan the signed QR code on your new table.`
-                : 'Please scan the QR code on your table using your phone camera, or paste the signed scan URL / QR token below:'}
-            </p>
 
             <form
               onSubmit={async (e) => {
                 e.preventDefault();
-                const raw = manualQrInput.trim();
-                if (!raw) return;
-                let parsedToken = raw;
-                if (raw.includes('?')) {
-                  try {
-                    const url = raw.startsWith('http') ? new URL(raw) : new URL(raw, window.location.origin);
-                    const extracted = buildSignedQrTokenFromSearch(url.searchParams);
-                    if (extracted) parsedToken = extracted;
-                  } catch {
-                    // keep raw
+                if (!topTableValidation.matched || tableSubmitLoading) return;
+                const targetOutlet = activeOutletId || resolveTenantIds(loadGuestSession()).outletId || undefined;
+                setTableSubmitLoading(true);
+                try {
+                  const session = await establishManualTableSession(
+                    targetOutlet,
+                    topTableValidation.matched.table_number,
+                    tablePax,
+                  );
+                  if (session) {
+                    setTableNumberInput('');
+                    closeTopTableDrawer();
+                    showToast(`Table ${session.tableNumber} confirmed!`);
                   }
-                }
-                const session = await establishSignedTableSession(parsedToken, tablePax);
-                if (session) {
-                  setManualQrInput('');
-                  setIsTableModalOpen(false);
-                  showToast(`Verified Table ${session.tableNumber || 'session'}!`);
+                } finally {
+                  setTableSubmitLoading(false);
                 }
               }}
-              style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginBottom: '12px' }}
+              style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}
             >
-              <input
-                type="text"
-                placeholder="Paste signed QR link or token"
-                value={manualQrInput}
-                onChange={(e) => setManualQrInput(e.target.value)}
-                style={{
-                  padding: '10px 12px',
-                  borderRadius: '8px',
-                  background: 'rgba(255,255,255,0.06)',
-                  border: '1px solid rgba(255,255,255,0.14)',
-                  color: '#fff',
-                  fontSize: '0.82rem',
-                }}
-              />
-              <button type="submit" className="accordion-add-action-btn" style={{ width: '100%' }}>
-                Verify Signed Table QR
-              </button>
+              <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  autoFocus
+                  placeholder="Enter table digits (e.g. 4)"
+                  value={tableNumberInput}
+                  onChange={(e) => setTableNumberInput(sanitizeTableDigits(e.target.value))}
+                  style={{
+                    flex: 1,
+                    padding: '11px 14px',
+                    borderRadius: '10px',
+                    background: 'rgba(255, 255, 255, 0.07)',
+                    border: topTableValidation.error
+                      ? '1.5px solid #ef4444'
+                      : topTableValidation.matched
+                      ? '1.5px solid #10b981'
+                      : '1px solid rgba(255, 255, 255, 0.16)',
+                    color: '#fff',
+                    fontSize: '1rem',
+                    fontWeight: 700,
+                    letterSpacing: '0.04em',
+                  }}
+                />
+                <button
+                  type="submit"
+                  className="accordion-add-action-btn"
+                  disabled={!topTableValidation.matched || tableSubmitLoading}
+                  style={{
+                    width: 'auto',
+                    minWidth: '116px',
+                    margin: 0,
+                    padding: '11px 16px',
+                    opacity: !topTableValidation.matched || tableSubmitLoading ? 0.45 : 1,
+                    cursor: !topTableValidation.matched || tableSubmitLoading ? 'not-allowed' : 'pointer',
+                  }}
+                >
+                  {tableSubmitLoading ? 'Saving...' : 'Confirm ✓'}
+                </button>
+              </div>
+
+              {topTableValidation.error && (
+                <div style={{ color: '#f87171', fontSize: '0.79rem', fontWeight: 600 }}>
+                  ⚠️ {topTableValidation.error}
+                </div>
+              )}
+
+              {topTableValidation.matched && (
+                <div style={{ color: '#34d399', fontSize: '0.79rem', fontWeight: 600 }}>
+                  ✓ Verified hotel table: Table {topTableValidation.matched.table_number}
+                  {topTableValidation.matched.section ? ` (${topTableValidation.matched.section})` : ''}
+                </div>
+              )}
+
+              {!outletTablesLoaded && (
+                <div style={{ color: '#94a3b8', fontSize: '0.75rem' }}>
+                  Loading hotel tables...
+                </div>
+              )}
+
+              {outletTablesLoaded && outletTables.length === 0 && (
+                <div style={{ color: '#fbbf24', fontSize: '0.75rem' }}>
+                  Tap your table&apos;s NFC tag / QR code, or open with <code>?outlet=&lt;id&gt;</code>, to load hotel tables.
+                </div>
+              )}
             </form>
 
-            {isTableVerified && (
-              <button
-                type="button"
-                className="filter-clear-btn"
-                onClick={() => {
-                  clearGuestSession();
-                  setIsTableVerified(false);
-                  setActiveSessionId('');
-                  setSelectedTable('--');
+            <details style={{ marginTop: '10px', fontSize: '0.75rem', color: '#94a3b8' }}>
+              <summary style={{ cursor: 'pointer', userSelect: 'none' }}>Or paste a signed QR token / link</summary>
+              <form
+                onSubmit={async (e) => {
+                  e.preventDefault();
+                  const raw = manualQrInput.trim();
+                  if (!raw) return;
+                  let parsedToken = raw;
+                  if (raw.includes('?')) {
+                    try {
+                      const url = raw.startsWith('http') ? new URL(raw) : new URL(raw, window.location.origin);
+                      const extracted = buildSignedQrTokenFromSearch(url.searchParams);
+                      if (extracted) parsedToken = extracted;
+                    } catch {
+                      // keep raw
+                    }
+                  }
+                  const session = await establishSignedTableSession(parsedToken, tablePax);
+                  if (session) {
+                    setManualQrInput('');
+                    closeTopTableDrawer();
+                    showToast(`Verified Table ${session.tableNumber || 'session'}!`);
+                  }
                 }}
-                style={{ width: '100%', marginBottom: '8px' }}
+                style={{ display: 'flex', gap: '8px', marginTop: '8px' }}
               >
-                Leave Current Table Session
-              </button>
-            )}
+                <input
+                  type="text"
+                  placeholder="Paste signed QR link or token"
+                  value={manualQrInput}
+                  onChange={(e) => setManualQrInput(e.target.value)}
+                  style={{
+                    flex: 1,
+                    padding: '7px 10px',
+                    borderRadius: '8px',
+                    background: 'rgba(255,255,255,0.06)',
+                    border: '1px solid rgba(255,255,255,0.14)',
+                    color: '#fff',
+                    fontSize: '0.78rem',
+                  }}
+                />
+                <button
+                  type="submit"
+                  className="filter-clear-btn"
+                  style={{ padding: '7px 12px', fontSize: '0.76rem' }}
+                >
+                  Verify QR
+                </button>
+              </form>
+            </details>
 
-            <button className="filter-clear-btn" onClick={() => setIsTableModalOpen(false)} style={{ width: '100%' }}>
-              Close
-            </button>
+            {isTableVerified && (
+              <div style={{ marginTop: '10px', display: 'flex', justifyContent: 'flex-end' }}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    clearGuestSession();
+                    setIsTableVerified(false);
+                    setActiveSessionId('');
+                    setActiveTableId('');
+                    setSelectedTable('--');
+                    setTableNumberInput('');
+                    closeTopTableDrawer();
+                  }}
+                  style={{
+                    background: 'transparent',
+                    border: 'none',
+                    color: '#f87171',
+                    fontSize: '0.75rem',
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                  }}
+                >
+                  Clear Current Table Session
+                </button>
+              </div>
+            )}
           </div>
         </div>
       )}
 
-      {/* Customer Auth / Sign-in Modal */}
+      {/* Bottom Slide-Up Auth Sheet (Sign In / Sign Up with WhatsApp OTP + Google) */}
       {isAuthModalOpen && (
-        <div className="filter-sheet-overlay" onClick={() => setIsAuthModalOpen(false)}>
-          <div className="modal-center-card" onClick={(e) => e.stopPropagation()}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
+        <div
+          className={`bottom-auth-overlay ${isAuthClosing ? 'closing' : ''}`}
+          onClick={closeBottomAuthSheet}
+        >
+          <div
+            className={`bottom-auth-sheet ${isAuthClosing ? 'closing' : ''}`}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
               <div>
-                <h3 style={{ fontSize: '1.1rem', fontWeight: 800, color: '#fff', margin: 0 }}>
-                  {authStep === 'PHONE' ? 'Sign In to Dining Account' : 'Verify Virtual OTP'}
+                <h3 style={{ fontSize: '1.12rem', fontWeight: 800, color: '#fff', margin: 0 }}>
+                  {authStep === 'OTP'
+                    ? 'Verify WhatsApp OTP'
+                    : authMode === 'SIGNUP'
+                    ? 'Create Dining Account'
+                    : 'Sign In to Dining Account'}
                 </h3>
-                <span style={{ fontSize: '0.70rem', color: '#fbbf24', fontWeight: 600 }}>
-                  ⚡ Fast Dev Mode Active
+                <span style={{ fontSize: '0.72rem', color: '#34d399', fontWeight: 600 }}>
+                  💬 Mobile number verified via WhatsApp OTP · Session saved on device
                 </span>
               </div>
-              <button onClick={() => setIsAuthModalOpen(false)} style={{ color: '#94a3b8', fontSize: '1.1rem' }}>
+              <button
+                type="button"
+                onClick={closeBottomAuthSheet}
+                style={{ color: '#94a3b8', fontSize: '1.15rem', padding: '4px 8px', cursor: 'pointer' }}
+                aria-label="Close authentication drawer"
+              >
                 ✕
               </button>
             </div>
 
-            {authStep === 'PHONE' ? (
-              <form onSubmit={handleRequestOtp} style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                <p style={{ fontSize: '0.8rem', color: '#94a3b8', margin: 0 }}>
-                  Enter your mobile number to unlock loyalty perks, saved diners, and plate preferences:
-                </p>
-
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <span
+            {authStep === 'PHONE' && (
+              <>
+                <div
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: '1fr 1fr',
+                    gap: '6px',
+                    background: 'rgba(255,255,255,0.04)',
+                    padding: '4px',
+                    borderRadius: '10px',
+                    marginBottom: '14px',
+                  }}
+                >
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAuthMode('SIGNIN');
+                      setAuthError('');
+                      setAuthEmailLocked(false);
+                      setGooglePreRegToken(null);
+                    }}
                     style={{
-                      padding: '10px 12px',
-                      background: 'rgba(255,255,255,0.06)',
+                      padding: '8px',
                       borderRadius: '8px',
-                      color: '#94a3b8',
-                      fontSize: '0.88rem',
+                      border: 'none',
+                      background: authMode === 'SIGNIN' ? 'rgba(245, 158, 11, 0.22)' : 'transparent',
+                      color: authMode === 'SIGNIN' ? '#fbbf24' : '#94a3b8',
+                      fontWeight: 700,
+                      fontSize: '0.82rem',
+                      cursor: 'pointer',
                     }}
                   >
-                    +91
-                  </span>
-                  <input
-                    type="tel"
-                    placeholder="9876543210"
-                    value={customerPhoneInput}
-                    onChange={(e) => setCustomerPhoneInput(e.target.value)}
-                    style={{
-                      flex: 1,
-                      padding: '10px 14px',
-                      background: 'rgba(255,255,255,0.06)',
-                      border: '1px solid rgba(255,255,255,0.12)',
-                      borderRadius: '8px',
-                      color: '#fff',
-                      fontSize: '0.92rem',
+                    Sign In
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAuthMode('SIGNUP');
+                      setAuthError('');
                     }}
-                  />
+                    style={{
+                      padding: '8px',
+                      borderRadius: '8px',
+                      border: 'none',
+                      background: authMode === 'SIGNUP' ? 'rgba(245, 158, 11, 0.22)' : 'transparent',
+                      color: authMode === 'SIGNUP' ? '#fbbf24' : '#94a3b8',
+                      fontWeight: 700,
+                      fontSize: '0.82rem',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    Sign Up (New)
+                  </button>
                 </div>
 
-                {authError && <div style={{ color: '#ef4444', fontSize: '0.78rem' }}>{authError}</div>}
+                <form onSubmit={handleRequestOtp} style={{ display: 'flex', flexDirection: 'column', gap: '11px' }}>
+                  <div>
+                    <label style={{ display: 'block', fontSize: '0.76rem', color: '#cbd5e1', fontWeight: 700, marginBottom: '5px' }}>
+                      Mobile Number (Primary ID)
+                    </label>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <span
+                        style={{
+                          padding: '10px 12px',
+                          background: 'rgba(255,255,255,0.06)',
+                          borderRadius: '8px',
+                          color: '#94a3b8',
+                          fontSize: '0.88rem',
+                        }}
+                      >
+                        +91
+                      </span>
+                      <input
+                        type="tel"
+                        inputMode="numeric"
+                        placeholder="9876543210"
+                        value={customerPhoneInput}
+                        onChange={(e) => setCustomerPhoneInput(e.target.value.replace(/[^\d+]/g, ''))}
+                        style={{
+                          flex: 1,
+                          padding: '10px 14px',
+                          background: 'rgba(255,255,255,0.06)',
+                          border: '1px solid rgba(255,255,255,0.12)',
+                          borderRadius: '8px',
+                          color: '#fff',
+                          fontSize: '0.92rem',
+                        }}
+                      />
+                    </div>
+                  </div>
 
-                <button className="accordion-add-action-btn" type="submit" disabled={authLoading}>
-                  {authLoading ? 'Sending OTP...' : 'Send OTP Code 📲'}
+                  {authMode === 'SIGNUP' && (
+                    <>
+                      <div>
+                        <label style={{ display: 'block', fontSize: '0.76rem', color: '#cbd5e1', fontWeight: 700, marginBottom: '5px' }}>
+                          Email ID (1 email per mobile number){authEmailLocked ? ' · Verified via Google' : ''}
+                        </label>
+                        <input
+                          type="email"
+                          required
+                          readOnly={authEmailLocked}
+                          placeholder="you@example.com"
+                          value={authEmailInput}
+                          onChange={(e) => setAuthEmailInput(e.target.value)}
+                          style={{
+                            width: '100%',
+                            padding: '10px 14px',
+                            background: authEmailLocked ? 'rgba(16, 185, 129, 0.08)' : 'rgba(255,255,255,0.06)',
+                            border: authEmailLocked
+                              ? '1px solid rgba(16, 185, 129, 0.45)'
+                              : '1px solid rgba(255,255,255,0.12)',
+                            borderRadius: '8px',
+                            color: '#fff',
+                            fontSize: '0.9rem',
+                          }}
+                        />
+                      </div>
+
+                      <div>
+                        <label style={{ display: 'block', fontSize: '0.76rem', color: '#cbd5e1', fontWeight: 700, marginBottom: '5px' }}>
+                          Full Name (Optional)
+                        </label>
+                        <input
+                          type="text"
+                          placeholder="Your name"
+                          value={authDisplayNameInput}
+                          onChange={(e) => setAuthDisplayNameInput(e.target.value)}
+                          style={{
+                            width: '100%',
+                            padding: '10px 14px',
+                            background: 'rgba(255,255,255,0.06)',
+                            border: '1px solid rgba(255,255,255,0.12)',
+                            borderRadius: '8px',
+                            color: '#fff',
+                            fontSize: '0.9rem',
+                          }}
+                        />
+                      </div>
+                    </>
+                  )}
+
+                  {authError && <div style={{ color: '#f87171', fontSize: '0.79rem', fontWeight: 600 }}>{authError}</div>}
+
+                  <button className="accordion-add-action-btn" type="submit" disabled={authLoading} style={{ marginTop: '2px' }}>
+                    {authLoading
+                      ? 'Sending WhatsApp OTP...'
+                      : authMode === 'SIGNUP'
+                      ? 'Verify Mobile via WhatsApp OTP & Sign Up 📲'
+                      : 'Send WhatsApp OTP Code 📲'}
+                  </button>
+                </form>
+
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px', margin: '14px 0' }}>
+                  <div style={{ flex: 1, height: '1px', background: 'rgba(255,255,255,0.1)' }} />
+                  <span style={{ fontSize: '0.74rem', color: '#64748b', fontWeight: 700 }}>OR</span>
+                  <div style={{ flex: 1, height: '1px', background: 'rgba(255,255,255,0.1)' }} />
+                </div>
+
+                <button
+                  type="button"
+                  onClick={handleGoogleLoginClick}
+                  disabled={authLoading}
+                  style={{
+                    width: '100%',
+                    padding: '10px 14px',
+                    borderRadius: '10px',
+                    background: '#fff',
+                    color: '#111827',
+                    border: 'none',
+                    fontWeight: 700,
+                    fontSize: '0.88rem',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: '8px',
+                    cursor: 'pointer',
+                  }}
+                >
+                  <span>G</span>
+                  <span>Continue with Google</span>
                 </button>
-              </form>
-            ) : (
+
+                {showDevGooglePicker && (
+                  <div
+                    style={{
+                      marginTop: '10px',
+                      padding: '12px',
+                      borderRadius: '10px',
+                      background: 'rgba(255,255,255,0.04)',
+                      border: '1px dashed rgba(245, 158, 11, 0.4)',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: '8px',
+                    }}
+                  >
+                    <div style={{ fontSize: '0.74rem', color: '#fbbf24', fontWeight: 700 }}>
+                      Dev Google Sign-In Picker (NEXT_PUBLIC_GOOGLE_CLIENT_ID unset)
+                    </div>
+                    <input
+                      type="email"
+                      placeholder="Google email (e.g. diner@gmail.com)"
+                      value={devGoogleEmailInput}
+                      onChange={(e) => setDevGoogleEmailInput(e.target.value)}
+                      style={{
+                        padding: '8px 10px',
+                        borderRadius: '8px',
+                        background: 'rgba(0,0,0,0.35)',
+                        border: '1px solid rgba(255,255,255,0.15)',
+                        color: '#fff',
+                        fontSize: '0.82rem',
+                      }}
+                    />
+                    <input
+                      type="text"
+                      placeholder="Display name (optional)"
+                      value={devGoogleNameInput}
+                      onChange={(e) => setDevGoogleNameInput(e.target.value)}
+                      style={{
+                        padding: '8px 10px',
+                        borderRadius: '8px',
+                        background: 'rgba(0,0,0,0.35)',
+                        border: '1px solid rgba(255,255,255,0.15)',
+                        color: '#fff',
+                        fontSize: '0.82rem',
+                      }}
+                    />
+                    <button
+                      type="button"
+                      disabled={!devGoogleEmailInput.trim() || authLoading}
+                      onClick={() =>
+                        void submitGoogleAuthPayload({
+                          devMockEmail: devGoogleEmailInput.trim(),
+                          ...(devGoogleNameInput.trim() ? { devMockName: devGoogleNameInput.trim() } : {}),
+                        })
+                      }
+                      className="accordion-add-action-btn"
+                      style={{ width: '100%', padding: '8px 12px', fontSize: '0.8rem' }}
+                    >
+                      Continue with this Google Email
+                    </button>
+                  </div>
+                )}
+              </>
+            )}
+
+            {authStep === 'OTP' && (
               <form onSubmit={handleVerifyOtp} style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
                 {authDevCode && (
                   <div
@@ -7790,12 +8995,16 @@ export default function CustomerDineInPage() {
                   </div>
                 )}
 
-                <p style={{ fontSize: '0.8rem', color: '#94a3b8', margin: 0 }}>
-                  Enter 6-digit OTP code sent to +91 {customerPhoneInput}:
+                <p style={{ fontSize: '0.82rem', color: '#cbd5e1', margin: 0 }}>
+                  Enter the 6-digit code sent via{' '}
+                  <strong style={{ color: '#34d399' }}>{authChannelLabel || 'WhatsApp'}</strong> to{' '}
+                  <strong>{formatNormalizedPhone(customerPhoneInput)}</strong>
+                  {authMode === 'SIGNUP' && authEmailInput ? ` (linking ${authEmailInput.trim()})` : ''}:
                 </p>
 
                 <input
                   type="text"
+                  inputMode="numeric"
                   maxLength={6}
                   placeholder="6-digit OTP"
                   value={customerOtpInput}
@@ -7812,10 +9021,10 @@ export default function CustomerDineInPage() {
                   }}
                 />
 
-                {authError && <div style={{ color: '#ef4444', fontSize: '0.78rem' }}>{authError}</div>}
+                {authError && <div style={{ color: '#f87171', fontSize: '0.79rem', fontWeight: 600 }}>{authError}</div>}
 
                 <button className="accordion-add-action-btn" type="submit" disabled={authLoading}>
-                  {authLoading ? 'Verifying...' : 'Verify & Sign In ✓'}
+                  {authLoading ? 'Verifying...' : authMode === 'SIGNUP' ? 'Verify & Complete Sign Up ✓' : 'Verify & Sign In ✓'}
                 </button>
 
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '2px' }}>
@@ -7835,7 +9044,7 @@ export default function CustomerDineInPage() {
                       padding: 0,
                     }}
                   >
-                    ← Change number
+                    ← Back / Change number
                   </button>
                 </div>
               </form>
@@ -7896,6 +9105,11 @@ export default function CustomerDineInPage() {
                       {customerProfile?.phone && (
                         <div style={{ fontSize: '0.72rem', color: '#94a3b8', marginTop: '2px' }}>
                           📱 {customerProfile.phone}
+                        </div>
+                      )}
+                      {customerProfile?.email && (
+                        <div style={{ fontSize: '0.72rem', color: '#94a3b8', marginTop: '2px' }}>
+                          ✉️ {customerProfile.email}
                         </div>
                       )}
                     </div>
@@ -8009,9 +9223,7 @@ export default function CustomerDineInPage() {
                     type="button"
                     onClick={() => {
                       setIsProfileOpen(false);
-                      setAuthStep('PHONE');
-                      setAuthError('');
-                      setIsAuthModalOpen(true);
+                      openBottomAuthSheet('SIGNIN');
                     }}
                     style={{
                       width: '100%',
@@ -8244,9 +9456,7 @@ export default function CustomerDineInPage() {
                     type="button"
                     onClick={() => {
                       setIsProfileOpen(false);
-                      setAuthStep('PHONE');
-                      setAuthError('');
-                      setIsAuthModalOpen(true);
+                      openBottomAuthSheet('SIGNIN');
                     }}
                     style={{
                       background: 'rgba(245, 158, 11, 0.15)',
@@ -8275,7 +9485,8 @@ export default function CustomerDineInPage() {
                     setCustomerProfile(null);
                     setEditDisplayName('');
                     setDinerProfiles([]);
-                    clearCustomerAuth();
+                    setSessionOrders([]);
+                    void logoutCustomerRemote(activeOrgId || undefined);
                     localStorage.removeItem('dineflow_diner_profiles');
                     if (currentCustId) {
                       localStorage.removeItem(`dineflow_diner_profiles_${currentCustId}`);
@@ -8318,9 +9529,35 @@ export default function CustomerDineInPage() {
                   <span style={{ fontSize: '0.72rem', color: '#10b981' }}>● Online · Table {selectedTable}</span>
                 </div>
               </div>
-              <button onClick={() => setIsAiOpen(false)} style={{ color: '#94a3b8', fontSize: '1.1rem' }}>
-                ✕
-              </button>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAiSessionId(null);
+                    setAiMessages([
+                      {
+                        role: 'assistant',
+                        text: "Namaste! I'm Chef AI at Royal Spice Bistro. 👨‍🍳 Looking for dish recommendations, spice customisations, or pairing ideas for your table?",
+                      },
+                    ]);
+                  }}
+                  style={{
+                    background: 'rgba(255,255,255,0.08)',
+                    border: '1px solid rgba(255,255,255,0.14)',
+                    color: '#cbd5e1',
+                    fontSize: '0.72rem',
+                    fontWeight: 700,
+                    padding: '4px 9px',
+                    borderRadius: '999px',
+                    cursor: 'pointer',
+                  }}
+                >
+                  New Chat
+                </button>
+                <button onClick={() => setIsAiOpen(false)} style={{ color: '#94a3b8', fontSize: '1.1rem' }}>
+                  ✕
+                </button>
+              </div>
             </div>
 
             {/* Quick Suggestion Chips */}
@@ -8565,9 +9802,7 @@ export default function CustomerDineInPage() {
                   type="button"
                   onClick={() => {
                     setPlateNamingTarget(null);
-                    setAuthStep('PHONE');
-                    setAuthError('');
-                    setIsAuthModalOpen(true);
+                    openBottomAuthSheet('SIGNIN');
                   }}
                   style={{
                     flexShrink: 0,

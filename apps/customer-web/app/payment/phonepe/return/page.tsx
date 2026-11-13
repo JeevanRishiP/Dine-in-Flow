@@ -14,24 +14,56 @@ function PhonePeReturnContent() {
   const [status, setStatus] = useState<'SUCCESS' | 'PENDING' | 'FAILED'>('PENDING');
   const [errorMessage, setErrorMessage] = useState('');
 
+  const queryOrderPaymentStatus = async (): Promise<{
+    paid: boolean;
+    failed?: boolean;
+    error?: string;
+  }> => {
+    const url = merchantTransactionId
+      ? `/api/v1/public/payments/reconcile-return?orderId=${encodeURIComponent(orderId)}&merchantTransactionId=${encodeURIComponent(merchantTransactionId)}`
+      : `/api/v1/customer/payments/verify-order?orderId=${encodeURIComponent(orderId)}`;
+
+    const res = merchantTransactionId
+      ? await fetch(url)
+      : await customerApiFetch(url);
+
+    if (res.ok) {
+      const data = (await res.json()) as { status?: string; settled?: boolean };
+      if (data.status === 'PAID' || data.settled) {
+        return { paid: true };
+      }
+      if (data.status === 'FAILED') {
+        return { paid: false, failed: true, error: 'Payment was declined or expired on PhonePe.' };
+      }
+      return { paid: false };
+    }
+
+    if (res.status === 401 || res.status === 403) {
+      return {
+        paid: false,
+        error:
+          'This browser tab does not hold your table session. Please return to your original DineFlow tab or scan your table QR code.',
+      };
+    }
+    return { paid: false };
+  };
+
   const handleManualRecheck = async () => {
     if (!orderId) return;
     setLoading(true);
+    setErrorMessage('');
     try {
-      const res = await customerApiFetch(
-        `/api/v1/customer/payments/verify-order?orderId=${encodeURIComponent(orderId)}`,
-      );
-      if (res.ok) {
-        const data = await res.json();
-        if (data.status === 'PAID') {
-          setStatus('SUCCESS');
-          setLoading(false);
-          setTimeout(() => {
-            router.push(`/?payment_success=true&order_id=${encodeURIComponent(orderId)}`);
-          }, 2000);
-          return;
-        }
+      const outcome = await queryOrderPaymentStatus();
+      if (outcome.paid) {
+        setStatus('SUCCESS');
+        setLoading(false);
+        setTimeout(() => {
+          router.push(`/?payment_success=true&order_id=${encodeURIComponent(orderId)}`);
+        }, 1600);
+        return;
       }
+      if (outcome.failed) setStatus('FAILED');
+      if (outcome.error) setErrorMessage(outcome.error);
     } catch {}
     setLoading(false);
   };
@@ -55,22 +87,25 @@ function PhonePeReturnContent() {
         if (!isSubscribed) return;
         attempts++;
         try {
-          const res = await customerApiFetch(
-            `/api/v1/customer/payments/verify-order?orderId=${encodeURIComponent(orderId)}`,
-          );
-          if (res.ok) {
-            const data = await res.json();
-            if (data.status === 'PAID') {
-              setStatus('SUCCESS');
-              setLoading(false);
-              // Auto redirect to customer-web with payment_success flag after 2s
-              timer = setTimeout(() => {
-                if (isSubscribed) {
-                  router.push(`/?payment_success=true&order_id=${encodeURIComponent(orderId)}`);
-                }
-              }, 2000);
-              return;
-            }
+          const outcome = await queryOrderPaymentStatus();
+          if (!isSubscribed) return;
+          if (outcome.paid) {
+            setStatus('SUCCESS');
+            setLoading(false);
+            timer = setTimeout(() => {
+              if (isSubscribed) {
+                router.push(`/?payment_success=true&order_id=${encodeURIComponent(orderId)}`);
+              }
+            }, 1600);
+            return;
+          }
+          if (outcome.error) {
+            setErrorMessage(outcome.error);
+          }
+          if (outcome.failed) {
+            setStatus('FAILED');
+            setLoading(false);
+            return;
           }
         } catch (err) {
           console.error('Error verifying payment:', err);
@@ -91,7 +126,7 @@ function PhonePeReturnContent() {
       isSubscribed = false;
       clearTimeout(timer);
     };
-  }, [orderId, router]);
+  }, [orderId, merchantTransactionId, router]);
 
   return (
     <div

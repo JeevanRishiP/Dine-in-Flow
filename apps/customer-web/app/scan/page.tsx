@@ -2,40 +2,69 @@
 
 import React, { Suspense, useEffect, useState } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
-import { buildSignedQrTokenFromSearch, openSignedTableSession } from '../lib/guest-session';
+import {
+  extractUrlTableAndOutlet,
+  openManualTableSession,
+  openSignedTableSession,
+  resolveTenantIds,
+} from '../lib/guest-session';
 
 function ScanHandlerContent() {
   const searchParams = useSearchParams();
   const router = useRouter();
-  const [status, setStatus] = useState('Verifying Table QR Signature...');
+  const [status, setStatus] = useState('Detecting Table Session...');
   const [error, setError] = useState<string | null>(null);
   const [tableLabel, setTableLabel] = useState('Table');
 
   useEffect(() => {
     let active = true;
     async function verifyScan() {
-      const qrToken = buildSignedQrTokenFromSearch(new URLSearchParams(searchParams.toString()));
-      if (!qrToken) {
+      const params = new URLSearchParams(searchParams.toString());
+      const { signedQrToken, tableNumberParam, outletIdParam, slugParam } = extractUrlTableAndOutlet(params);
+
+      if (signedQrToken) {
+        setStatus('Verifying Table QR Signature...');
+        const res = await openSignedTableSession(signedQrToken, 2);
         if (!active) return;
-        setError('Invalid or unsigned table QR code. Please scan the physical QR code placed on your table.');
-        setStatus('QR verification failed');
+        if (!res.ok) {
+          setError(res.error);
+          setStatus('QR verification failed');
+          return;
+        }
+        const label = res.session.tableNumber ? `Table ${res.session.tableNumber}` : 'Verified Table';
+        setTableLabel(label);
+        setStatus(`Verified ${label}! Launching Dine-in Experience...`);
+        setTimeout(() => {
+          if (active) router.push('/');
+        }, 500);
         return;
       }
 
-      const res = await openSignedTableSession(qrToken, 2);
-      if (!active) return;
-      if (!res.ok) {
-        setError(res.error);
-        setStatus('QR verification failed');
+      if (tableNumberParam) {
+        const targetOutlet = outletIdParam || resolveTenantIds().outletId || undefined;
+        setStatus(`Connecting to Table ${tableNumberParam}...`);
+        const res = await openManualTableSession(targetOutlet, tableNumberParam, 2, slugParam || undefined);
+        if (!active) return;
+        if (!res.ok) {
+          setError(res.error);
+          setStatus('Table number mismatch');
+          return;
+        }
+        const label = res.session.tableNumber ? `Table ${res.session.tableNumber}` : `Table ${tableNumberParam}`;
+        setTableLabel(label);
+        setStatus(`Connected to ${label}! Launching Dine-in Experience...`);
+        setTimeout(() => {
+          if (active) router.push('/');
+        }, 500);
         return;
       }
 
-      const label = res.session.tableNumber ? `Table ${res.session.tableNumber}` : 'Verified Table';
-      setTableLabel(label);
-      setStatus(`Verified ${label}! Launching Dine-in Experience...`);
-      setTimeout(() => {
-        if (active) router.push('/');
-      }, 600);
+      // No table parameter in link -> redirect to home where the top-quarter table prompt drops down.
+      const qs = new URLSearchParams();
+      if (outletIdParam) qs.set('outlet', outletIdParam);
+      if (slugParam) qs.set('slug', slugParam);
+      const q = qs.toString();
+      router.replace(q ? `/?${q}` : '/');
     }
 
     verifyScan();
