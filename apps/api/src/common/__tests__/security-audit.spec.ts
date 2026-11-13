@@ -10,13 +10,15 @@ import { Permission } from '@dineflow/contracts';
 import { HealthController } from '../health/health.controller.js';
 import { CustomerAuthController } from '../../modules/auth/customer-auth.controller.js';
 import { StaffAuthController } from '../../modules/auth/staff-auth.controller.js';
+import { ConsoleStaffController } from '../../modules/auth/staff-management.controller.js';
 import { PublicMenuController } from '../../modules/menu/public-menu.controller.js';
 import { ConsoleMenuController } from '../../modules/menu/console-menu.controller.js';
-import { ConsoleTablesController, PublicSessionsController } from '../../modules/tables/tables.controller.js';
+import { ConsoleTablesController, PublicSessionsController, PublicTablesController } from '../../modules/tables/tables.controller.js';
 import { ConsoleOrdersController, CustomerOrdersController } from '../../modules/orders/orders.controller.js';
 import {
   ConsolePaymentsController,
   CustomerPaymentsController,
+  PublicPaymentsReturnController,
   PublicWebhookController,
 } from '../../modules/payments/payments.controller.js';
 import { SseController } from '../../modules/realtime/sse.controller.js';
@@ -37,14 +39,17 @@ describe('Full Security & Authz Matrix Audit (Phase 11 — ARCH §22, §26, AGEN
     HealthController,
     CustomerAuthController,
     StaffAuthController,
+    ConsoleStaffController,
     PublicMenuController,
     ConsoleMenuController,
     ConsoleTablesController,
     PublicSessionsController,
+    PublicTablesController,
     ConsoleOrdersController,
     CustomerOrdersController,
     ConsolePaymentsController,
     CustomerPaymentsController,
+    PublicPaymentsReturnController,
     PublicWebhookController,
     SseController,
     AnalyticsController,

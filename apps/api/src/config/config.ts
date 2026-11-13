@@ -97,6 +97,16 @@ const envSchema = z
     // ── AI Assistant (Gemini) ────────────────────────────────────────────────
     GEMINI_API_KEY: z.string().optional(),
     GEMINI_MODEL:   z.string().default('gemini-3.5-flash-lite'),
+
+    // ── Google OAuth & WhatsApp OTP Delivery ─────────────────────────────────
+    GOOGLE_CLIENT_ID:        z.string().optional(),
+    DEFAULT_PUBLIC_OUTLET_ID: z.string().uuid().optional(),
+    WHATSAPP_PROVIDER:       z.enum(['mock', 'meta', 'evolution_dev']).default('mock'),
+    EVOLUTION_API_URL:       z.string().url().optional(),
+    EVOLUTION_API_KEY:       z.string().optional(),
+    EVOLUTION_INSTANCE_NAME: z.string().min(1).default('dineflow_otp'),
+    WHATSAPP_PHONE_NUMBER_ID: z.string().optional(),
+    WHATSAPP_ACCESS_TOKEN:   z.string().optional(),
   })
   .passthrough()
   .superRefine((cfg, ctx) => {
@@ -105,6 +115,10 @@ const envSchema = z
     const addIssue = (path: string, message: string) => {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: [path], message });
     };
+
+    if (cfg.WHATSAPP_PROVIDER === 'evolution_dev') {
+      addIssue('WHATSAPP_PROVIDER', 'WHATSAPP_PROVIDER=evolution_dev is strictly forbidden in production (ADR 0002)');
+    }
 
     if (/^postgres(ql)?:\/\/postgres:/i.test(cfg.DATABASE_URL)) {
       addIssue('DATABASE_URL', 'Production DATABASE_URL must not use superuser postgres credentials');

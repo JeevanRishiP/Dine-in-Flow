@@ -5,12 +5,15 @@ import type { CustomerJwtPayload, GuestSessionJwtPayload } from '../../modules/a
 export interface CustomerAccessScope {
   sessionId?: string;
   customerId?: string;
+  tempCustomerId?: string;
 }
 
 export interface OrderOwnershipFields {
   session_id?: string | null;
   customer_id?: string | null;
   session_customer_id?: string | null;
+  temp_customer_id?: string | null;
+  session_temp_customer_id?: string | null;
 }
 
 /**
@@ -20,7 +23,11 @@ export function toCustomerAccessScope(
   user: GuestSessionJwtPayload | CustomerJwtPayload,
 ): CustomerAccessScope {
   if (user.type === 'guest_session') {
-    return { sessionId: user.sessionId, customerId: user.customerId };
+    return {
+      sessionId: user.sessionId,
+      customerId: user.customerId,
+      tempCustomerId: user.tempCustomerId,
+    };
   }
   return { customerId: user.sub };
 }
@@ -35,13 +42,6 @@ export function assertCustomerAccessScope(
 ): void {
   if (!scope) return;
 
-  if (scope.sessionId) {
-    if (record.session_id !== scope.sessionId) {
-      throw domainError(ErrorCode.FORBIDDEN, 'Access denied for this table session.', 403);
-    }
-    return;
-  }
-
   if (scope.customerId) {
     if (
       record.customer_id === scope.customerId ||
@@ -49,6 +49,25 @@ export function assertCustomerAccessScope(
     ) {
       return;
     }
+    if (!scope.sessionId && !scope.tempCustomerId) {
+      throw domainError(ErrorCode.FORBIDDEN, 'You do not have permission to access this resource.', 403);
+    }
+  }
+
+  if (scope.tempCustomerId) {
+    if (
+      record.temp_customer_id === scope.tempCustomerId ||
+      record.session_temp_customer_id === scope.tempCustomerId
+    ) {
+      return;
+    }
+  }
+
+  if (scope.sessionId) {
+    if (record.session_id === scope.sessionId) {
+      return;
+    }
+    throw domainError(ErrorCode.FORBIDDEN, 'Access denied for this table session.', 403);
   }
 
   throw domainError(ErrorCode.FORBIDDEN, 'You do not have permission to access this resource.', 403);
