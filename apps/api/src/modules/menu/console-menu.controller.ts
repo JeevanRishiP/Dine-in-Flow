@@ -1,5 +1,5 @@
 import {
-  Controller, Get, Post, Patch, Body, Param, Query,
+  Controller, Get, Post, Patch, Delete, Body, Param, Query,
   ParseUUIDPipe, HttpCode, HttpStatus,
 } from '@nestjs/common';
 import { MenuService } from './menu.service.js';
@@ -12,6 +12,7 @@ import {
   UpdateCategoryDto,
   CreateMenuItemDto,
   UpdateMenuItemDto,
+  UploadMenuPhotoDto,
   StockUpdateDto,
   CreateModifierGroupDto,
   CreateModifierDto,
@@ -149,5 +150,27 @@ export class ConsoleMenuController {
     @Body() body: { content_type: string; media_type: 'IMAGE' | 'VIDEO' },
   ) {
     return this.menuService.getPresignedUploadUrl(user.org, id, body.content_type, body.media_type, user.sub);
+  }
+
+  /**
+   * Direct food photo upload (Owner & Manager) — validates magic bytes & encodes to WebP.
+   */
+  @Post('items/:id/photo')
+  @Require(Permission.MENU_WRITE)
+  uploadItemPhoto(
+    @CurrentUser() user: StaffJwtPayload,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UploadMenuPhotoDto,
+  ) {
+    return this.menuService.uploadItemPhoto(user.org, id, dto.data_url, user.sub);
+  }
+
+  @Delete('items/:id/photo')
+  @Require(Permission.MENU_WRITE)
+  clearItemPhoto(
+    @CurrentUser() user: StaffJwtPayload,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.menuService.clearItemPhoto(user.org, id, user.sub);
   }
 }

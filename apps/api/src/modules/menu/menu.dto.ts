@@ -23,6 +23,19 @@ export class UpdateCategoryDto extends createZodDto(UpdateCategorySchema) {}
 
 // ─── Item DTOs ────────────────────────────────────────────────────────────────
 
+const SafeImageUrl = z
+  .string()
+  .trim()
+  .max(2048)
+  .refine(
+    (val) =>
+      val.startsWith('/api/v1/public/menu/photos/') ||
+      val.startsWith('https://') ||
+      val.startsWith('http://localhost:') ||
+      val.startsWith('http://127.0.0.1:'),
+    { message: 'Photo URL must be an https:// URL or an uploaded menu photo path.' },
+  );
+
 export const CreateMenuItemSchema = z.object({
   name: z.string().min(1).max(200),
   name_i18n: I18nField.optional(),
@@ -33,17 +46,23 @@ export const CreateMenuItemSchema = z.object({
   veg_type: VegType.default('VEG'),
   allergens: z.array(z.string()).default([]),
   is_available: z.boolean().default(true),
+  is_active: z.boolean().optional(),
   sort_order: z.number().int().min(0).default(0),
-  prep_time_min: z.number().int().min(0).optional(),
-  calories: z.number().int().min(0).optional(),
+  prep_time_min: z.number().int().min(0).nullable().optional(),
+  calories: z.number().int().min(0).nullable().optional(),
   spice_level: z.number().int().min(0).max(5).default(0),
   rating: z.number().min(1).max(5).default(4.8),
   orders_count: z.number().int().min(0).default(0),
   allow_half_portion: z.boolean().default(false),
-  half_price_paise: z.number().int().positive().optional(),
+  half_price_paise: z.number().int().positive().nullable().optional(),
+  image_url: SafeImageUrl.nullable().optional(),
 }).strict();
 
 export const UpdateMenuItemSchema = CreateMenuItemSchema.partial().strict();
+
+export const UploadMenuPhotoSchema = z.object({
+  data_url: z.string().trim().min(20).max(1_400_000),
+}).strict();
 
 export const StockUpdateSchema = z.object({
   is_available: z.boolean(),
@@ -51,6 +70,7 @@ export const StockUpdateSchema = z.object({
 
 export class CreateMenuItemDto extends createZodDto(CreateMenuItemSchema) {}
 export class UpdateMenuItemDto extends createZodDto(UpdateMenuItemSchema) {}
+export class UploadMenuPhotoDto extends createZodDto(UploadMenuPhotoSchema) {}
 export class StockUpdateDto extends createZodDto(StockUpdateSchema) {}
 
 // ─── Modifier Group DTOs ──────────────────────────────────────────────────────

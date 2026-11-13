@@ -4,6 +4,9 @@ import { Public } from '../../common/decorators/auth.decorators.js';
 import { MenuService } from './menu.service.js';
 import { MenuQueryDto } from './menu.dto.js';
 
+import { domainError } from '../../common/errors/domain-error.js';
+import { ErrorCode } from '@dineflow/contracts';
+
 /**
  * Public menu endpoint — no authentication required.
  * Implements ETag / If-None-Match 304 + Cache-Control per ARCH §13.
@@ -11,6 +14,21 @@ import { MenuQueryDto } from './menu.dto.js';
 @Controller('public/menu')
 export class PublicMenuController {
   constructor(private readonly menuService: MenuService) {}
+
+  @Get('photos/:itemId')
+  @Public()
+  async getItemPhoto(
+    @Param('itemId', ParseUUIDPipe) itemId: string,
+    @Res() reply: FastifyReply,
+  ) {
+    const photo = await this.menuService.getPublicPhoto(itemId);
+    if (!photo) {
+      throw domainError(ErrorCode.NOT_FOUND, 'Menu photo not found.', 404);
+    }
+    reply.header('Content-Type', photo.mimeType);
+    reply.header('Cache-Control', 'public, max-age=3600, stale-while-revalidate=86400');
+    return reply.send(photo.buffer);
+  }
 
   @Get(':orgId')
   @Public()

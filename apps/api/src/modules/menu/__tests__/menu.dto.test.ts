@@ -3,6 +3,8 @@ import {
   parseCreateCategoryDto,
   parseCreateMenuItemDto,
   parseCreateModifierGroupDto,
+  UpdateMenuItemSchema,
+  UploadMenuPhotoSchema,
 } from '../menu.dto.js';
 
 /**
@@ -78,6 +80,27 @@ describe('Menu DTOs', () => {
       });
       expect(dto.spice_level).toBe(3);
       expect(dto.allergens).toEqual(['GLUTEN', 'DAIRY']);
+    });
+
+    it('accepts safe image_url paths and rejects javascript: URLs', () => {
+      const withHttps = parseCreateMenuItemDto({
+        ...base,
+        image_url: 'https://images.unsplash.com/photo-123456',
+      });
+      expect(withHttps.image_url).toBe('https://images.unsplash.com/photo-123456');
+
+      const withLocalPhoto = UpdateMenuItemSchema.parse({
+        image_url: '/api/v1/public/menu/photos/11111111-1111-4111-8111-111111111111',
+      });
+      expect(withLocalPhoto.image_url).toContain('/api/v1/public/menu/photos/');
+
+      expect(() =>
+        parseCreateMenuItemDto({ ...base, image_url: 'javascript:alert(1)' }),
+      ).toThrow();
+
+      expect(
+        UploadMenuPhotoSchema.parse({ data_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==' }).data_url,
+      ).toContain('data:image/png');
     });
 
     it('rejects spice_level > 5', () => {

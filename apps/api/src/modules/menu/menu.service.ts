@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { withTenantContext } from '../../db/client.js';
+import { getPool, withTenantContext } from '../../db/client.js';
 import { getRedis } from '../../common/redis/redis.client.js';
 import { domainError } from '../../common/errors/domain-error.js';
 import { ErrorCode } from '@dineflow/contracts';
@@ -38,14 +38,20 @@ export class MenuService {
       // Raw SQL via the underlying client from drizzle
       // eslint-disable-next-line @typescript-eslint/no-explicit-any -- drizzle wraps pg client
       const client = (db as any).session?.client ?? (db as any);
-      const { rows } = await client.query(
-        `SELECT id, name, name_i18n, outlet_id, sort_order, is_active, created_at
-         FROM menu_categories
-         WHERE is_active = true
-           AND (outlet_id IS NULL OR outlet_id = $1)
-         ORDER BY sort_order, name`,
-        [outletId ?? null],
-      );
+      const sql = outletId
+        ? `SELECT id, name, name_i18n, outlet_id, sort_order, is_active, created_at
+           FROM menu_categories
+           WHERE org_id = $1
+             AND is_active = true
+             AND (outlet_id IS NULL OR outlet_id = $2)
+           ORDER BY sort_order, name`
+        : `SELECT id, name, name_i18n, outlet_id, sort_order, is_active, created_at
+           FROM menu_categories
+           WHERE org_id = $1
+             AND is_active = true
+           ORDER BY sort_order, name`;
+      const params = outletId ? [orgId, outletId] : [orgId];
+      const { rows } = await client.query(sql, params);
       return rows as Record<string, unknown>[];
     });
   }
@@ -116,7 +122,8 @@ export class MenuService {
         `SELECT mi.id, mi.category_id, mi.outlet_id, mi.name, mi.name_i18n,
                 mi.description_i18n, mi.price_paise, mi.veg_type, mi.allergens,
                 mi.is_available, mi.sort_order, mi.prep_time_min, mi.calories,
-                mi.spice_level, mi.rating, mi.orders_count, mi.allow_half_portion, mi.half_price_paise, mi.created_at,
+                mi.spice_level, mi.rating, mi.orders_count, mi.allow_half_portion, mi.half_price_paise,
+                mi.image_url, mi.created_at,
                 COALESCE(
                   json_agg(
                     json_build_object('key', im.raw_key, 'type', im.media_type, 'status', im.status)
@@ -144,22 +151,23 @@ export class MenuService {
       const { rows } = await client.query(
         `INSERT INTO menu_items
            (org_id, outlet_id, category_id, name, name_i18n, description_i18n,
-            price_paise, veg_type, allergens, is_available, sort_order,
-            prep_time_min, calories, spice_level, allow_half_portion, half_price_paise)
-         VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
-         RETURNING id`,
+            price_paise, veg_type, allergens, is_available, is_active, sort_order,
+            prep_time_min, calories, spice_level, allow_half_portion, half_price_paise, image_url)
+         VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+         RETURNING id, image_url`,
         [
           orgId, dto.outlet_id ?? null, dto.category_id,
           dto.name, JSON.stringify(dto.name_i18n ?? {}), JSON.stringify(dto.description_i18n ?? {}),
           dto.price_paise, dto.veg_type, dto.allergens ?? [],
-          dto.is_available ?? true, dto.sort_order ?? 0,
+          dto.is_available ?? true, dto.is_active ?? true, dto.sort_order ?? 0,
           dto.prep_time_min ?? null, dto.calories ?? null, dto.spice_level ?? 0,
           dto.allow_half_portion ?? false, dto.half_price_paise ?? null,
+          dto.image_url ?? null,
         ],
       );
       await this._bumpMenuVersion(client, orgId, dto.outlet_id);
       await this._auditLog(client, orgId, actorId, 'menu_items', (rows[0] as { id: string }).id, 'INSERT', null, dto);
-      return rows[0] as { id: string };
+      return rows[0] as { id: string; image_url?: string | null };
     });
   }
 
@@ -168,39 +176,143 @@ export class MenuService {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const client = (db as any).session?.client ?? (db as any);
       const existing = await this._findItem(client, id);
+      if (dto.category_id !== undefined) {
+        await this._findCategory(client, dto.category_id);
+      }
+      const hasImageUrlUpdate = dto.image_url !== undefined;
+      const hasHalfPriceUpdate = dto.half_price_paise !== undefined;
       const { rows } = await client.query(
         `UPDATE menu_items
-         SET name             = COALESCE($2, name),
-             name_i18n        = COALESCE($3::jsonb, name_i18n),
-             description_i18n = COALESCE($4::jsonb, description_i18n),
-             price_paise      = COALESCE($5, price_paise),
-             veg_type         = COALESCE($6, veg_type),
-             allergens        = COALESCE($7, allergens),
-             is_available     = COALESCE($8, is_available),
-             sort_order       = COALESCE($9, sort_order),
-             prep_time_min    = COALESCE($10, prep_time_min),
-             calories         = COALESCE($11, calories),
-             spice_level      = COALESCE($12, spice_level),
-             allow_half_portion = COALESCE($13, allow_half_portion),
-             half_price_paise = COALESCE($14, half_price_paise),
-             updated_at       = now()
+         SET category_id        = COALESCE($2, category_id),
+             name               = COALESCE($3, name),
+             name_i18n          = COALESCE($4::jsonb, name_i18n),
+             description_i18n   = COALESCE($5::jsonb, description_i18n),
+             price_paise        = COALESCE($6, price_paise),
+             veg_type           = COALESCE($7, veg_type),
+             allergens          = COALESCE($8, allergens),
+             is_available       = COALESCE($9, is_available),
+             is_active          = COALESCE($10, is_active),
+             sort_order         = COALESCE($11, sort_order),
+             prep_time_min      = COALESCE($12, prep_time_min),
+             calories           = COALESCE($13, calories),
+             spice_level        = COALESCE($14, spice_level),
+             allow_half_portion = COALESCE($15, allow_half_portion),
+             half_price_paise   = CASE WHEN $16::boolean THEN $17 ELSE half_price_paise END,
+             image_url          = CASE WHEN $18::boolean THEN $19 ELSE image_url END,
+             updated_at         = now()
          WHERE id = $1
-         RETURNING id`,
+         RETURNING id, image_url`,
         [
-          id, dto.name ?? null,
+          id,
+          dto.category_id ?? null,
+          dto.name ?? null,
           dto.name_i18n ? JSON.stringify(dto.name_i18n) : null,
           dto.description_i18n ? JSON.stringify(dto.description_i18n) : null,
-          dto.price_paise ?? null, dto.veg_type ?? null,
-          dto.allergens ?? null, dto.is_available ?? null,
-          dto.sort_order ?? null, dto.prep_time_min ?? null,
-          dto.calories ?? null, dto.spice_level ?? null,
-          dto.allow_half_portion ?? null, dto.half_price_paise ?? null,
+          dto.price_paise ?? null,
+          dto.veg_type ?? null,
+          dto.allergens ?? null,
+          dto.is_available ?? null,
+          dto.is_active ?? null,
+          dto.sort_order ?? null,
+          dto.prep_time_min ?? null,
+          dto.calories ?? null,
+          dto.spice_level ?? null,
+          dto.allow_half_portion ?? null,
+          hasHalfPriceUpdate,
+          dto.half_price_paise ?? null,
+          hasImageUrlUpdate,
+          dto.image_url ?? null,
         ],
       );
       await this._bumpMenuVersion(client, orgId, existing['outlet_id'] as string | undefined);
       await this._auditLog(client, orgId, actorId, 'menu_items', id, 'UPDATE', existing, dto);
-      return rows[0] as { id: string };
+      return rows[0] as { id: string; image_url?: string | null };
     });
+  }
+
+  async uploadItemPhoto(
+    orgId: string,
+    itemId: string,
+    dataUrl: string,
+    actorId: string,
+  ): Promise<{ itemId: string; imageUrl: string }> {
+    const { mimeType, buffer } = await this.mediaService.sanitizeAndEncodePhoto(dataUrl);
+    const version = Date.now();
+    const imageUrl = `/api/v1/public/menu/photos/${itemId}?v=${version}`;
+
+    return withTenantContext(orgId, async (db) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const client = (db as any).session?.client ?? (db as any);
+      const existing = await this._findItem(client, itemId);
+
+      await client.query(
+        `INSERT INTO menu_item_photos (org_id, item_id, mime_type, image_bytes)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (item_id) DO UPDATE
+           SET mime_type = EXCLUDED.mime_type,
+               image_bytes = EXCLUDED.image_bytes,
+               updated_at = now()`,
+        [orgId, itemId, mimeType, buffer],
+      );
+
+      await client.query(
+        `UPDATE menu_items SET image_url = $2, updated_at = now() WHERE id = $1`,
+        [itemId, imageUrl],
+      );
+
+      await this._bumpMenuVersion(client, orgId, existing['outlet_id'] as string | undefined);
+      await this._auditLog(client, orgId, actorId, 'menu_item_photos', itemId, 'PHOTO_UPSERT', null, {
+        mimeType,
+        sizeBytes: buffer.byteLength,
+        imageUrl,
+      });
+
+      return { itemId, imageUrl };
+    });
+  }
+
+  async clearItemPhoto(
+    orgId: string,
+    itemId: string,
+    actorId: string,
+  ): Promise<{ itemId: string; imageUrl: null }> {
+    return withTenantContext(orgId, async (db) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const client = (db as any).session?.client ?? (db as any);
+      const existing = await this._findItem(client, itemId);
+
+      await client.query(
+        `UPDATE menu_items SET image_url = NULL, updated_at = now() WHERE id = $1`,
+        [itemId],
+      );
+      await this._bumpMenuVersion(client, orgId, existing['outlet_id'] as string | undefined);
+      await this._auditLog(client, orgId, actorId, 'menu_item_photos', itemId, 'PHOTO_CLEAR', null, {
+        imageUrl: null,
+      });
+
+      return { itemId, imageUrl: null };
+    });
+  }
+
+  async getPublicPhoto(
+    itemId: string,
+  ): Promise<{ mimeType: string; buffer: Buffer; updatedAt: Date } | null> {
+    const pool = getPool();
+    const res = await pool.query<{
+      mime_type: string;
+      image_bytes: Buffer;
+      updated_at: Date;
+    }>(
+      `SELECT mime_type, image_bytes, updated_at FROM get_public_menu_item_photo($1)`,
+      [itemId],
+    );
+    const row = res.rows[0];
+    if (!row) return null;
+    return {
+      mimeType: row.mime_type,
+      buffer: Buffer.isBuffer(row.image_bytes) ? row.image_bytes : Buffer.from(row.image_bytes),
+      updatedAt: new Date(row.updated_at),
+    };
   }
 
   async updateStock(orgId: string, id: string, dto: StockUpdateDto, actorId: string) {
@@ -313,7 +425,7 @@ export class MenuService {
         `SELECT mi.id, mi.category_id, mi.name, mi.name_i18n, mi.description_i18n,
                 mi.price_paise, mi.veg_type, mi.allergens, mi.is_available,
                 mi.sort_order, mi.prep_time_min, mi.spice_level, mi.rating, mi.orders_count,
-                mi.allow_half_portion, mi.half_price_paise,
+                mi.allow_half_portion, mi.half_price_paise, mi.image_url,
                 COALESCE(
                   json_agg(
                     json_build_object('key', im.processed_key, 'thumb', im.thumbnail_key, 'type', im.media_type)

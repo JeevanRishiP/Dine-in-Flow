@@ -199,6 +199,36 @@ export class MediaService {
     });
   }
 
+  /**
+   * Validate an uploaded data URL or base64 image via magic bytes, resize within 1024x1024,
+   * strip EXIF metadata, and re-encode to WebP for direct PostgreSQL storage.
+   */
+  async sanitizeAndEncodePhoto(dataUrl: string): Promise<{ mimeType: 'image/webp'; buffer: Buffer }> {
+    const trimmed = dataUrl.trim();
+    const commaIdx = trimmed.indexOf(',');
+    const base64Body =
+      trimmed.startsWith('data:') && commaIdx !== -1 ? trimmed.slice(commaIdx + 1) : trimmed;
+
+    const rawBuffer = Buffer.from(base64Body, 'base64');
+    if (rawBuffer.byteLength === 0) {
+      throw domainError(ErrorCode.VALIDATION_ERROR, 'Uploaded image is empty or malformed.', 422);
+    }
+    if (rawBuffer.byteLength > MAX_UPLOAD_BYTES) {
+      throw domainError(ErrorCode.VALIDATION_ERROR, 'Upload exceeds 20 MB.', 422);
+    }
+
+    this._validateImageMagicBytes(rawBuffer);
+
+    const sharp = (await import('sharp')).default;
+    const webpBuffer = await sharp(rawBuffer)
+      .rotate()
+      .resize(1024, 1024, { fit: 'inside', withoutEnlargement: true })
+      .webp({ quality: 84 })
+      .toBuffer();
+
+    return { mimeType: 'image/webp', buffer: webpBuffer };
+  }
+
   /** Validate magic bytes to prevent polyglot file attacks. Reference: ARCH §22 */
   private _validateImageMagicBytes(buf: Buffer): void {
     const jpeg = buf[0] === 0xff && buf[1] === 0xd8;
