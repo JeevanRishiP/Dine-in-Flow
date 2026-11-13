@@ -1,12 +1,35 @@
 import {
   Controller, Get, Post, Patch, Delete,
-  Param, Body, Query, HttpCode, HttpStatus,
+  Param, Body, Query, Headers, Req, Res, HttpCode, HttpStatus,
 } from '@nestjs/common';
+import type { FastifyReply, FastifyRequest } from 'fastify';
 import { TablesService } from './tables.service.js';
-import { CreateTableDto, UpdateTableDto, OpenSessionDto } from './tables.dto.js';
+import { CreateTableDto, UpdateTableDto, OpenSessionDto, OpenManualSessionDto, PublicTablesQueryDto } from './tables.dto.js';
 import { Require, CurrentUser, Public, type StaffJwtPayload } from '../../common/decorators/auth.decorators.js';
 import { resolveScopedOutletId } from '../../common/utils/outlet-scope.utils.js';
+import { parseCookies } from '../../common/utils/cookie.utils.js';
 import { Permission } from '@dineflow/contracts';
+
+const TEMP_CUST_COOKIE_NAME = 'df_temp_cust';
+const TEMP_CUST_MAX_AGE_SEC = 12 * 60 * 60;
+
+function setTempCustomerCookie(reply: FastifyReply | undefined, token?: string): void {
+  if (!reply || typeof reply.header !== 'function' || !token) return;
+  const secureFlag = process.env['NODE_ENV'] === 'production' ? '; Secure' : '';
+  reply.header(
+    'Set-Cookie',
+    `${TEMP_CUST_COOKIE_NAME}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${TEMP_CUST_MAX_AGE_SEC}${secureFlag}`,
+  );
+}
+
+function clearTempCustomerCookie(reply: FastifyReply | undefined): void {
+  if (!reply || typeof reply.header !== 'function') return;
+  const secureFlag = process.env['NODE_ENV'] === 'production' ? '; Secure' : '';
+  reply.header(
+    'Set-Cookie',
+    `${TEMP_CUST_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secureFlag}`,
+  );
+}
 
 
 /**
@@ -28,6 +51,17 @@ export class ConsoleTablesController {
   ) {
     const scopedOutlet = resolveScopedOutletId(user.outletId, outletId);
     return this.tablesService.listTables(user.org, scopedOutlet);
+  }
+
+  /** Live floor overview including open sessions & uncleaned temp-customer table links. */
+  @Get('floor')
+  @Require(Permission.TABLE_READ)
+  getFloorOverview(
+    @CurrentUser() user: StaffJwtPayload,
+    @Query('outlet_id') outletId?: string,
+  ) {
+    const scopedOutlet = resolveScopedOutletId(user.outletId, outletId);
+    return this.tablesService.getFloorOverview(user.org, scopedOutlet);
   }
 
   @Get(':id')
@@ -85,21 +119,99 @@ export class ConsoleTablesController {
   ) {
     return this.tablesService.closeSession(user.org, sessionId, user.outletId);
   }
+
+  /** Captain/Waiter marks table cleaned & ready; dissolves temporary customer when all their tables are cleaned. */
+  @Post(':id/clean')
+  @Require(Permission.TABLE_CLEAN)
+  @HttpCode(HttpStatus.OK)
+  cleanTable(
+    @CurrentUser() user: StaffJwtPayload,
+    @Param('id') tableId: string,
+  ) {
+    return this.tablesService.cleanTableAndDissolve(user.org, tableId, user.sub, user.outletId);
+  }
 }
 
 /**
- * Public Sessions Controller — customer-facing QR scan → open session.
- * No auth required — the QR HMAC token IS the authentication.
+ * Public Sessions Controller — customer-facing QR scan / manual entry → open session.
  */
 @Controller('public/sessions')
 export class PublicSessionsController {
   constructor(private readonly tablesService: TablesService) {}
 
-  /** Customer scans QR code → opens a dine-in session. */
+  /** Restore active temporary customer + table session from HttpOnly cookie across refreshes. */
+  @Get('me')
+  @Public()
+  async getCurrentSession(
+    @Req() req: FastifyRequest,
+    @Res({ passthrough: true }) reply?: FastifyReply,
+  ) {
+    const cookies = parseCookies(req?.headers?.cookie);
+    const result = await this.tablesService.getCurrentGuestSession(cookies[TEMP_CUST_COOKIE_NAME]);
+    if (!result.active && cookies[TEMP_CUST_COOKIE_NAME]) {
+      clearTempCustomerCookie(reply);
+    }
+    return result;
+  }
+
+  /** Customer scans QR code → opens a private dine-in session linked to customer or temp customer. */
   @Post('open')
   @Public()
   @HttpCode(HttpStatus.CREATED)
-  openSession(@Body() dto: OpenSessionDto) {
-    return this.tablesService.openSession(dto);
+  async openSession(
+    @Body() dto: OpenSessionDto,
+    @Req() req?: FastifyRequest,
+    @Res({ passthrough: true }) reply?: FastifyReply,
+  ) {
+    const caller = this.tablesService.resolveCallerIdentityFromHeaders(
+      req?.headers?.cookie,
+      req?.headers?.authorization,
+    );
+    const res = await this.tablesService.openSession({ ...dto, ...caller });
+    const { tempCustomerToken, ...body } = res;
+    setTempCustomerCookie(reply, tempCustomerToken);
+    return body;
+  }
+
+  /** Customer enters numeric table number manually when opening without a table link. */
+  @Post('open-manual')
+  @Public()
+  @HttpCode(HttpStatus.CREATED)
+  async openManualSession(
+    @Body() dto: OpenManualSessionDto,
+    @Headers('x-forwarded-host') forwardedHost?: string,
+    @Headers('host') host?: string,
+    @Req() req?: FastifyRequest,
+    @Res({ passthrough: true }) reply?: FastifyReply,
+  ) {
+    const caller = this.tablesService.resolveCallerIdentityFromHeaders(
+      req?.headers?.cookie,
+      req?.headers?.authorization,
+    );
+    const res = await this.tablesService.openManualSession({ ...dto, ...caller }, forwardedHost || host);
+    const { tempCustomerToken, ...body } = res;
+    setTempCustomerCookie(reply, tempCustomerToken);
+    return body;
+  }
+}
+
+/**
+ * Public Tables Controller — exposes active table numbers for live hotel matching.
+ */
+@Controller('public/tables')
+export class PublicTablesController {
+  constructor(private readonly tablesService: TablesService) {}
+
+  @Get('directory')
+  @Public()
+  listDirectory(
+    @Query() query: PublicTablesQueryDto,
+    @Headers('x-forwarded-host') forwardedHost?: string,
+    @Headers('host') host?: string,
+  ) {
+    return this.tablesService.listPublicOutletTables(query.outlet_id, {
+      slug: query.slug,
+      host: forwardedHost || host,
+    });
   }
 }

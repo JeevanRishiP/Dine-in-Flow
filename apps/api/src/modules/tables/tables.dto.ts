@@ -38,6 +38,24 @@ export const OpenSessionSchema = z.object({
 
 export class OpenSessionDto extends createZodDto(OpenSessionSchema) {}
 
+export const PublicTablesQuerySchema = z.object({
+  outlet_id: z.string().uuid().optional(),
+  slug: z.string().trim().min(1).max(100).optional(),
+}).strict();
+
+export class PublicTablesQueryDto extends createZodDto(PublicTablesQuerySchema) {}
+
+export const OpenManualSessionSchema = z.object({
+  outlet_id: z.string().uuid().optional(),
+  slug: z.string().trim().min(1).max(100).optional(),
+  table_number: z.string().trim().min(1).max(20).regex(/^(?:T)?0*[0-9]{1,4}$/i, {
+    message: 'Enter a numeric table number (digits only).',
+  }),
+  pax: z.number().int().min(1).max(20).default(1),
+}).strict();
+
+export class OpenManualSessionDto extends createZodDto(OpenManualSessionSchema) {}
+
 // ─── Parse helpers ────────────────────────────────────────────────────────────
 
 export const parseCreateTableDto = (input: unknown) =>
