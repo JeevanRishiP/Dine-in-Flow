@@ -6,16 +6,16 @@ import { StaffAuthService } from './staff-auth.service.js';
 import { CurrentUser } from '../../common/decorators/current-user.decorator.js';
 import { Require } from '../../common/decorators/auth.decorators.js';
 import type { StaffJwtPayload } from './token.service.js';
-import { getPool } from '../../db/client.js';
 import { domainError } from '../../common/errors/domain-error.js';
 import { ErrorCode } from '@dineflow/contracts';
 
 // ─── Request DTOs ────────────────────────────────────────────────────────────
 
 const StaffLoginSchema = z.object({
-  orgSlug: z.string().min(1),
-  email: z.string().email(),
-  password: z.string().min(8),
+  orgSlug: z.string().trim().optional(),
+  username: z.string().trim().min(1).optional(),
+  email: z.string().trim().min(1).optional(),
+  password: z.string().min(4),
 }).strict();
 
 const MfaVerifySchema = z.object({
@@ -42,7 +42,7 @@ export class StaffAuthController {
 
   /**
    * POST /v1/auth/staff/login
-   * Step 1: email + password. Returns requiresMfa=true + preMfaToken if TOTP enrolled.
+   * Simple username (or email) + password login. Workspace slug is optional.
    */
   @Public()
   @Post('login')
@@ -52,20 +52,17 @@ export class StaffAuthController {
     @Headers('x-org-id') orgId: string,
     @Ip() clientIp: string,
   ) {
-    let resolvedOrgId = orgId;
-    if (!resolvedOrgId && dto.orgSlug) {
-      const pool = getPool();
-      const res = await pool.query<{ id: string }>(
-        'SELECT id FROM organizations WHERE slug = $1 AND is_active = true',
-        [dto.orgSlug],
-      );
-      if (res.rows[0]) {
-        resolvedOrgId = res.rows[0].id;
-      } else {
-        throw domainError(ErrorCode.NOT_FOUND, 'Organization not found.', 404);
-      }
+    const identifier = dto.username?.trim() || dto.email?.trim() || '';
+    if (!identifier) {
+      throw domainError(ErrorCode.VALIDATION_ERROR, 'Username or email is required.', 400);
     }
-    return this.staffAuth.login(resolvedOrgId, dto.email, dto.password, clientIp);
+    return this.staffAuth.loginWithOptionalOrg({
+      orgId: orgId || undefined,
+      orgSlug: dto.orgSlug?.trim() || undefined,
+      identifier,
+      password: dto.password,
+      clientIp,
+    });
   }
 
   /**

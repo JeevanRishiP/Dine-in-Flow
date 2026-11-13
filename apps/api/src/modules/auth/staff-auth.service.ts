@@ -2,7 +2,7 @@ import { Injectable, Inject, Optional } from '@nestjs/common';
 import crypto from 'node:crypto';
 import type Redis from 'ioredis';
 import { verifySync, NobleCryptoPlugin, ScureBase32Plugin } from 'otplib';
-import { withTenantContextRaw } from '../../db/client.js';
+import { getPool, withTenantContextRaw } from '../../db/client.js';
 import { getConfig } from '../../config/config.js';
 import {
   verifyPassword,
@@ -30,6 +30,11 @@ export interface StaffLoginResult {
   requiresMfa: boolean;
   preMfaToken?: string;
   userId: string;
+  username?: string;
+  email?: string;
+  displayName?: string;
+  orgId?: string;
+  orgSlug?: string;
 }
 
 export interface StaffTokenRefreshResult {
@@ -101,9 +106,90 @@ export class StaffAuthService {
   }
 
   /**
-   * Authenticate a staff member with email + password.
+   * Resolve organization automatically when Workspace Slug is omitted, then authenticate.
+   * Supports username or email so staff only need username + password.
+   */
+  async loginWithOptionalOrg(params: {
+    orgId?: string;
+    orgSlug?: string;
+    identifier: string;
+    password: string;
+    clientIp?: string;
+  }): Promise<StaffLoginResult> {
+    const clientIp = params.clientIp ?? 'unknown';
+    const normalizedIdentifier = params.identifier.trim().toLowerCase();
+    const pool = getPool();
+
+    if (params.orgId) {
+      const orgRes = await pool.query<{ id: string; slug: string }>(
+        'SELECT id, slug::text AS slug FROM organizations WHERE id = $1 AND is_active = true',
+        [params.orgId],
+      );
+      if (!orgRes.rows[0]) {
+        throw domainError(ErrorCode.NOT_FOUND, 'Organization not found.', 404);
+      }
+      return this.login(orgRes.rows[0].id, normalizedIdentifier, params.password, clientIp, orgRes.rows[0].slug);
+    }
+
+    if (params.orgSlug) {
+      const orgRes = await pool.query<{ id: string; slug: string }>(
+        'SELECT id, slug::text AS slug FROM organizations WHERE slug = $1 AND is_active = true',
+        [params.orgSlug.trim().toLowerCase()],
+      );
+      if (!orgRes.rows[0]) {
+        throw domainError(ErrorCode.NOT_FOUND, 'Organization not found.', 404);
+      }
+      return this.login(orgRes.rows[0].id, normalizedIdentifier, params.password, clientIp, orgRes.rows[0].slug);
+    }
+
+    const candidatesRes = await pool.query<{ org_id: string; org_slug: string }>(
+      'SELECT org_id, org_slug FROM resolve_staff_login_candidates($1)',
+      [normalizedIdentifier],
+    );
+    const candidates = candidatesRes.rows;
+
+    if (candidates.length === 0) {
+      // Constant-time failure parity before rejecting unknown identifier
+      const dummyHash = '$argon2id$v=19$m=65536,t=3,p=4$dummyhash/dummysalt$dummydummydummydummydummydummydumm';
+      await verifyPassword(dummyHash, params.password);
+      throw domainError(ErrorCode.INVALID_CREDENTIALS, 'Invalid username or password.', 401);
+    }
+
+    if (candidates.length === 1) {
+      const candidate = candidates[0]!;
+      return this.login(candidate.org_id, normalizedIdentifier, params.password, clientIp, candidate.org_slug);
+    }
+
+    const matches: StaffLoginResult[] = [];
+    for (const candidate of candidates) {
+      try {
+        const res = await this.login(candidate.org_id, normalizedIdentifier, params.password, clientIp, candidate.org_slug);
+        matches.push(res);
+      } catch (err) {
+        const code = (err as { code?: string })?.code;
+        if (code !== ErrorCode.INVALID_CREDENTIALS) {
+          throw err;
+        }
+      }
+    }
+
+    if (matches.length === 1) {
+      return matches[0]!;
+    }
+    if (matches.length > 1) {
+      throw domainError(
+        ErrorCode.CONFLICT,
+        'Multiple restaurants share this username and password. Open Advanced and enter your Workspace Slug.',
+        409,
+      );
+    }
+    throw domainError(ErrorCode.INVALID_CREDENTIALS, 'Invalid username or password.', 401);
+  }
+
+  /**
+   * Authenticate a staff member with username or email + password.
    * - Timing-safe password comparison
-   * - Enforces MFA for OWNER/MANAGER in production/when configured
+   * - Enforces MFA only when enrolled or ENFORCE_ADMIN_MFA=true
    * - Returns short-lived preMfaToken when requiresMfa=true; caller must call verifyMfa()
    */
   async login(
@@ -111,6 +197,7 @@ export class StaffAuthService {
     email: string,
     password: string,
     clientIp = 'unknown',
+    orgSlug?: string,
   ): Promise<StaffLoginResult> {
     if (!orgId) {
       throw domainError(ErrorCode.UNAUTHORIZED, 'Tenant context required.', 401);
@@ -126,13 +213,17 @@ export class StaffAuthService {
     const user = await withTenantContextRaw(orgId, async (client) => {
       const r = await client.query<{
         id: string;
+        username?: string | null;
+        email?: string | null;
+        display_name?: string | null;
         password_hash: string;
         is_active: boolean;
         totp_secret_enc: string | null;
         totp_enrolled_at: Date | null;
       }>(
-        `SELECT id, password_hash, is_active, totp_secret_enc, totp_enrolled_at
-         FROM staff_users WHERE org_id = $1 AND email = $2 LIMIT 1`,
+        `SELECT id, username::text AS username, email::text AS email, display_name,
+                password_hash, is_active, totp_secret_enc, totp_enrolled_at
+         FROM staff_users WHERE org_id = $1 AND (username = $2 OR email = $2) LIMIT 1`,
         [orgId, normalizedEmail],
       );
       return r.rows[0] ?? null;
@@ -148,7 +239,7 @@ export class StaffAuthService {
       await this.incrementFailureCounter(failKey, LOGIN_WINDOW_SEC);
       const err: DomainError = {
         code: ErrorCode.INVALID_CREDENTIALS,
-        message: 'Invalid email or password.',
+        message: 'Invalid username or password.',
         status: 401,
       };
       throw err;
@@ -178,6 +269,11 @@ export class StaffAuthService {
         requiresMfa: true,
         preMfaToken,
         userId: user.id,
+        ...(user.username ? { username: user.username } : {}),
+        ...(user.email ? { email: user.email } : {}),
+        ...(user.display_name ? { displayName: user.display_name } : {}),
+        orgId,
+        ...(orgSlug ? { orgSlug } : {}),
       };
     }
 
@@ -190,7 +286,17 @@ export class StaffAuthService {
     }
 
     const { accessToken, refreshToken } = await this._issueTokenPair(orgId, user.id, membership.role, membership.outlet_id);
-    return { accessToken, refreshToken, requiresMfa: false, userId: user.id };
+    return {
+      accessToken,
+      refreshToken,
+      requiresMfa: false,
+      userId: user.id,
+      ...(user.username ? { username: user.username } : {}),
+      ...(user.email ? { email: user.email } : {}),
+      ...(user.display_name ? { displayName: user.display_name } : {}),
+      orgId,
+      ...(orgSlug ? { orgSlug } : {}),
+    };
   }
 
   /**
