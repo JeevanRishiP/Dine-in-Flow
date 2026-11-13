@@ -18,13 +18,22 @@ export interface CustomerJwtPayload {
 }
 
 export interface GuestSessionJwtPayload {
-  sub: string;       // table_session.id
-  org: string;       // org.id
-  outlet: string;    // outlet.id
-  table: string;     // table.id
-  sessionId: string; // table_session.id
-  customerId?: string;
+  sub: string;             // table_session.id
+  org: string;             // org.id
+  outlet: string;          // outlet.id
+  table: string;           // table.id
+  sessionId: string;       // table_session.id
+  customerId?: string;     // verified account customer id (when signed in)
+  tempCustomerId?: string; // persistent temporary guest customer id (until tables cleaned)
   type: 'guest_session';
+}
+
+export interface TempCustomerJwtPayload {
+  sub: string; // temp_customers.id
+  org: string;
+  outlet: string;
+  purpose: 'temp_customer';
+  type: 'temp_customer';
 }
 
 export interface PreMfaJwtPayload {
@@ -33,6 +42,15 @@ export interface PreMfaJwtPayload {
   role: string;
   purpose: 'pre_mfa';
   type: 'pre_mfa';
+}
+
+export interface GooglePreRegJwtPayload {
+  sub: string;       // google_sub
+  org: string;       // org.id
+  email: string;     // verified Google email
+  name?: string;
+  purpose: 'google_prereg';
+  type: 'google_prereg';
 }
 
 export type JwtPayload = StaffJwtPayload | CustomerJwtPayload | GuestSessionJwtPayload;
@@ -96,6 +114,82 @@ export class TokenService {
         decoded.purpose !== 'pre_mfa' ||
         !decoded.sub ||
         !decoded.org
+      ) {
+        return null;
+      }
+      return decoded;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Issue a short-lived token (10m TTL) binding a Google-verified email + googleSub
+   * to complete phone-first registration via WhatsApp OTP.
+   */
+  signGooglePreRegToken(payload: Omit<GooglePreRegJwtPayload, 'purpose' | 'type'>): string {
+    const config = getConfig();
+    return this.jwtService.sign(
+      { ...payload, purpose: 'google_prereg', type: 'google_prereg' },
+      {
+        secret: `${config.JWT_SECRET}:google_prereg`,
+        expiresIn: '10m',
+      },
+    );
+  }
+
+  verifyGooglePreRegToken(token: string): GooglePreRegJwtPayload | null {
+    const config = getConfig();
+    try {
+      const decoded = this.jwtService.verify<GooglePreRegJwtPayload>(token, {
+        secret: `${config.JWT_SECRET}:google_prereg`,
+      });
+      if (
+        !decoded ||
+        typeof decoded !== 'object' ||
+        decoded.type !== 'google_prereg' ||
+        decoded.purpose !== 'google_prereg' ||
+        !decoded.sub ||
+        !decoded.org ||
+        !decoded.email
+      ) {
+        return null;
+      }
+      return decoded;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Issue a cookie token (12h TTL) binding an anonymous browser to its server-side
+   * temporary customer ID across refreshes, multi-table orders, and redirects.
+   */
+  signTempCustomerToken(payload: Omit<TempCustomerJwtPayload, 'purpose' | 'type'>): string {
+    const config = getConfig();
+    return this.jwtService.sign(
+      { ...payload, purpose: 'temp_customer', type: 'temp_customer' },
+      {
+        secret: `${config.JWT_SECRET}:temp_customer`,
+        expiresIn: '12h',
+      },
+    );
+  }
+
+  verifyTempCustomerToken(token: string): TempCustomerJwtPayload | null {
+    const config = getConfig();
+    try {
+      const decoded = this.jwtService.verify<TempCustomerJwtPayload>(token, {
+        secret: `${config.JWT_SECRET}:temp_customer`,
+      });
+      if (
+        !decoded ||
+        typeof decoded !== 'object' ||
+        decoded.type !== 'temp_customer' ||
+        decoded.purpose !== 'temp_customer' ||
+        !decoded.sub ||
+        !decoded.org ||
+        !decoded.outlet
       ) {
         return null;
       }

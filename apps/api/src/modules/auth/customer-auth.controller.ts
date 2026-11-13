@@ -1,7 +1,9 @@
-import { Controller, Post, Get, Patch, Delete, Param, Body, Headers, Ip, HttpCode } from '@nestjs/common';
+import { Controller, Post, Get, Patch, Delete, Param, Body, Headers, Ip, HttpCode, Req, Res } from '@nestjs/common';
+import type { FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { createZodDto } from 'nestjs-zod';
-import { Permission } from '@dineflow/contracts';
+import { Permission, ErrorCode } from '@dineflow/contracts';
+import { domainError } from '../../common/errors/domain-error.js';
 import {
   Public,
   Require,
@@ -9,21 +11,72 @@ import {
   type CustomerJwtPayload,
 } from '../../common/decorators/auth.decorators.js';
 import { CustomerOtpService } from './customer-otp.service.js';
+import { parseCookies } from '../../common/utils/cookie.utils.js';
+
+function assertCustomerPrincipal(
+  user: CustomerJwtPayload | { type?: string },
+): asserts user is CustomerJwtPayload {
+  if (!user || user.type !== 'customer_access') {
+    throw domainError(
+      ErrorCode.FORBIDDEN,
+      'Dining profiles belong strictly to the customer account and cannot be accessed by restaurant owner or staff.',
+      403,
+    );
+  }
+}
+
+// ─── Cookie Helpers ──────────────────────────────────────────────────────────
+
+const REFRESH_COOKIE_NAME = 'df_cust_rt';
+const ORG_COOKIE_NAME = 'df_cust_org';
+const TEMP_CUST_COOKIE_NAME = 'df_temp_cust';
+const REFRESH_MAX_AGE_SEC = 30 * 24 * 60 * 60;
+
+function setCustomerRefreshCookies(reply: FastifyReply | undefined, refreshToken: string, orgId: string): void {
+  if (!reply || typeof reply.header !== 'function') return;
+  const secureFlag = process.env['NODE_ENV'] === 'production' ? '; Secure' : '';
+  reply.header('Set-Cookie', [
+    `${REFRESH_COOKIE_NAME}=${encodeURIComponent(refreshToken)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${REFRESH_MAX_AGE_SEC}${secureFlag}`,
+    `${ORG_COOKIE_NAME}=${encodeURIComponent(orgId)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${REFRESH_MAX_AGE_SEC}${secureFlag}`,
+  ]);
+}
+
+function clearCustomerRefreshCookies(reply: FastifyReply | undefined): void {
+  if (!reply || typeof reply.header !== 'function') return;
+  const secureFlag = process.env['NODE_ENV'] === 'production' ? '; Secure' : '';
+  reply.header('Set-Cookie', [
+    `${REFRESH_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secureFlag}`,
+    `${ORG_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secureFlag}`,
+  ]);
+}
 
 // ─── Request DTOs ────────────────────────────────────────────────────────────
 
 const OtpRequestSchema = z.object({
   phone: z.string().min(7).max(20),
+  email: z.string().email().max(200).optional(),
+  mode: z.enum(['LOGIN', 'SIGNUP']).optional(),
 }).strict();
 
 const OtpVerifySchema = z.object({
   phone: z.string().min(7).max(20),
   code: z.string().length(6),
+  email: z.string().email().max(200).optional(),
+  googlePreRegToken: z.string().min(20).optional(),
+  displayName: z.string().min(1).max(100).optional(),
+}).strict();
+
+const GoogleLoginSchema = z.object({
+  idToken: z.string().min(20).optional(),
+  devMockEmail: z.string().email().max(200).optional(),
+  devMockName: z.string().max(100).optional(),
 }).strict();
 
 const CustomerRefreshSchema = z.object({
-  refreshToken: z.string().min(10),
+  refreshToken: z.string().min(10).optional(),
 }).strict();
+
+class GoogleLoginDto extends createZodDto(GoogleLoginSchema) {}
 
 const UpdateProfileSchema = z.object({
   displayName: z.string().min(1).max(100),
@@ -75,12 +128,15 @@ export class CustomerAuthController {
     @Headers('x-org-id') orgId: string,
     @Ip() clientIp: string,
   ) {
-    return this.otpService.requestOtp(orgId, dto.phone, clientIp);
+    return this.otpService.requestOtp(orgId, dto.phone, clientIp, {
+      email: dto.email,
+      mode: dto.mode,
+    });
   }
 
   /**
    * POST /v1/auth/customer/otp/verify
-   * Verify the OTP — issues access + refresh tokens.
+   * Verify OTP — links optional 1:1 email / Google sub, issues access + HttpOnly refresh cookie.
    */
   @Public()
   @Post('otp/verify')
@@ -88,22 +144,88 @@ export class CustomerAuthController {
   async verifyOtp(
     @Body() dto: OtpVerifyDto,
     @Headers('x-org-id') orgId: string,
+    @Res({ passthrough: true }) reply?: FastifyReply,
+    @Req() req?: FastifyRequest,
   ) {
-    return this.otpService.verifyOtp(orgId, dto.phone, dto.code);
+    const result = await this.otpService.verifyOtp(orgId, dto.phone, dto.code, {
+      email: dto.email,
+      googlePreRegToken: dto.googlePreRegToken,
+      displayName: dto.displayName,
+    });
+    if (orgId && result.refreshToken) {
+      setCustomerRefreshCookies(reply, result.refreshToken, orgId);
+    }
+    const cookies = parseCookies(req?.headers?.cookie);
+    if (orgId && result.customerId && cookies[TEMP_CUST_COOKIE_NAME]) {
+      await this.otpService.claimTempCustomerCookieOrders?.(orgId, result.customerId, cookies[TEMP_CUST_COOKIE_NAME]);
+    }
+    return result;
+  }
+
+  /**
+   * POST /v1/auth/customer/google
+   * Sign in with verified Google email, or return googlePreRegToken if unregistered.
+   */
+  @Public()
+  @Post('google')
+  @HttpCode(200)
+  async loginWithGoogle(
+    @Body() dto: GoogleLoginDto,
+    @Headers('x-org-id') orgId: string,
+    @Res({ passthrough: true }) reply?: FastifyReply,
+    @Req() req?: FastifyRequest,
+  ) {
+    const result = await this.otpService.loginWithGoogle(orgId, dto);
+    if (result.registered && result.refreshToken && orgId) {
+      setCustomerRefreshCookies(reply, result.refreshToken, orgId);
+      const cookies = parseCookies(req?.headers?.cookie);
+      if (result.customerId && cookies[TEMP_CUST_COOKIE_NAME]) {
+        await this.otpService.claimTempCustomerCookieOrders?.(orgId, result.customerId, cookies[TEMP_CUST_COOKIE_NAME]);
+      }
+    }
+    return result;
   }
 
   /**
    * POST /v1/auth/customer/refresh
-   * Rotate customer refresh token.
+   * Rotate customer refresh token (from body or HttpOnly cookie).
    */
   @Public()
   @Post('refresh')
   @HttpCode(200)
   async refresh(
     @Body() dto: CustomerRefreshDto,
-    @Headers('x-org-id') orgId: string,
+    @Headers('x-org-id') orgIdHeader: string,
+    @Req() req?: FastifyRequest,
+    @Res({ passthrough: true }) reply?: FastifyReply,
   ) {
-    return this.otpService.refreshTokens(orgId, dto.refreshToken);
+    const cookies = parseCookies(req?.headers?.cookie);
+    const token = dto?.refreshToken || cookies[REFRESH_COOKIE_NAME] || '';
+    const orgId = orgIdHeader || cookies[ORG_COOKIE_NAME] || '';
+    const result = await this.otpService.refreshTokens(orgId, token);
+    if (orgId && result.refreshToken) {
+      setCustomerRefreshCookies(reply, result.refreshToken, orgId);
+    }
+    return result;
+  }
+
+  /**
+   * POST /v1/auth/customer/logout
+   * Revoke persisted customer refresh family and clear cookies.
+   */
+  @Public()
+  @Post('logout')
+  @HttpCode(200)
+  async logout(
+    @Headers('x-org-id') orgIdHeader: string,
+    @Req() req?: FastifyRequest,
+    @Res({ passthrough: true }) reply?: FastifyReply,
+  ) {
+    const cookies = parseCookies(req?.headers?.cookie);
+    const token = cookies[REFRESH_COOKIE_NAME];
+    const orgId = orgIdHeader || cookies[ORG_COOKIE_NAME] || '';
+    clearCustomerRefreshCookies(reply);
+    return this.otpService.logoutSession(orgId, token);
   }
 
   /**
@@ -131,17 +253,18 @@ export class CustomerAuthController {
 
   /**
    * GET /v1/auth/customer/diner-profiles
-   * List saved diner profiles owned by the authenticated customer.
+   * List saved diner profiles owned strictly by the authenticated customer.
    */
   @Require(Permission.CUSTOMER_READ)
   @Get('diner-profiles')
   async listDinerProfiles(@CurrentUser() user: CustomerJwtPayload) {
+    assertCustomerPrincipal(user);
     return this.otpService.listDinerProfiles(user.org, user.sub);
   }
 
   /**
    * POST /v1/auth/customer/diner-profiles
-   * Create a new diner profile owned by the authenticated customer.
+   * Create a new diner profile owned strictly by the authenticated customer.
    */
   @Require(Permission.CUSTOMER_UPDATE)
   @Post('diner-profiles')
@@ -150,6 +273,7 @@ export class CustomerAuthController {
     @CurrentUser() user: CustomerJwtPayload,
     @Body() dto: CreateDinerProfileDto,
   ) {
+    assertCustomerPrincipal(user);
     return this.otpService.createDinerProfile(user.org, user.sub, dto);
   }
 
@@ -164,6 +288,7 @@ export class CustomerAuthController {
     @Param('id') idParam: string,
     @Body() dto: UpdateDinerProfileDto,
   ) {
+    assertCustomerPrincipal(user);
     return this.otpService.updateDinerProfile(user.org, user.sub, idParam, dto);
   }
 
@@ -178,6 +303,7 @@ export class CustomerAuthController {
     @CurrentUser() user: CustomerJwtPayload,
     @Param('id') id: string,
   ) {
+    assertCustomerPrincipal(user);
     return this.otpService.deleteDinerProfile(user.org, user.sub, id);
   }
 
@@ -192,6 +318,7 @@ export class CustomerAuthController {
     @CurrentUser() user: CustomerJwtPayload,
     @Body() dto: DeleteDinerProfileDto,
   ) {
+    assertCustomerPrincipal(user);
     return this.otpService.deleteDinerProfile(user.org, user.sub, dto.id);
   }
 }
