@@ -10,12 +10,22 @@
 
 import { Module } from '@nestjs/common';
 import { PaymentsService } from './payments.service.js';
-import { ConsolePaymentsController, PublicWebhookController, CustomerPaymentsController } from './payments.controller.js';
+import {
+  ConsolePaymentsController,
+  PublicWebhookController,
+  CustomerPaymentsController,
+  PublicPaymentsReturnController,
+} from './payments.controller.js';
 import { ReconciliationService } from './reconciliation.service.js';
 
 @Module({
   providers: [PaymentsService, ReconciliationService],
-  controllers: [ConsolePaymentsController, PublicWebhookController, CustomerPaymentsController],
+  controllers: [
+    ConsolePaymentsController,
+    PublicWebhookController,
+    CustomerPaymentsController,
+    PublicPaymentsReturnController,
+  ],
   exports: [PaymentsService],
 })
 export class PaymentsModule {}

@@ -28,7 +28,7 @@ import { PaymentsService } from './payments.service.js';
 import {
   toCustomerAccessScope,
 } from '../../common/utils/ownership.utils.js';
-import { CreatePaymentDto, CreateRefundDto } from './payments.dto.js';
+import { CreatePaymentDto, CreateRefundDto, ReconcileReturnQueryDto } from './payments.dto.js';
 import {
   Require,
   CurrentUser,
@@ -202,5 +202,21 @@ export class CustomerPaymentsController {
     @Param('id') id: string,
   ) {
     return this.paymentsService.getPayment(user.org, id, toCustomerAccessScope(user));
+  }
+}
+
+/**
+ * Public Gateway Return Controller — reconciles a transaction using the (orderId, merchantTransactionId)
+ * pair when PhonePe redirects back into a new tab / mobile browser without sessionStorage.
+ * Never trusts redirect status alone: queries PhonePe/Razorpay server-side before returning status.
+ */
+@Controller('public/payments')
+export class PublicPaymentsReturnController {
+  constructor(private readonly paymentsService: PaymentsService) {}
+
+  @Get('reconcile-return')
+  @Public()
+  reconcileReturn(@Query() query: ReconcileReturnQueryDto) {
+    return this.paymentsService.reconcilePublicReturn(query.orderId, query.merchantTransactionId);
   }
 }

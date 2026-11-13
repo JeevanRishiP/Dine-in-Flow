@@ -38,3 +38,10 @@ export const CreateRefundSchema = z.object({
 }).strict();
 
 export class CreateRefundDto extends createZodDto(CreateRefundSchema) {}
+
+export const ReconcileReturnQuerySchema = z.object({
+  orderId:               z.string().uuid(),
+  merchantTransactionId: z.string().trim().min(8).max(128),
+}).strict();
+
+export class ReconcileReturnQueryDto extends createZodDto(ReconcileReturnQuerySchema) {}

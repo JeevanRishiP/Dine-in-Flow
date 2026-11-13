@@ -76,9 +76,14 @@ export class PaymentsService {
       if (existing[0]) {
         if (actorType === 'CUSTOMER') {
           const { rows: ordRows } = await db.query<{
-            session_id: string; customer_id: string | null; session_customer_id: string | null;
+            session_id: string;
+            customer_id: string | null;
+            session_customer_id: string | null;
+            temp_customer_id?: string | null;
+            session_temp_customer_id?: string | null;
           }>(
-            `SELECT o.session_id, o.customer_id, ts.customer_id AS session_customer_id
+            `SELECT o.session_id, o.customer_id, ts.customer_id AS session_customer_id,
+                    o.temp_customer_id, ts.temp_customer_id AS session_temp_customer_id
              FROM orders o
              LEFT JOIN table_sessions ts ON ts.id = o.session_id AND ts.org_id = o.org_id
              WHERE o.id = $1 AND o.org_id = $2`,
@@ -98,9 +103,12 @@ export class PaymentsService {
         session_id: string;
         customer_id: string | null;
         session_customer_id: string | null;
+        temp_customer_id?: string | null;
+        session_temp_customer_id?: string | null;
       }>(
         `SELECT o.id, o.total_paise, o.status, o.session_id, o.customer_id,
-                ts.customer_id AS session_customer_id
+                ts.customer_id AS session_customer_id,
+                o.temp_customer_id, ts.temp_customer_id AS session_temp_customer_id
          FROM orders o
          LEFT JOIN table_sessions ts ON ts.id = o.session_id AND ts.org_id = o.org_id
          WHERE o.id = $1 AND o.org_id = $2`,
@@ -496,7 +504,8 @@ export class PaymentsService {
     return withTenantContextRaw(orgId, async (db) => {
       const { rows } = await db.query(
         `SELECT p.*, r.id as refund_id, r.amount_paise as refund_amount, r.status as refund_status,
-                o.session_id, o.customer_id, ts.customer_id AS session_customer_id
+                o.session_id, o.customer_id, ts.customer_id AS session_customer_id,
+                o.temp_customer_id, ts.temp_customer_id AS session_temp_customer_id
          FROM payments p
          JOIN orders o ON o.id = p.order_id AND o.org_id = p.org_id
          LEFT JOIN table_sessions ts ON ts.id = o.session_id AND ts.org_id = o.org_id
@@ -506,7 +515,14 @@ export class PaymentsService {
       );
       if (!rows[0]) throw domainError(ErrorCode.NOT_FOUND, 'Payment not found.', 404);
       assertCustomerAccessScope(scope, rows[0]);
-      const { session_id: _sid, customer_id: _cid, session_customer_id: _scid, ...payment } = rows[0];
+      const {
+        session_id: _sid,
+        customer_id: _cid,
+        session_customer_id: _scid,
+        temp_customer_id: _tcid,
+        session_temp_customer_id: _stcid,
+        ...payment
+      } = rows[0];
       return payment;
     });
   }
@@ -611,9 +627,12 @@ export class PaymentsService {
         session_id: string;
         customer_id: string | null;
         session_customer_id: string | null;
+        temp_customer_id?: string | null;
+        session_temp_customer_id?: string | null;
       }>(
         `SELECT p.id, p.org_id, p.order_id, p.status, p.provider, p.provider_order_id, p.amount_paise,
-                o.session_id, o.customer_id, ts.customer_id AS session_customer_id
+                o.session_id, o.customer_id, ts.customer_id AS session_customer_id,
+                o.temp_customer_id, ts.temp_customer_id AS session_temp_customer_id
          FROM payments p
          JOIN orders o ON o.id = p.order_id AND o.org_id = p.org_id
          LEFT JOIN table_sessions ts ON ts.id = o.session_id AND ts.org_id = o.org_id
@@ -665,9 +684,15 @@ export class PaymentsService {
     }
     const paymentId = await withTenantContextRaw(orgId, async (db) => {
       const { rows } = await db.query<{
-        id: string; session_id: string; customer_id: string | null; session_customer_id: string | null;
+        id: string;
+        session_id: string;
+        customer_id: string | null;
+        session_customer_id: string | null;
+        temp_customer_id?: string | null;
+        session_temp_customer_id?: string | null;
       }>(
-        `SELECT p.id, o.session_id, o.customer_id, ts.customer_id AS session_customer_id
+        `SELECT p.id, o.session_id, o.customer_id, ts.customer_id AS session_customer_id,
+                o.temp_customer_id, ts.temp_customer_id AS session_temp_customer_id
          FROM payments p
          JOIN orders o ON o.id = p.order_id AND o.org_id = p.org_id
          LEFT JOIN table_sessions ts ON ts.id = o.session_id AND ts.org_id = o.org_id
@@ -680,6 +705,34 @@ export class PaymentsService {
       return rows[0].id;
     });
     return this.verifyPaymentStatus(orgId, paymentId, scope);
+  }
+
+  /**
+   * Public gateway return check — requires the exact (orderId, merchantTransactionId) UUID pair
+   * passed in PhonePe's redirectUrl, verifies with PhonePe/Razorpay S2S API, and returns only status.
+   * Needed when PhonePe opens in a new tab (`target="_blank"`) or another device without sessionStorage.
+   */
+  async reconcilePublicReturn(orderId: string, merchantTransactionId: string) {
+    const pool = getPool();
+    const { rows } = await pool.query<{
+      payment_id: string;
+      org_id: string;
+      status: string;
+    }>(
+      `SELECT payment_id, org_id, status FROM resolve_payment_by_tx_pair($1, $2)`,
+      [orderId, merchantTransactionId],
+    );
+    const match = rows[0];
+    if (!match) {
+      throw domainError(ErrorCode.NOT_FOUND, 'Payment transaction not found.', 404);
+    }
+
+    const result = await this.verifyPaymentStatus(match.org_id, match.payment_id);
+    return {
+      success: result.success,
+      status: result.status,
+      settled: result.settled,
+    };
   }
 
   async simulatePaymentByOrder(orderId: string) {
