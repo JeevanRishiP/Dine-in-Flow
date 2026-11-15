@@ -21,6 +21,7 @@ import { resolveScopedOutletId } from '../../common/utils/outlet-scope.utils.js'
 import { FeedbackService } from './feedback.service.js';
 import {
   SubmitFeedbackDto,
+  SubmitDishReviewsDto,
   FeedbackQueryDto,
   ReviewListQueryDto,
   ConnectGbpDto,
@@ -158,5 +159,57 @@ export class CustomerFeedbackController {
     return this.feedbackService.submitFeedback(user.org, customerId, dto, {
       scope: toCustomerAccessScope(user),
     });
+  }
+
+  /**
+   * Authenticated customer submits dish reviews on items from their order.
+   */
+  @Post('me/dish-reviews')
+  @Require(Permission.CUSTOMER_READ)
+  @HttpCode(HttpStatus.CREATED)
+  submitDishReviewsAuth(
+    @CurrentUser() user: CustomerJwtPayload,
+    @Body() dto: SubmitDishReviewsDto,
+  ) {
+    return this.feedbackService.submitDishReviews(user.org, user.sub, dto, {
+      scope: toCustomerAccessScope(user),
+    });
+  }
+
+  /**
+   * Authenticated customer retrieves their past dish reviews.
+   */
+  @Get('me/dish-reviews')
+  @Require(Permission.CUSTOMER_READ)
+  getMyDishReviews(@CurrentUser() user: CustomerJwtPayload) {
+    return this.feedbackService.getCustomerDishReviews(user.org, user.sub);
+  }
+
+  /**
+   * Guest table-session diner submits dish reviews on an order in their session.
+   */
+  @Post('public/dish-reviews')
+  @Require(Permission.GUEST_SESSION)
+  @HttpCode(HttpStatus.CREATED)
+  submitDishReviewsGuest(
+    @CurrentUser() user: GuestSessionJwtPayload | CustomerJwtPayload,
+    @Body() dto: SubmitDishReviewsDto,
+  ) {
+    const customerId = user.type === 'customer_access' ? user.sub : (user.customerId ?? null);
+    return this.feedbackService.submitDishReviews(user.org, customerId, dto, {
+      scope: toCustomerAccessScope(user),
+    });
+  }
+
+  /**
+   * Guest table-session retrieves dish reviews for an order.
+   */
+  @Get('public/dish-reviews')
+  @Require(Permission.GUEST_SESSION)
+  getOrderDishReviews(
+    @CurrentUser() user: GuestSessionJwtPayload | CustomerJwtPayload,
+    @Query('orderId') orderId: string,
+  ) {
+    return this.feedbackService.getOrderDishReviews(user.org, orderId);
   }
 }
