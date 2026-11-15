@@ -152,7 +152,7 @@ export const ROLE_PERMISSIONS: Record<string, Permission[]> = {
     Permission.STOCK_UPDATE,
     Permission.TABLE_READ, Permission.TABLE_CLEAN,
     Permission.ORDER_READ, Permission.ORDER_UPDATE_STATUS,
-    Permission.KITCHEN_VIEW,
+    Permission.KITCHEN_VIEW, Permission.KITCHEN_UPDATE,
     Permission.CUSTOMER_READ,
   ],
 
@@ -162,7 +162,7 @@ export const ROLE_PERMISSIONS: Record<string, Permission[]> = {
     Permission.STOCK_UPDATE,
     Permission.TABLE_READ, Permission.TABLE_CLEAN,
     Permission.ORDER_READ, Permission.ORDER_UPDATE_STATUS,
-    Permission.KITCHEN_VIEW,
+    Permission.KITCHEN_VIEW, Permission.KITCHEN_UPDATE,
     Permission.CUSTOMER_READ,
   ],
 };
