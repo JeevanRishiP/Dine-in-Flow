@@ -128,5 +128,36 @@ describe('Feedback Controllers Dispatching & RBAC', () => {
         { scope: { sessionId: 'session-uuid-1', customerId: undefined } },
       );
     });
+
+    it('submits dish reviews for authenticated customer and retrieves them', async () => {
+      mockFeedbackService.submitDishReviews = vi.fn().mockResolvedValue({ success: true, count: 1 });
+      mockFeedbackService.getCustomerDishReviews = vi.fn().mockResolvedValue([]);
+
+      const dto = {
+        orderId: '11111111-1111-1111-1111-111111111111',
+        reviews: [
+          {
+            menuItemId: '22222222-2222-2222-2222-222222222222',
+            dishName: 'Filter Coffee',
+            rating: 5,
+            review: 'Loved the strong brew!',
+          },
+        ],
+      };
+
+      await customerController.submitDishReviewsAuth(mockCustomerUser, dto);
+      expect(mockFeedbackService.submitDishReviews).toHaveBeenCalledWith(
+        mockCustomerUser.org,
+        mockCustomerUser.sub,
+        dto,
+        { scope: { customerId: mockCustomerUser.sub } },
+      );
+
+      await customerController.getMyDishReviews(mockCustomerUser);
+      expect(mockFeedbackService.getCustomerDishReviews).toHaveBeenCalledWith(
+        mockCustomerUser.org,
+        mockCustomerUser.sub,
+      );
+    });
   });
 });
