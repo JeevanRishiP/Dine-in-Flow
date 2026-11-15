@@ -4,7 +4,7 @@ import type { PoolClient } from 'pg';
 import { withTenantContextRaw } from '../../db/client.js';
 import { domainError } from '../../common/errors/domain-error.js';
 import { ErrorCode } from '@dineflow/contracts';
-import type { AiProvider, ChatMessage, AiChatResponse } from './ai.provider.js';
+import type { AiProvider, ChatMessage, AiChatResponse, CustomerAiHistory } from './ai.provider.js';
 import { GeminiAdapter } from './gemini.adapter.js';
 import { MockAiAdapter } from './mock-ai.adapter.js';
 import { MenuRetrievalService } from './menu-retrieval.service.js';
@@ -188,14 +188,106 @@ export class AiService {
         }));
       pastMessages.push({ role: 'user', content: cleanUserMessage });
 
-      return { hit: false as const, sessionId, pastMessages };
+      // Resolve effective customer ID
+      let effectiveCustomerId = customerId;
+      if (!effectiveCustomerId && dto.tableSessionId) {
+        const tsRes = await client.query<{ customer_id: string | null }>(
+          `SELECT customer_id FROM table_sessions WHERE org_id = $1 AND id = $2;`,
+          [orgId, dto.tableSessionId],
+        );
+        if (tsRes.rows[0]?.customer_id) {
+          effectiveCustomerId = tsRes.rows[0].customer_id;
+        }
+      }
+
+      // Fetch customer past history if authenticated
+      let customerContext: CustomerAiHistory = {
+        isLoggedIn: Boolean(effectiveCustomerId),
+        wishlistDishes: dto.wishlistDishNames || [],
+      };
+
+      if (effectiveCustomerId) {
+        // Past orders
+        const ordersRes = await client.query<{
+          id: string;
+          created_at: Date;
+          items: Array<{ name: string; quantity: number; notes?: string | null }>;
+        }>(
+          `SELECT o.id, o.created_at,
+                  json_agg(json_build_object(
+                    'name', oi.name_snapshot,
+                    'quantity', oi.quantity,
+                    'notes', oi.notes
+                  )) AS items
+           FROM orders o
+           JOIN order_items oi ON oi.order_id = o.id AND oi.org_id = o.org_id
+           WHERE o.org_id = $1 AND o.customer_id = $2 AND o.status IN ('CONFIRMED','PREPARING','READY','SERVED','BILLED')
+           GROUP BY o.id, o.created_at
+           ORDER BY o.created_at DESC
+           LIMIT 5;`,
+          [orgId, effectiveCustomerId],
+        );
+
+        // Liked dishes from dish_reviews
+        const reviewsRes = await client.query<{
+          dish_name: string;
+          rating: number;
+          review: string | null;
+        }>(
+          `SELECT dish_name, rating, review
+           FROM dish_reviews
+           WHERE org_id = $1 AND customer_id = $2
+           ORDER BY rating DESC, created_at DESC
+           LIMIT 10;`,
+          [orgId, effectiveCustomerId],
+        );
+
+        // Feedback
+        const feedbackRes = await client.query<{
+          rating: number;
+          tags: string[];
+          comment: string | null;
+        }>(
+          `SELECT rating, tags, comment
+           FROM feedback
+           WHERE org_id = $1 AND customer_id = $2
+           ORDER BY created_at DESC
+           LIMIT 5;`,
+          [orgId, effectiveCustomerId],
+        );
+
+        customerContext = {
+          isLoggedIn: true,
+          wishlistDishes: dto.wishlistDishNames || [],
+          pastOrders: ordersRes.rows.map((r) => ({
+            date: new Date(r.created_at).toLocaleDateString('en-IN', {
+              day: 'numeric',
+              month: 'short',
+              year: 'numeric',
+            }),
+            items: Array.isArray(r.items) ? r.items : [],
+          })),
+          likedDishes: reviewsRes.rows.map((r) => ({
+            dishName: r.dish_name,
+            rating: r.rating,
+            review: r.review,
+          })),
+          overallFeedback: feedbackRes.rows.map((r) => ({
+            rating: r.rating,
+            tags: r.tags || [],
+            comment: r.comment,
+          })),
+        };
+      }
+
+      return { hit: false as const, sessionId, pastMessages, customerContext };
     });
 
     if (prePhase.hit) {
       return prePhase.response;
     }
 
-    const { sessionId, pastMessages } = prePhase;
+    const { sessionId, pastMessages, customerContext } = prePhase;
 
     // ── Phase B & C (No DB lock held across external HTTP calls!) ──────────────
     let queryEmbedding: number[] | undefined;
@@ -216,13 +308,13 @@ export class AiService {
     let aiResult: AiChatResponse;
     let usedFallback = false;
     try {
-      aiResult = await this.provider.chat(pastMessages, contextItems);
+      aiResult = await this.provider.chat(pastMessages, contextItems, customerContext);
     } catch (err) {
       usedFallback = true;
       this.logger.warn(`[AI] Primary provider chat failed: ${err instanceof Error ? err.message : String(err)}, falling back to grounded mock provider`);
       try {
         const fallbackProvider = new MockAiAdapter();
-        aiResult = await fallbackProvider.chat(pastMessages, contextItems);
+        aiResult = await fallbackProvider.chat(pastMessages, contextItems, customerContext);
       } catch {
         aiResult = {
           answer: `Our AI assistant is temporarily unavailable. Please call a waiter for assistance. ${MANDATORY_ALLERGEN_DISCLAIMER}`,
