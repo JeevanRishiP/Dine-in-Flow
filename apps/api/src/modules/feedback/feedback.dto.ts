@@ -14,6 +14,29 @@ export const SubmitFeedbackSchema = z
 
 export class SubmitFeedbackDto extends createZodDto(SubmitFeedbackSchema) {}
 
+// ─── Submit Dish Reviews (Per-item ratings & reviews) ─────────────────────────
+
+export const DishReviewItemSchema = z
+  .object({
+    menuItemId: z.string().uuid(),
+    dishName: z.string().min(1).max(255),
+    rating: z.number().int().min(1).max(5),
+    review: z.string().max(1000).optional(),
+  })
+  .strict();
+
+export const SubmitDishReviewsSchema = z
+  .object({
+    orderId: z.string().uuid(),
+    overallRating: z.number().int().min(1).max(5).optional(),
+    overallComment: z.string().max(1000).optional(),
+    tags: z.array(z.string().min(1).max(50)).default([]),
+    reviews: z.array(DishReviewItemSchema).min(1).max(50),
+  })
+  .strict();
+
+export class SubmitDishReviewsDto extends createZodDto(SubmitDishReviewsSchema) {}
+
 // ─── Query Feedback ──────────────────────────────────────────────────────────
 
 export const FeedbackQuerySchema = z
