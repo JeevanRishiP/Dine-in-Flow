@@ -51,7 +51,7 @@ async function compressImageFileToDataUrl(file: File): Promise<string> {
       el.onerror = () => reject(new Error('Could not decode selected image file.'));
       el.src = objectUrl;
     });
-    const maxDim = 900;
+    const maxDim = 800;
     const scale = Math.min(1, maxDim / Math.max(img.width || 1, img.height || 1));
     const width = Math.max(1, Math.round(img.width * scale));
     const height = Math.max(1, Math.round(img.height * scale));
@@ -63,11 +63,11 @@ async function compressImageFileToDataUrl(file: File): Promise<string> {
       throw new Error('Browser canvas is unavailable.');
     }
     ctx.drawImage(img, 0, 0, width, height);
-    const webp = canvas.toDataURL('image/webp', 0.85);
+    const webp = canvas.toDataURL('image/webp', 0.8);
     if (webp.startsWith('data:image/webp')) {
       return webp;
     }
-    return canvas.toDataURL('image/jpeg', 0.85);
+    return canvas.toDataURL('image/jpeg', 0.8);
   } finally {
     URL.revokeObjectURL(objectUrl);
   }
@@ -265,7 +265,7 @@ export default function MenuCatalogManager({
       } else if (itemImageUrl.trim()) {
         payload['image_url'] = itemImageUrl.trim();
       } else if (editingItem?.image_url) {
-        payload['image_url'] = null;
+        payload['image_url'] = editingItem.image_url;
       }
     }
 
@@ -516,6 +516,36 @@ export default function MenuCatalogManager({
                 }}
               >
                 ✏️
+              </button>
+            )}
+            {selectedCategoryId === cat.id && items.filter((i) => i.category_id === cat.id).length === 0 && (
+              <button
+                type="button"
+                title="Remove empty category"
+                onClick={async () => {
+                  if (!confirm(`Delete empty category "${cat.name}"?`)) return;
+                  const res = await consoleAuthFetch(`/api/v1/console/menu/categories/${encodeURIComponent(cat.id)}`, {
+                    method: 'DELETE',
+                  });
+                  if (res.ok) {
+                    setSelectedCategoryId('ALL');
+                    await fetchCatalog();
+                    notify(`🗑️ Category "${cat.name}" removed.`);
+                  } else {
+                    notify('⚠️ Could not remove category.');
+                  }
+                }}
+                style={{
+                  padding: '6px 8px',
+                  borderRadius: '6px',
+                  background: 'rgba(239, 68, 68, 0.15)',
+                  border: '1px solid rgba(239, 68, 68, 0.4)',
+                  color: '#f87171',
+                  fontSize: '0.78rem',
+                  cursor: 'pointer',
+                }}
+              >
+                🗑️
               </button>
             )}
           </div>
