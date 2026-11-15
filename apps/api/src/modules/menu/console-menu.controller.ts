@@ -59,6 +59,15 @@ export class ConsoleMenuController {
     return this.menuService.updateCategory(user.org, id, dto, user.sub);
   }
 
+  @Delete('categories/:id')
+  @Require(Permission.MENU_WRITE)
+  deleteCategory(
+    @CurrentUser() user: StaffJwtPayload,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.menuService.deleteCategory(user.org, id, user.sub);
+  }
+
   // ─── Menu Items ──────────────────────────────────────────────────────────────
 
   @Get('items')
