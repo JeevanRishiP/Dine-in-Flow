@@ -14,6 +14,7 @@ import {
 import { encryptToken, decryptToken } from './token-cipher.js';
 import type {
   SubmitFeedbackDto,
+  SubmitDishReviewsDto,
   FeedbackQueryDto,
   ConnectGbpDto,
   SyncReviewsDto,
@@ -49,6 +50,20 @@ export interface FeedbackRow {
   comment: string | null;
   points_rewarded_paise: string;
   created_at: Date;
+}
+
+export interface DishReviewRow {
+  id: string;
+  org_id: string;
+  outlet_id: string;
+  order_id: string;
+  menu_item_id: string;
+  customer_id: string | null;
+  dish_name: string;
+  rating: number;
+  review: string | null;
+  created_at: Date;
+  updated_at: Date;
 }
 
 export interface ReviewSnapshotRow {
@@ -207,6 +222,138 @@ export class FeedbackService {
         message:
           'Thank you for your feedback! If you have a moment, please consider sharing your experience on Google as well.',
       };
+    });
+  }
+
+  // ─── Dish Reviews: Submit per-item ratings & reviews ────────────────────────
+
+  async submitDishReviews(
+    orgId: string,
+    customerId: string | null,
+    dto: SubmitDishReviewsDto,
+    options?: { scope?: CustomerAccessScope },
+  ) {
+    if (!orgId) {
+      throw domainError(ErrorCode.UNAUTHORIZED, 'Tenant context required.', 401);
+    }
+
+    return withTenantContextRaw(orgId, async (client) => {
+      // 1. Verify order exists and check scope
+      const orderRes = await client.query<{
+        id: string;
+        outlet_id: string;
+        customer_id: string | null;
+        session_id?: string | null;
+        session_customer_id?: string | null;
+      }>(
+        `SELECT o.id, o.outlet_id, o.customer_id, o.session_id,
+                ts.customer_id AS session_customer_id
+         FROM orders o
+         LEFT JOIN table_sessions ts ON ts.id = o.session_id AND ts.org_id = o.org_id
+         WHERE o.org_id = $1 AND o.id = $2`,
+        [orgId, dto.orderId],
+      );
+      const order = orderRes.rows[0];
+      if (!order) {
+        throw new NotFoundException(`Order ${dto.orderId} not found`);
+      }
+      if (options?.scope) {
+        assertCustomerAccessScope(options.scope, order);
+      }
+      const effectiveCustomerId = customerId || order.customer_id || order.session_customer_id;
+
+      // 2. Insert or update dish reviews
+      const savedReviews: DishReviewRow[] = [];
+      for (const rev of dto.reviews) {
+        const res = await client.query<DishReviewRow>(
+          `INSERT INTO dish_reviews (org_id, outlet_id, order_id, menu_item_id, customer_id, dish_name, rating, review)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+           ON CONFLICT (org_id, order_id, menu_item_id)
+           DO UPDATE SET rating = EXCLUDED.rating,
+                         review = EXCLUDED.review,
+                         updated_at = now()
+           RETURNING *`,
+          [
+            orgId,
+            order.outlet_id,
+            dto.orderId,
+            rev.menuItemId,
+            effectiveCustomerId,
+            rev.dishName,
+            rev.rating,
+            rev.review || null,
+          ],
+        );
+        if (res.rows[0]) {
+          savedReviews.push(res.rows[0]);
+        }
+      }
+
+      // 3. If overallRating is provided, record in feedback table (with reward points) if not already exists
+      let feedbackCreated = false;
+      if (dto.overallRating) {
+        const existingFb = await client.query(
+          `SELECT id FROM feedback WHERE org_id = $1 AND order_id = $2`,
+          [orgId, dto.orderId],
+        );
+        if (existingFb.rows.length === 0) {
+          let pointsRewardedPaise = 0n;
+          if (effectiveCustomerId) {
+            pointsRewardedPaise = DEFAULT_FEEDBACK_REWARD_PAISE;
+            await client.query(
+              `INSERT INTO loyalty_ledger (org_id, customer_id, entry_type, amount_paise, reason, ref_type, ref_id)
+               VALUES ($1, $2, 'EARN', $3, 'Feedback reward', 'FEEDBACK', $4)
+               ON CONFLICT (org_id, ref_type, ref_id, entry_type) DO NOTHING`,
+              [orgId, effectiveCustomerId, pointsRewardedPaise.toString(), dto.orderId],
+            );
+          }
+          await client.query(
+            `INSERT INTO feedback (org_id, outlet_id, order_id, customer_id, rating, tags, comment, points_rewarded_paise)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+            [
+              orgId,
+              order.outlet_id,
+              dto.orderId,
+              effectiveCustomerId,
+              dto.overallRating,
+              dto.tags,
+              dto.overallComment || null,
+              pointsRewardedPaise.toString(),
+            ],
+          );
+          feedbackCreated = true;
+        }
+      }
+
+      return {
+        success: true,
+        orderId: dto.orderId,
+        reviewsCount: savedReviews.length,
+        reviews: savedReviews,
+        feedbackCreated,
+      };
+    });
+  }
+
+  async getCustomerDishReviews(orgId: string, customerId: string) {
+    if (!orgId) throw domainError(ErrorCode.UNAUTHORIZED, 'Tenant context required.', 401);
+    return withTenantContextRaw(orgId, async (client) => {
+      const res = await client.query<DishReviewRow>(
+        `SELECT * FROM dish_reviews WHERE org_id = $1 AND customer_id = $2 ORDER BY created_at DESC`,
+        [orgId, customerId],
+      );
+      return res.rows;
+    });
+  }
+
+  async getOrderDishReviews(orgId: string, orderId: string) {
+    if (!orgId) throw domainError(ErrorCode.UNAUTHORIZED, 'Tenant context required.', 401);
+    return withTenantContextRaw(orgId, async (client) => {
+      const res = await client.query<DishReviewRow>(
+        `SELECT * FROM dish_reviews WHERE org_id = $1 AND order_id = $2 ORDER BY created_at ASC`,
+        [orgId, orderId],
+      );
+      return res.rows;
     });
   }
 
