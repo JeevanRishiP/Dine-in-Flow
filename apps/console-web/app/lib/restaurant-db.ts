@@ -749,7 +749,7 @@ export const BRANCH_1_ACTIVE_ORDERS: Order[] = [
     specialInstructions: 'Extra spicy, customer requested quick service if possible.',
     items: [
       {
-        id: 'oi000000-0000-0000-0000-000000000001',
+        id: 'a1000000-0000-4000-8000-000000000001',
         orderId: '10000000-0000-0000-0000-000000000001',
         itemId: 'f0000000-0000-0000-0000-000000000005',
         name: 'Old Delhi Butter Chicken',
@@ -759,7 +759,7 @@ export const BRANCH_1_ACTIVE_ORDERS: Order[] = [
         notes: 'Extra spicy',
       },
       {
-        id: 'oi000000-0000-0000-0000-000000000002',
+        id: 'a1000000-0000-4000-8000-000000000002',
         orderId: '10000000-0000-0000-0000-000000000001',
         itemId: 'f0000000-0000-0000-0000-000000000011',
         name: 'Butter Garlic Naan',
@@ -768,7 +768,7 @@ export const BRANCH_1_ACTIVE_ORDERS: Order[] = [
         status: 'CONFIRMED',
       },
       {
-        id: 'oi000000-0000-0000-0000-000000000003',
+        id: 'a1000000-0000-4000-8000-000000000003',
         orderId: '10000000-0000-0000-0000-000000000001',
         itemId: 'f0000000-0000-0000-0000-000000000016',
         name: 'Alphonso Mango Lassi',
@@ -799,7 +799,7 @@ export const BRANCH_1_ACTIVE_ORDERS: Order[] = [
     specialInstructions: 'With extra raita and mint chutney.',
     items: [
       {
-        id: 'oi000000-0000-0000-0000-000000000004',
+        id: 'a2000000-0000-4000-8000-000000000004',
         orderId: '10000000-0000-0000-0000-000000000002',
         itemId: 'f0000000-0000-0000-0000-000000000009',
         name: 'Dum Biryani Hyderabadi',
@@ -809,7 +809,7 @@ export const BRANCH_1_ACTIVE_ORDERS: Order[] = [
         notes: 'With extra raita',
       },
       {
-        id: 'oi000000-0000-0000-0000-000000000005',
+        id: 'a2000000-0000-4000-8000-000000000005',
         orderId: '10000000-0000-0000-0000-000000000002',
         itemId: 'f0000000-0000-0000-0000-000000000002',
         name: 'Mutton Galouti Kebab',
@@ -819,7 +819,7 @@ export const BRANCH_1_ACTIVE_ORDERS: Order[] = [
         notes: 'Lunch special promotion',
       },
       {
-        id: 'oi000000-0000-0000-0000-000000000006',
+        id: 'a2000000-0000-4000-8000-000000000006',
         orderId: '10000000-0000-0000-0000-000000000002',
         itemId: 'f0000000-0000-0000-0000-000000000017',
         name: 'Fresh Lime Soda',
@@ -849,7 +849,7 @@ export const BRANCH_1_ACTIVE_ORDERS: Order[] = [
     specialInstructions: 'Cooking in progress. Table requested timely delivery.',
     items: [
       {
-        id: 'oi000000-0000-0000-0000-000000000007',
+        id: 'a3000000-0000-4000-8000-000000000007',
         orderId: '10000000-0000-0000-0000-000000000003',
         itemId: 'f0000000-0000-0000-0000-000000000006',
         name: 'Dal Makhani Bukhara',
@@ -858,7 +858,7 @@ export const BRANCH_1_ACTIVE_ORDERS: Order[] = [
         status: 'PREPARING',
       },
       {
-        id: 'oi000000-0000-0000-0000-000000000008',
+        id: 'a3000000-0000-4000-8000-000000000008',
         orderId: '10000000-0000-0000-0000-000000000003',
         itemId: 'f0000000-0000-0000-0000-000000000001',
         name: 'Paneer Tikka Charcoal Char',
