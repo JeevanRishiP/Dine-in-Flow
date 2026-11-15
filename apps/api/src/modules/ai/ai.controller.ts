@@ -51,6 +51,9 @@ export class CustomerAiController {
     if (raw['sessionId'] || raw['session_id']) {
       normalized['sessionId'] = raw['sessionId'] || raw['session_id'];
     }
+    if (Array.isArray(raw['wishlistDishNames'])) {
+      normalized['wishlistDishNames'] = raw['wishlistDishNames'];
+    }
     const dto = AiChatSchema.parse(normalized);
     const customerId = user.type === 'customer_access' ? user.sub : (user.customerId ?? null);
     return this.aiService.chat(dto, customerId);
