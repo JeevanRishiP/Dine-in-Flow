@@ -11,6 +11,7 @@ export const AiChatSchema = z
       .min(1, 'Message cannot be empty')
       .max(500, 'Message cannot exceed 500 characters')
       .transform((val) => val.trim()),
+    wishlistDishNames: z.array(z.string().max(255)).max(50).optional(),
   })
   .strict();
 
