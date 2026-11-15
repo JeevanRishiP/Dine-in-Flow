@@ -311,9 +311,17 @@ export default function StaffWebApp() {
         const liveOrders: Order[] = (Array.isArray(data) ? data : []).map((d: any) => {
           const frontendStatus: Order['status'] =
             d.status === 'PENDING' ? 'PENDING_APPROVAL' : (d.status as Order['status']);
+          const isKnownMock =
+            d.id === '10000000-0000-0000-0000-000000000001'
+              ? 'RS-1001'
+              : d.id === '10000000-0000-0000-0000-000000000002'
+              ? 'RS-1002'
+              : d.id === '10000000-0000-0000-0000-000000000003'
+              ? 'RS-1003'
+              : null;
           return {
             id: d.id,
-            displayId: 'ORD-#' + d.id.slice(-4).toUpperCase(),
+            displayId: isKnownMock || ('ORD-#' + d.id.slice(-4).toUpperCase()),
             outletId: d.outlet_id || selectedOutletId,
             tableNumber: d.table_number || 'T04',
             sessionId: d.session_id,
@@ -351,10 +359,8 @@ export default function StaffWebApp() {
           };
         });
 
-        const combined = [
-          ...liveOrders,
-          ...defaultActive.filter((bo) => !liveOrders.some((lo) => lo.id === bo.id)),
-        ];
+        // When database returns live orders (even if empty list), use them directly to prevent zombie mock orders
+        const combined = Array.isArray(data) ? liveOrders : defaultActive;
 
         const ordersWithOverrides = combined.map((o) => {
           const itemOverrides = localItemStatusOverrides.current[o.id];
@@ -384,7 +390,6 @@ export default function StaffWebApp() {
   // Sync state whenever outlet switches & poll live orders feed every 3 seconds
   useEffect(() => {
     const data = getBranchData(selectedOutletId);
-    setOrders(data.activeOrders);
     setTables(data.tables);
     setSessions(data.sessions);
     setStock(data.menuItems);
@@ -633,7 +638,7 @@ export default function StaffWebApp() {
           reason: customReason || (nextStatus === 'CANCELLED' ? 'Order cancelled' : undefined),
         }),
       });
-      if (res.ok) {
+      if (res.ok || (res.status === 400 && nextStatus === 'SERVED')) {
         delete localStatusOverrides.current[orderId];
         delete localItemStatusOverrides.current[orderId];
         fetchLiveOrders();
@@ -684,7 +689,7 @@ export default function StaffWebApp() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: nextStatus }),
       });
-      if (res.ok) {
+      if (res.ok || (res.status === 400 && nextStatus === 'SERVED')) {
         if (localItemStatusOverrides.current[orderId]) {
           delete localItemStatusOverrides.current[orderId]![itemId];
           if (Object.keys(localItemStatusOverrides.current[orderId]!).length === 0) {
@@ -709,6 +714,26 @@ export default function StaffWebApp() {
     }
   };
 
+  function isDessertOrPostMealDish(name?: string, notes?: string | null): boolean {
+    const str = `${name || ''} ${notes || ''}`.toLowerCase();
+    return (
+      str.includes('ice cream') ||
+      str.includes('kulfi') ||
+      str.includes('gulab jamun') ||
+      str.includes('halwa') ||
+      str.includes('dessert') ||
+      str.includes('sweet') ||
+      str.includes('rasgulla') ||
+      str.includes('filter coffee') ||
+      str.includes('masala chai') ||
+      str.includes('coffee') ||
+      str.includes('tea') ||
+      str.includes('warm gulab jamun') ||
+      str.includes('serve later') ||
+      str.includes('[serve_later]')
+    );
+  }
+
   // Shared per-item row renderer: puts the proceed button directly next to each item name
   const renderKdsOrderItems = (order: Order, qtyColor = 'var(--accent-cyan)') => (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '12px' }}>
@@ -717,6 +742,9 @@ export default function StaffWebApp() {
         const isPreparing = item.status === 'PREPARING';
         const isReady = item.status === 'READY';
         const isServed = item.status === 'SERVED';
+        const isPostMeal = isDessertOrPostMealDish(item.name, item.notes);
+        const isReleased = Boolean(item.notes && item.notes.includes('[RELEASED_TO_KITCHEN]'));
+        const isOnHold = isPostMeal && !isReleased && (isPendingOrConfirmed || isPreparing);
 
         return (
           <div
@@ -762,6 +790,49 @@ export default function StaffWebApp() {
               {item.notes && (
                 <div style={{ fontSize: '0.74rem', color: 'var(--accent-amber)', marginTop: '2px' }}>
                   ↳ Note: {item.notes}
+                </div>
+              )}
+              {isOnHold && (
+                <div style={{ marginTop: '4px' }}>
+                  <span
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '4px',
+                      padding: '2px 8px',
+                      borderRadius: '4px',
+                      background: 'rgba(168, 85, 247, 0.2)',
+                      border: '1px solid rgba(168, 85, 247, 0.45)',
+                      color: '#c084fc',
+                      fontSize: '0.72rem',
+                      fontWeight: 800,
+                    }}
+                  >
+                    <span>⏳</span>
+                    <span>ON HOLD · Serve Later (Guest will signal)</span>
+                  </span>
+                </div>
+              )}
+              {isReleased && (
+                <div style={{ marginTop: '4px' }}>
+                  <span
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '4px',
+                      padding: '2px 8px',
+                      borderRadius: '4px',
+                      background: 'rgba(245, 158, 11, 0.25)',
+                      border: '1px solid rgba(245, 158, 11, 0.5)',
+                      color: '#fbbf24',
+                      fontSize: '0.72rem',
+                      fontWeight: 800,
+                    }}
+                    className="pulse-glow"
+                  >
+                    <span>🔥</span>
+                    <span>GUEST SIGNALLED · PREPARE NOW!</span>
+                  </span>
                 </div>
               )}
               <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '3px' }}>
@@ -913,9 +984,12 @@ export default function StaffWebApp() {
     setCalls((prev) => prev.filter((c) => c.id !== callId));
   };
 
-  // Unread badge counts
+  // Unread badge counts: count dishes ready on the food pass waiting for pickup/delivery
   const pendingOrdersCount = orders.filter((o) => o.status === 'CONFIRMED' || o.status === 'PENDING_APPROVAL').length;
-  const readyOrdersCount = orders.filter((o) => o.status === 'READY').length;
+  const readyItemsCount = orders.reduce((sum, o) => sum + o.items.filter((it) => it.status === 'READY').length, 0);
+  const passOrders = orders.filter((o) => o.items.some((it) => it.status === 'READY') || o.status === 'READY');
+  const passOrdersCount = passOrders.length;
+  const readyOrdersCount = readyItemsCount;
   const pendingCallsCount = calls.filter((c) => c.status === 'PENDING').length;
 
   return (
@@ -1505,13 +1579,13 @@ export default function StaffWebApp() {
                       <span style={{ fontWeight: 800, fontSize: '0.95rem' }}>PREPARING IN KITCHEN</span>
                     </div>
                     <span className="status-chip chip-amber">
-                      {orders.filter((o) => o.status === 'PREPARING' || o.items.some((it) => it.status === 'PREPARING')).length}
+                      {orders.filter((o) => o.items.some((it) => !it.status || it.status === 'PREPARING' || it.status === 'PENDING' || it.status === 'CONFIRMED')).length}
                     </span>
                   </div>
 
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
                     {orders
-                      .filter((o) => o.status === 'PREPARING' || o.items.some((it) => it.status === 'PREPARING'))
+                      .filter((o) => o.items.some((it) => !it.status || it.status === 'PREPARING' || it.status === 'PENDING' || it.status === 'CONFIRMED'))
                       .map((order) => (
                         <div
                           key={order.id}
@@ -1569,113 +1643,131 @@ export default function StaffWebApp() {
                       <span style={{ fontWeight: 800, fontSize: '0.95rem' }}>READY ON PASS</span>
                     </div>
                     <span className="status-chip chip-green">
-                      {orders.filter((o) => o.status === 'READY').length}
+                      {readyItemsCount}
                     </span>
                   </div>
 
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
                     {orders
-                      .filter((o) => o.status === 'READY')
-                      .map((order) => (
-                        <div
-                          key={order.id}
-                          className="kds-order-ticket pulse-glow"
-                          style={{ borderLeft: '4px solid #10b981' }}
-                        >
-                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', flexWrap: 'wrap', marginBottom: '10px' }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                              <span
+                      .filter((o) => o.items.some((it) => it.status === 'READY') || o.status === 'READY')
+                      .map((order) => {
+                        const readyItems = order.items.filter((it) => it.status === 'READY');
+                        const cookingItems = order.items.filter((it) => !it.status || it.status === 'PREPARING' || it.status === 'PENDING' || it.status === 'CONFIRMED');
+
+                        return (
+                          <div
+                            key={order.id}
+                            className="kds-order-ticket pulse-glow"
+                            style={{ borderLeft: '4px solid #10b981' }}
+                          >
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', flexWrap: 'wrap', marginBottom: '10px' }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                <span
+                                  style={{
+                                    background: '#10b981',
+                                    color: '#000',
+                                    fontWeight: 900,
+                                    fontSize: '0.9rem',
+                                    padding: '2px 8px',
+                                    borderRadius: '6px',
+                                  }}
+                                >
+                                  {order.tableNumber}
+                                </span>
+                                <span style={{ fontWeight: 700, fontSize: '0.85rem' }}>{order.displayId}</span>
+                              </div>
+                              <div style={{ textAlign: 'right' }}>
+                                <div style={{ fontSize: '0.73rem', color: '#10b981', fontWeight: 800 }}>
+                                  ✓ {readyItems.length} PLATED ON PASS
+                                </div>
+                                <div style={{ fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
+                                  🕒 {order.createdAt}
+                                </div>
+                              </div>
+                            </div>
+
+                            {renderKdsOrderItems(order, '#10b981')}
+
+                            {/* Info if other items are still cooking in the kitchen */}
+                            {cookingItems.length > 0 && (
+                              <div
                                 style={{
-                                  background: '#10b981',
-                                  color: '#000',
-                                  fontWeight: 900,
-                                  fontSize: '0.9rem',
-                                  padding: '2px 8px',
+                                  padding: '6px 10px',
+                                  background: 'rgba(245, 158, 11, 0.1)',
+                                  border: '1px solid rgba(245, 158, 11, 0.25)',
                                   borderRadius: '6px',
+                                  color: 'var(--accent-amber)',
+                                  fontSize: '0.74rem',
+                                  fontWeight: 700,
+                                  marginBottom: '8px',
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  gap: '6px',
                                 }}
                               >
-                                {order.tableNumber}
-                              </span>
-                              <span style={{ fontWeight: 700, fontSize: '0.85rem' }}>{order.displayId}</span>
-                            </div>
-                            <div style={{ textAlign: 'right' }}>
-                              <div style={{ fontSize: '0.73rem', color: '#10b981', fontWeight: 800 }}>
-                                ✓ PLATED &amp; HOT
+                                <span>⏳</span>
+                                <span>{cookingItems.length} other dish{cookingItems.length === 1 ? '' : 'es'} still cooking in kitchen</span>
                               </div>
-                              <div style={{ fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
-                                🕒 {order.createdAt}
+                            )}
+
+                            {/* Role footer: Kitchen waits for runner; floor roles can bulk-serve or settle */}
+                            {currentUser?.role === 'KITCHEN' ? (
+                              <div
+                                style={{
+                                  width: '100%',
+                                  padding: '10px 12px',
+                                  background: 'rgba(16, 185, 129, 0.15)',
+                                  border: '1px solid rgba(16, 185, 129, 0.3)',
+                                  borderRadius: 'var(--radius-sm)',
+                                  color: '#10b981',
+                                  fontSize: '0.82rem',
+                                  fontWeight: 700,
+                                  textAlign: 'center',
+                                }}
+                              >
+                                ✓ Plated on Pass · Waiting for Runner
                               </div>
-                            </div>
-                          </div>
-
-                          {renderKdsOrderItems(order, '#10b981')}
-
-                          {/* Role footer: Kitchen waits for runner; floor roles can bulk-serve or settle */}
-                          {currentUser?.role === 'KITCHEN' ? (
-                            <div
-                              style={{
-                                width: '100%',
-                                padding: '10px 12px',
-                                background: 'rgba(16, 185, 129, 0.15)',
-                                border: '1px solid rgba(16, 185, 129, 0.3)',
-                                borderRadius: 'var(--radius-sm)',
-                                color: '#10b981',
-                                fontSize: '0.82rem',
-                                fontWeight: 700,
-                                textAlign: 'center',
-                              }}
-                            >
-                              ✓ Plated on Pass · Waiting for Runner
-                            </div>
-                          ) : (
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                              {order.items.filter((it) => it.status === 'READY').length === 0 && (
-                                <div style={{ display: 'flex', gap: '8px' }}>
+                            ) : (
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                                {readyItems.length > 0 && (
                                   <button
-                                    onClick={() => transitionOrder(order.id, 'SERVED')}
+                                    onClick={async () => {
+                                      for (const it of readyItems) {
+                                        void transitionItem(order.id, it.id, 'SERVED');
+                                      }
+                                      if (order.status === 'READY') {
+                                        void transitionOrder(order.id, 'SERVED');
+                                      }
+                                    }}
                                     className="btn-success"
-                                    style={{ flex: 1, padding: '9px 12px', fontSize: '0.82rem' }}
+                                    style={{ width: '100%', padding: '9px 12px', fontSize: '0.82rem', fontWeight: 800 }}
                                   >
-                                    🏃 All Delivered & Served
+                                    🏃 Deliver {readyItems.length} Ready Dish{readyItems.length === 1 ? '' : 'es'} to Table
                                   </button>
+                                )}
+                                <div style={{ display: 'flex', gap: '8px' }}>
                                   <button
                                     onClick={() => { setCollectPaymentOrder(order); }}
                                     style={{
+                                      flex: 1,
                                       background: 'rgba(6, 182, 212, 0.15)',
                                       color: 'var(--accent-cyan)',
                                       border: '1px solid rgba(6, 182, 212, 0.4)',
                                       borderRadius: 'var(--radius-sm)',
-                                      padding: '9px 12px',
-                                      fontSize: '0.82rem',
+                                      padding: '8px 12px',
+                                      fontSize: '0.78rem',
                                       fontWeight: 700,
+                                      cursor: 'pointer',
                                     }}
                                   >
-                                    💳 Settle
+                                    💳 Settle ({formatPaise(order.totalPaise)})
                                   </button>
                                 </div>
-                              )}
-                              {order.items.filter((it) => it.status === 'READY').length > 0 && (
-                                <button
-                                  onClick={() => { setCollectPaymentOrder(order); }}
-                                  style={{
-                                    background: 'rgba(6, 182, 212, 0.1)',
-                                    color: 'var(--accent-cyan)',
-                                    border: '1px solid rgba(6, 182, 212, 0.3)',
-                                    borderRadius: 'var(--radius-sm)',
-                                    padding: '7px 12px',
-                                    fontSize: '0.78rem',
-                                    fontWeight: 700,
-                                    width: '100%',
-                                    cursor: 'pointer',
-                                  }}
-                                >
-                                  💳 Collect Payment
-                                </button>
-                              )}
-                            </div>
-                          )}
-                        </div>
-                      ))}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
                   </div>
                 </div>
               </div>
@@ -1705,26 +1797,55 @@ export default function StaffWebApp() {
                 </p>
               </div>
 
-              <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+              <div style={{ display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
                 <span
                   style={{
-                    background: readyOrdersCount > 0 ? 'rgba(16, 185, 129, 0.2)' : 'rgba(255, 255, 255, 0.05)',
-                    color: readyOrdersCount > 0 ? '#10b981' : 'var(--text-muted)',
-                    border: `1px solid ${readyOrdersCount > 0 ? 'rgba(16, 185, 129, 0.4)' : 'var(--border-light)'}`,
+                    background: readyItemsCount > 0 ? 'rgba(16, 185, 129, 0.2)' : 'rgba(255, 255, 255, 0.05)',
+                    color: readyItemsCount > 0 ? '#10b981' : 'var(--text-muted)',
+                    border: `1px solid ${readyItemsCount > 0 ? 'rgba(16, 185, 129, 0.4)' : 'var(--border-light)'}`,
                     padding: '6px 14px',
                     borderRadius: '999px',
                     fontSize: '0.82rem',
                     fontWeight: 800,
                   }}
-                  className={readyOrdersCount > 0 ? 'pulse-glow' : ''}
+                  className={readyItemsCount > 0 ? 'pulse-glow' : ''}
                 >
-                  ⚡ {readyOrdersCount} Ticket{readyOrdersCount === 1 ? '' : 's'} Waiting on Pass
+                  ⚡ {readyItemsCount} Dish{readyItemsCount === 1 ? '' : 'es'} Waiting on Pass ({passOrdersCount} Table{passOrdersCount === 1 ? '' : 's'})
                 </span>
+                {readyItemsCount > 0 && (
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      const passList = orders.filter((o) => o.items.some((it) => it.status === 'READY') || o.status === 'READY');
+                      for (const ro of passList) {
+                        const readyItems = ro.items.filter((it) => it.status === 'READY');
+                        for (const it of readyItems) {
+                          void transitionItem(ro.id, it.id, 'SERVED');
+                        }
+                        if (ro.status === 'READY') {
+                          void transitionOrder(ro.id, 'SERVED');
+                        }
+                      }
+                    }}
+                    style={{
+                      background: 'rgba(16, 185, 129, 0.15)',
+                      border: '1px solid rgba(16, 185, 129, 0.35)',
+                      color: '#34d399',
+                      padding: '6px 12px',
+                      borderRadius: '8px',
+                      fontSize: '0.8rem',
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    ✓ Mark All Delivered
+                  </button>
+                )}
               </div>
             </div>
 
             {/* Ready Tickets Grid */}
-            {readyOrdersCount === 0 ? (
+            {readyItemsCount === 0 ? (
               <div
                 style={{
                   background: 'var(--bg-card)',
@@ -1741,7 +1862,7 @@ export default function StaffWebApp() {
                   Food Pass is Clear
                 </h3>
                 <p style={{ color: 'var(--text-secondary)', fontSize: '0.86rem' }}>
-                  All prepared dishes have been delivered to guests. As soon as the kitchen marks an order &quot;Ready for Pickup&quot;, it will appear right here with destination table details.
+                  All prepared dishes have been delivered to guests. As soon as the kitchen marks any dish &quot;Plated &amp; Ready&quot;, it will appear right here with destination table details for immediate pickup.
                 </p>
               </div>
             ) : (
@@ -1754,89 +1875,126 @@ export default function StaffWebApp() {
                 }}
               >
                 {orders
-                  .filter((o) => o.status === 'READY')
-                  .map((order) => (
-                    <div
-                      key={order.id}
-                      className="kds-order-ticket pulse-glow"
-                      style={{
-                        borderLeft: '5px solid #10b981',
-                        background: 'rgba(15, 23, 42, 0.85)',
-                        boxShadow: '0 8px 24px rgba(16, 185, 129, 0.15)',
-                      }}
-                    >
-                      {/* Ticket Header */}
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', flexWrap: 'wrap', marginBottom: '12px' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                          <span
+                  .filter((o) => o.items.some((it) => it.status === 'READY') || o.status === 'READY')
+                  .map((order) => {
+                    const readyItems = order.items.filter((it) => it.status === 'READY');
+                    const cookingItems = order.items.filter(
+                      (it) => !it.status || it.status === 'PREPARING' || it.status === 'PENDING' || it.status === 'CONFIRMED'
+                    );
+
+                    return (
+                      <div
+                        key={order.id}
+                        className="kds-order-ticket pulse-glow"
+                        style={{
+                          borderLeft: '5px solid #10b981',
+                          background: 'rgba(15, 23, 42, 0.85)',
+                          boxShadow: '0 8px 24px rgba(16, 185, 129, 0.15)',
+                        }}
+                      >
+                        {/* Ticket Header */}
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', flexWrap: 'wrap', marginBottom: '12px' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <span
+                              style={{
+                                background: '#10b981',
+                                color: '#000',
+                                fontWeight: 900,
+                                fontSize: '1rem',
+                                padding: '3px 10px',
+                                borderRadius: '6px',
+                              }}
+                            >
+                              Table {order.tableNumber}
+                            </span>
+                            <span style={{ fontWeight: 800, fontSize: '0.9rem' }}>{order.displayId}</span>
+                          </div>
+                          <div style={{ textAlign: 'right' }}>
+                            <div style={{ fontSize: '0.76rem', color: '#10b981', fontWeight: 800 }}>
+                              🔥 {readyItems.length} PLATED ON PASS
+                            </div>
+                            <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                              🕒 {order.createdAt}
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Items to Deliver with inline Served buttons */}
+                        {renderKdsOrderItems(order, '#10b981')}
+
+                        {/* Expediter status if other dishes still cooking */}
+                        {cookingItems.length > 0 && (
+                          <div
                             style={{
-                              background: '#10b981',
-                              color: '#000',
-                              fontWeight: 900,
-                              fontSize: '1rem',
-                              padding: '3px 10px',
+                              padding: '8px 12px',
+                              background: 'rgba(245, 158, 11, 0.12)',
+                              border: '1px solid rgba(245, 158, 11, 0.3)',
                               borderRadius: '6px',
+                              color: '#fbbf24',
+                              fontSize: '0.78rem',
+                              fontWeight: 700,
+                              marginBottom: '12px',
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: '8px',
                             }}
                           >
-                            Table {order.tableNumber}
-                          </span>
-                          <span style={{ fontWeight: 800, fontSize: '0.9rem' }}>{order.displayId}</span>
-                        </div>
-                        <div style={{ textAlign: 'right' }}>
-                          <div style={{ fontSize: '0.76rem', color: '#10b981', fontWeight: 800 }}>
-                            🔥 PLATED &amp; HOT
+                            <span>⏳</span>
+                            <span>Kitchen still preparing {cookingItems.length} dish{cookingItems.length === 1 ? '' : 'es'}: {cookingItems.map((c) => `${c.quantity}× ${c.name}`).join(', ')}</span>
                           </div>
-                          <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
-                            🕒 {order.createdAt}
+                        )}
+
+                        {/* Special instructions */}
+                        {order.specialInstructions && (
+                          <div
+                            style={{
+                              fontSize: '0.76rem',
+                              background: 'rgba(255, 255, 255, 0.04)',
+                              padding: '6px 8px',
+                              borderRadius: '4px',
+                              marginBottom: '14px',
+                              color: 'var(--text-secondary)',
+                            }}
+                          >
+                            💬 &quot;{order.specialInstructions}&quot;
                           </div>
-                        </div>
+                        )}
+
+                        {/* Bulk action: deliver ready dishes to table */}
+                        {readyItems.length > 0 && (
+                          <button
+                            onClick={async () => {
+                              for (const it of readyItems) {
+                                void transitionItem(order.id, it.id, 'SERVED');
+                              }
+                              if (order.status === 'READY') {
+                                void transitionOrder(order.id, 'SERVED');
+                              }
+                            }}
+                            style={{
+                              width: '100%',
+                              background: 'linear-gradient(135deg, #10b981, #059669)',
+                              color: '#fff',
+                              padding: '12px',
+                              borderRadius: 'var(--radius-sm)',
+                              fontWeight: 900,
+                              fontSize: '0.92rem',
+                              border: 'none',
+                              cursor: 'pointer',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              gap: '8px',
+                              boxShadow: '0 4px 14px rgba(16, 185, 129, 0.3)',
+                            }}
+                          >
+                            <span>🏃</span>
+                            <span>Deliver {readyItems.length} Ready Dish{readyItems.length === 1 ? '' : 'es'} to Table {order.tableNumber}</span>
+                          </button>
+                        )}
                       </div>
-
-                      {/* Items to Deliver with inline Served buttons */}
-                      {renderKdsOrderItems(order, '#10b981')}
-
-                      {/* Special instructions */}
-                      {order.specialInstructions && (
-                        <div
-                          style={{
-                            fontSize: '0.76rem',
-                            background: 'rgba(255, 255, 255, 0.04)',
-                            padding: '6px 8px',
-                            borderRadius: '4px',
-                            marginBottom: '14px',
-                            color: 'var(--text-secondary)',
-                          }}
-                        >
-                          💬 &quot;{order.specialInstructions}&quot;
-                        </div>
-                      )}
-
-                      {/* Bulk fallback if order is READY with no individual READY items */}
-                      {order.items.filter((it) => it.status === 'READY').length === 0 && (
-                        <button
-                          onClick={() => transitionOrder(order.id, 'SERVED')}
-                          style={{
-                            width: '100%',
-                            background: 'linear-gradient(135deg, #10b981, #059669)',
-                            color: '#fff',
-                            padding: '12px',
-                            borderRadius: 'var(--radius-sm)',
-                            fontWeight: 900,
-                            fontSize: '0.92rem',
-                            border: 'none',
-                            cursor: 'pointer',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            gap: '8px',
-                            boxShadow: '0 4px 14px rgba(16, 185, 129, 0.3)',
-                          }}
-                        >
-                          🏃 All Delivered & Served to Table {order.tableNumber}
-                        </button>
-                      )}
-                    </div>
-                  ))}
+                    );
+                  })}
               </div>
             )}
 
@@ -2838,17 +2996,40 @@ export default function StaffWebApp() {
                           <span style={{ fontSize: '0.74rem', color: 'var(--text-secondary)' }}>🕒 {activeOrder.createdAt}</span>
                         </div>
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', fontSize: '0.85rem' }}>
-                          {activeOrder.items.map((i) => (
-                            <div key={i.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' }}>
-                              <div>
-                                <span>{i.quantity}× {i.name}</span>
-                                <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
-                                  🕒 {i.createdAt || activeOrder.createdAt}
+                          {activeOrder.items.map((i) => {
+                            const isReady = i.status === 'READY';
+                            const isServed = i.status === 'SERVED';
+                            const isCooking = !i.status || i.status === 'PREPARING' || i.status === 'PENDING';
+
+                            return (
+                              <div key={i.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', padding: '6px 0', borderBottom: '1px dashed rgba(255,255,255,0.06)' }}>
+                                <div style={{ flex: 1, minWidth: 0 }}>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+                                    <span style={{ fontWeight: 700 }}>{i.quantity}× {i.name}</span>
+                                    {isReady && <span style={{ fontSize: '0.68rem', padding: '1px 5px', borderRadius: '4px', background: 'rgba(16, 185, 129, 0.2)', color: '#10b981', fontWeight: 800 }}>ON PASS</span>}
+                                    {isServed && <span style={{ fontSize: '0.68rem', padding: '1px 5px', borderRadius: '4px', background: 'rgba(255, 255, 255, 0.08)', color: 'var(--text-muted)' }}>SERVED</span>}
+                                    {isCooking && <span style={{ fontSize: '0.68rem', padding: '1px 5px', borderRadius: '4px', background: 'rgba(245, 158, 11, 0.2)', color: '#fbbf24' }}>COOKING</span>}
+                                  </div>
+                                  <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+                                    🕒 {i.createdAt || activeOrder.createdAt}
+                                  </div>
+                                </div>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
+                                  <span>{formatPaise(i.pricePaise * i.quantity)}</span>
+                                  {isReady && (
+                                    <button
+                                      type="button"
+                                      onClick={() => void transitionItem(activeOrder.id, i.id, 'SERVED')}
+                                      className="btn-success"
+                                      style={{ padding: '4px 8px', fontSize: '0.72rem', fontWeight: 800, whiteSpace: 'nowrap' }}
+                                    >
+                                      🏃 Served ✓
+                                    </button>
+                                  )}
                                 </div>
                               </div>
-                              <span>{formatPaise(i.pricePaise * i.quantity)}</span>
-                            </div>
-                          ))}
+                            );
+                          })}
                           <div style={{ borderTop: '1px solid var(--border-light)', paddingTop: '6px', display: 'flex', justifyContent: 'space-between', fontWeight: 800 }}>
                             <span>Total Bill:</span>
                             <span style={{ color: 'var(--accent-cyan)' }}>{formatPaise(activeOrder.totalPaise)}</span>
@@ -2857,11 +3038,16 @@ export default function StaffWebApp() {
                       </div>
                     )}
 
-                    {activeOrder?.status === 'READY' && (
+                    {activeOrder && (activeOrder.status === 'READY' || activeOrder.items.some((it) => it.status === 'READY')) && (
                       <button
-                        onClick={() => {
-                          transitionOrder(activeOrder.id, 'SERVED');
-                          setSelectedTable(null);
+                        onClick={async () => {
+                          const readyItems = activeOrder.items.filter((it) => it.status === 'READY');
+                          for (const it of readyItems) {
+                            void transitionItem(activeOrder.id, it.id, 'SERVED');
+                          }
+                          if (activeOrder.status === 'READY') {
+                            void transitionOrder(activeOrder.id, 'SERVED');
+                          }
                         }}
                         style={{
                           width: '100%',
@@ -2881,7 +3067,7 @@ export default function StaffWebApp() {
                           boxShadow: '0 4px 12px rgba(16, 185, 129, 0.25)',
                         }}
                       >
-                        🏃 Delivered &amp; Served to Table {selectedTable.number}
+                        🏃 Mark Ready Dishes Delivered to Table {selectedTable.number}
                       </button>
                     )}
 
