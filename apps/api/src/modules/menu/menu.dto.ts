@@ -14,6 +14,7 @@ export const CreateCategorySchema = z.object({
   name_i18n: I18nField.optional(),
   outlet_id: z.string().uuid().optional(),
   sort_order: z.number().int().min(0).default(0),
+  is_active: z.boolean().optional(),
 }).strict();
 
 export const UpdateCategorySchema = CreateCategorySchema.partial().strict();
@@ -61,7 +62,7 @@ export const CreateMenuItemSchema = z.object({
 export const UpdateMenuItemSchema = CreateMenuItemSchema.partial().strict();
 
 export const UploadMenuPhotoSchema = z.object({
-  data_url: z.string().trim().min(20).max(1_400_000),
+  data_url: z.string().trim().min(20).max(10_000_000),
 }).strict();
 
 export const StockUpdateSchema = z.object({
