@@ -1,5 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
-import type { AiProvider, ChatMessage, RetrievedMenuItem, AiChatResponse } from './ai.provider.js';
+import type { AiProvider, ChatMessage, RetrievedMenuItem, AiChatResponse, CustomerAiHistory } from './ai.provider.js';
 import { buildSystemPrompt, applyGuardrails, MANDATORY_ALLERGEN_DISCLAIMER } from './ai-guardrails.js';
 
 interface GeminiEmbedResponse {
@@ -92,7 +92,11 @@ export class GeminiAdapter implements AiProvider {
   /**
    * Generates a menu recommendation or response strictly grounded in context items.
    */
-  async chat(messages: ChatMessage[], contextItems: RetrievedMenuItem[]): Promise<AiChatResponse> {
+  async chat(
+    messages: ChatMessage[],
+    contextItems: RetrievedMenuItem[],
+    customerContext?: CustomerAiHistory,
+  ): Promise<AiChatResponse> {
     if (!this.apiKey) {
       return {
         answer: `I am currently in offline mode. For assistance with our menu, ${MANDATORY_ALLERGEN_DISCLAIMER}`,
@@ -101,7 +105,7 @@ export class GeminiAdapter implements AiProvider {
       };
     }
 
-    const systemPrompt = buildSystemPrompt(contextItems);
+    const systemPrompt = buildSystemPrompt(contextItems, customerContext);
     const lastUserMessage = messages.filter((m) => m.role === 'user').pop();
     const query = lastUserMessage?.content || '';
 
