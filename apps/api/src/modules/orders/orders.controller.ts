@@ -74,7 +74,7 @@ export class ConsoleOrdersController {
 
   /** KDS: Update an individual item's status (PREPARING / READY / SERVED). */
   @Patch(':id/items/:itemId/status')
-  @Require(Permission.KITCHEN_UPDATE)
+  @Require(Permission.ORDER_UPDATE_STATUS)
   updateItemStatus(
     @CurrentUser() user: StaffJwtPayload,
     @Param('id') orderId: string,
@@ -152,6 +152,23 @@ export class CustomerOrdersController {
       orderId,
       itemId,
       dto,
+      user.sub,
+      toCustomerAccessScope(user),
+    );
+  }
+
+  /** Customer signals the kitchen to prepare an on-hold dish now (e.g. Filter Coffee / dessert). */
+  @Patch(':id/items/:itemId/release-hold')
+  @Require(Permission.GUEST_SESSION)
+  releaseItemHold(
+    @CurrentUser() user: GuestSessionJwtPayload | CustomerJwtPayload,
+    @Param('id') orderId: string,
+    @Param('itemId') itemId: string,
+  ) {
+    return this.ordersService.releaseItemHold(
+      user.org,
+      orderId,
+      itemId,
       user.sub,
       toCustomerAccessScope(user),
     );
