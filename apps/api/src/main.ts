@@ -12,6 +12,7 @@ import { getConfig } from './config/config.js';
 import { getRedis } from './common/redis/redis.client.js';
 
 const MAX_WEBHOOK_BYTES = 1_048_576; // 1 MiB cap for webhook raw payloads
+const MAX_BODY_BYTES = 15_728_640; // 15 MiB cap for media/food photo uploads
 const RATE_LIMIT_WINDOW_SEC = 60;
 const AUTH_RPM_LIMIT = 40;
 const GENERAL_RPM_LIMIT = 300;
@@ -53,7 +54,7 @@ async function bootstrap(): Promise<void> {
     new FastifyAdapter({
       logger: false, // We use pino directly below
       trustProxy: config.TRUST_PROXY,
-      bodyLimit: MAX_WEBHOOK_BYTES,
+      bodyLimit: MAX_BODY_BYTES,
     }),
   );
 
