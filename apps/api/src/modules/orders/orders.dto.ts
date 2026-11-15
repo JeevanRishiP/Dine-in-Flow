@@ -98,6 +98,17 @@ export const ReassignItemTableSchema = z
 
 export class ReassignItemTableDto extends createZodDto(ReassignItemTableSchema) {}
 
+// ─── Release Item Hold (Customer Serve Later -> Kitchen Now) ─────────────────
+
+export const ReleaseHoldSchema = z
+  .object({
+    plate_keys: z.array(z.string().min(1)).optional(),
+    item_id: z.string().uuid().optional(),
+  })
+  .strict();
+
+export class ReleaseHoldDto extends createZodDto(ReleaseHoldSchema) {}
+
 // ─── Query ────────────────────────────────────────────────────────────────────
 
 export const OrderQuerySchema = z.object({
