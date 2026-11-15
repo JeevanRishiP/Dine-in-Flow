@@ -29,6 +29,25 @@ export interface ProposedCartItem {
   notes?: string;
 }
 
+export interface CustomerAiHistory {
+  isLoggedIn: boolean;
+  wishlistDishes?: string[];
+  pastOrders?: Array<{
+    date: string;
+    items: Array<{ name: string; quantity: number; notes?: string | null }>;
+  }>;
+  likedDishes?: Array<{
+    dishName: string;
+    rating: number;
+    review?: string | null;
+  }>;
+  overallFeedback?: Array<{
+    rating: number;
+    tags: string[];
+    comment?: string | null;
+  }>;
+}
+
 export interface AiChatResponse {
   answer: string;
   proposedCartItems?: ProposedCartItem[];
@@ -46,5 +65,9 @@ export interface AiProvider {
   /**
    * Generates conversational grounded response based strictly on context menu items.
    */
-  chat(messages: ChatMessage[], contextItems: RetrievedMenuItem[]): Promise<AiChatResponse>;
+  chat(
+    messages: ChatMessage[],
+    contextItems: RetrievedMenuItem[],
+    customerContext?: CustomerAiHistory,
+  ): Promise<AiChatResponse>;
 }
