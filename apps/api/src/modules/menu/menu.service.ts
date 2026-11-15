@@ -82,13 +82,39 @@ export class MenuService {
          SET name = COALESCE($2, name),
              name_i18n = COALESCE($3::jsonb, name_i18n),
              sort_order = COALESCE($4, sort_order),
+             is_active = COALESCE($5, is_active),
              updated_at = now()
          WHERE id = $1
          RETURNING id`,
-        [id, dto.name ?? null, dto.name_i18n ? JSON.stringify(dto.name_i18n) : null, dto.sort_order ?? null],
+        [
+          id,
+          dto.name ?? null,
+          dto.name_i18n ? JSON.stringify(dto.name_i18n) : null,
+          dto.sort_order ?? null,
+          dto.is_active ?? null,
+        ],
       );
       await this._bumpMenuVersion(client, orgId, existing['outlet_id'] as string | undefined);
       await this._auditLog(client, orgId, actorId, 'menu_categories', id, 'UPDATE', existing, dto);
+      return rows[0] as { id: string };
+    });
+  }
+
+  async deleteCategory(orgId: string, id: string, actorId: string) {
+    return withTenantContext(orgId, async (db) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const client = (db as any).session?.client ?? (db as any);
+      const existing = await this._findCategory(client, id);
+      // Soft-delete category by setting is_active = false
+      const { rows } = await client.query(
+        `UPDATE menu_categories
+         SET is_active = false, updated_at = now()
+         WHERE id = $1
+         RETURNING id`,
+        [id],
+      );
+      await this._bumpMenuVersion(client, orgId, existing['outlet_id'] as string | undefined);
+      await this._auditLog(client, orgId, actorId, 'menu_categories', id, 'DELETE', existing, { is_active: false });
       return rows[0] as { id: string };
     });
   }
@@ -504,19 +530,44 @@ export class MenuService {
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private async _bumpMenuVersion(client: any, orgId: string, outletId: string | undefined) {
-    await client.query(
-      `INSERT INTO menu_versions (org_id, outlet_id, version, updated_at)
-       VALUES ($1, $2, 1, now())
-       ON CONFLICT (org_id, outlet_id) DO UPDATE
-         SET version = menu_versions.version + 1, updated_at = now()`,
-      [orgId, outletId ?? null],
-    );
+    if (outletId) {
+      await client.query(
+        `INSERT INTO menu_versions (org_id, outlet_id, version, updated_at)
+         VALUES ($1, $2, 1, now())
+         ON CONFLICT (org_id, outlet_id) DO UPDATE
+           SET version = menu_versions.version + 1, updated_at = now()`,
+        [orgId, outletId],
+      );
+    } else {
+      const { rows } = await client.query(
+        `SELECT id FROM outlets WHERE org_id = $1`,
+        [orgId],
+      );
+      for (const outlet of rows) {
+        await client.query(
+          `INSERT INTO menu_versions (org_id, outlet_id, version, updated_at)
+           VALUES ($1, $2, 1, now())
+           ON CONFLICT (org_id, outlet_id) DO UPDATE
+             SET version = menu_versions.version + 1, updated_at = now()`,
+          [orgId, (outlet as { id: string }).id],
+        );
+      }
+    }
     if (process.env['NODE_ENV'] !== 'test') {
       try {
         const redis = getRedis();
-        const keys = outletId
-          ? [`menu:public:${orgId}:all`, `menu:public:${orgId}:${outletId}`]
-          : [`menu:public:${orgId}:all`];
+        const keys = [`menu:public:${orgId}:all`];
+        if (outletId) {
+          keys.push(`menu:public:${orgId}:${outletId}`);
+        } else {
+          const { rows: outletRows } = await client.query(
+            `SELECT id FROM outlets WHERE org_id = $1`,
+            [orgId],
+          );
+          for (const out of outletRows) {
+            keys.push(`menu:public:${orgId}:${(out as { id: string }).id}`);
+          }
+        }
         await redis.del(...keys);
       } catch {
         // Best-effort cache invalidation
