@@ -338,4 +338,64 @@ describe('Feedback & Reputation Service (Phase 8)', () => {
       expect(storedToken).toContain(':'); // iv:authTag:cipher format
     });
   });
+
+  describe('Dish Reviews & Per-Item Ratings', () => {
+    it('submits dish reviews and links to order, menu item, and customer', async () => {
+      mockClient.query
+        .mockResolvedValueOnce({ rows: [{ id: orderId, outlet_id: outletId, customer_id: customerId }] }) // order check
+        .mockResolvedValueOnce({
+          rows: [
+            {
+              id: 'dr-1',
+              org_id: orgId,
+              outlet_id: outletId,
+              order_id: orderId,
+              menu_item_id: 'item-uuid-1',
+              customer_id: customerId,
+              dish_name: 'Filter Coffee',
+              rating: 5,
+              review: 'Loved the strong brew!',
+              created_at: new Date(),
+              updated_at: new Date(),
+            },
+          ],
+        }); // dish_reviews insert
+
+      const result = await service.submitDishReviews(orgId, customerId, {
+        orderId,
+        reviews: [
+          {
+            menuItemId: 'item-uuid-1',
+            dishName: 'Filter Coffee',
+            rating: 5,
+            review: 'Loved the strong brew!',
+          },
+        ],
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.reviewsCount).toBe(1);
+      expect(result.reviews[0]?.dish_name).toBe('Filter Coffee');
+      expect(result.reviews[0]?.rating).toBe(5);
+    });
+
+    it('retrieves dish reviews for a customer', async () => {
+      mockClient.query.mockResolvedValueOnce({
+        rows: [
+          {
+            id: 'dr-1',
+            dish_name: 'Filter Coffee',
+            rating: 5,
+            review: 'Strong and smooth',
+            created_at: new Date(),
+          },
+        ],
+      });
+
+      const list = await service.getCustomerDishReviews(orgId, customerId);
+      expect(list.length).toBe(1);
+      expect(list[0]?.dish_name).toBe('Filter Coffee');
+      expect(list[0]?.rating).toBe(5);
+    });
+  });
 });
