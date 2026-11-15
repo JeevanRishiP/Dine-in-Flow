@@ -1335,40 +1335,124 @@ const getPortionPricing = (item: MenuItem) => {
   };
 };
 
-const HERO_SLIDES = [
+interface HeroSlideItem {
+  tag: string;
+  title: string;
+  subtitle: string;
+  img: string;
+  categoryTarget?: string;
+  dishTarget?: string;
+  couponCode?: string;
+  btnText: string;
+}
+
+const HERO_SLIDES: HeroSlideItem[] = [
   {
-    tag: "CHEF'S SIGNATURE",
-    title: 'Royal Awadhi Feast',
-    subtitle: 'Murgh Malai Kebab & Charcoal Paneer Tikka slow-roasted in clay tandoor.',
-    img: 'https://images.unsplash.com/photo-1599488615731-7e5c2823ff28?auto=format&fit=crop&w=1200&q=80',
+    tag: 'ROYAL DUM BIRYANI',
+    title: 'Hyderabadi Chicken Dum Biryani',
+    subtitle: 'Fragrant aged basmati rice slow dum-cooked with royal saffron, roasted spices & tender chicken.',
+    img: 'https://images.unsplash.com/photo-1563379091339-03b21ab4a4f8?auto=format&fit=crop&w=1200&q=80',
+    categoryTarget: 'Biryani & Rice',
+    dishTarget: 'biryani',
+    btnText: 'Explore Biryani & Rice →',
+  },
+  {
+    tag: 'TANDOORI & CURRIES',
+    title: 'Old Delhi Butter Chicken',
+    subtitle: 'Smoky charcoal-roasted tandoori chicken simmered in rich velvety creamy tomato makhani gravy.',
+    img: 'https://images.unsplash.com/photo-1603894584373-5ac82b2ae398?auto=format&fit=crop&w=1200&q=80',
+    categoryTarget: 'Main Course',
+    dishTarget: 'butter chicken',
+    btnText: 'View Main Course →',
+  },
+  {
+    tag: "CHEF'S SPECIALTY",
+    title: 'Paneer Tikka Charcoal Char',
+    subtitle: 'Fresh cottage cheese cubes marinated in spiced hung curd & roasted to perfection over live coals.',
+    img: 'https://images.unsplash.com/photo-1567184109411-b28f27034344?auto=format&fit=crop&w=1200&q=80',
     categoryTarget: 'Starters',
+    dishTarget: 'paneer tikka',
     btnText: 'Explore Starters →',
   },
   {
     tag: 'FESTIVE OFFER',
-    title: 'Flat 15% OFF Savings',
-    subtitle: 'Enjoy 15% off on dining bills above ₹500 today with code ROYAL15.',
-    img: 'https://images.unsplash.com/photo-1563379091339-03b21ab4a4f8?auto=format&fit=crop&w=1200&q=80',
+    title: 'Flat 15% OFF Dining',
+    subtitle: 'Enjoy 15% instant savings on your dining feast today for orders above ₹500 with code ROYAL15.',
+    img: 'https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?auto=format&fit=crop&w=1200&q=80',
     couponCode: 'ROYAL15',
-    btnText: 'Copy Coupon ROYAL15',
-  },
-  {
-    tag: '18-HOUR SIMMER',
-    title: 'Dal Makhani Bukhara',
-    subtitle: 'Slow-simmered black lentils cooked overnight with farm churned butter.',
-    img: 'https://images.unsplash.com/photo-1546833999-b9f581a1996d?auto=format&fit=crop&w=1200&q=80',
-    categoryTarget: 'Main Course',
-    btnText: 'View Main Course →',
-  },
-  {
-    tag: 'ROYAL DESSERT',
-    title: 'Kesar Rabri Gulab Jamun',
-    subtitle: 'Complimentary on all orders above ₹1,000. Made with pure saffron.',
-    img: 'https://images.unsplash.com/photo-1589119908995-c6837fa14848?auto=format&fit=crop&w=1200&q=80',
-    categoryTarget: 'Desserts',
-    btnText: 'Indulge in Sweets →',
+    btnText: 'Apply ROYAL15 Coupon',
   },
 ];
+
+interface AvailableCoupon {
+  code: string;
+  tag: string;
+  title: string;
+  description: string;
+  minOrderPaise: number;
+  type: 'PERCENT' | 'FIXED';
+  percent?: number;
+  fixedPaise?: number;
+}
+
+const AVAILABLE_COUPONS: AvailableCoupon[] = [
+  {
+    code: 'ROYAL15',
+    tag: 'POPULAR · 15% OFF',
+    title: 'Flat 15% Off Your Feast',
+    description: 'Get 15% instant discount on dine-in orders above ₹500.',
+    minOrderPaise: 50000,
+    type: 'PERCENT',
+    percent: 15,
+  },
+  {
+    code: 'DINEFIRST',
+    tag: 'FIRST DINE-IN',
+    title: '₹100 Welcome Discount',
+    description: 'Welcome gift of ₹100 off on dining bills above ₹300.',
+    minOrderPaise: 30000,
+    type: 'FIXED',
+    fixedPaise: 10000,
+  },
+  {
+    code: 'AWADHI50',
+    tag: 'BIRYANI SPECIAL',
+    title: '₹50 Biryani Delight',
+    description: 'Flat ₹50 savings on any authentic handi biryani or feast above ₹400.',
+    minOrderPaise: 40000,
+    type: 'FIXED',
+    fixedPaise: 5000,
+  },
+  {
+    code: 'FEAST20',
+    tag: 'GRAND GATHERINGS',
+    title: '20% Mega Savings',
+    description: 'Enjoy 20% savings for family gatherings and table bills above ₹1,500.',
+    minOrderPaise: 150000,
+    type: 'PERCENT',
+    percent: 20,
+  },
+  {
+    code: 'ROYAL200',
+    tag: 'CHEF VIP',
+    title: 'Flat ₹200 Off Royal Banquet',
+    description: 'Flat ₹200 deduction on lavish banquet dining above ₹2,000.',
+    minOrderPaise: 200000,
+    type: 'FIXED',
+    fixedPaise: 20000,
+  },
+];
+
+function computeCouponDiscountPaise(coupon: AvailableCoupon, subtotalPaise: number): number {
+  if (subtotalPaise < coupon.minOrderPaise) return 0;
+  if (coupon.type === 'PERCENT' && coupon.percent) {
+    return Math.round((subtotalPaise * coupon.percent) / 100);
+  }
+  if (coupon.type === 'FIXED' && coupon.fixedPaise) {
+    return Math.min(coupon.fixedPaise, subtotalPaise);
+  }
+  return 0;
+}
 
 const OFFERS_DATA = [
   {
@@ -1444,7 +1528,7 @@ export default function CustomerDineInPage() {
   >(null);
 
   // Wishlist Set
-  const [wishlist, setWishlist] = useState<Set<string>>(new Set(['item-mc-01', 'item-st-02']));
+  const [wishlist, setWishlist] = useState<Set<string>>(new Set());
 
   // Menu Navigation & Search
   const [activeCategory, setActiveCategory] = useState<string>('Starters');
@@ -1462,36 +1546,41 @@ export default function CustomerDineInPage() {
   // Menu items list
   const [menuItems, setMenuItems] = useState<MenuItem[]>(PILOT_MENU);
 
-  // Cart & Line Items (with robust localStorage persistence)
-  const [cartLines, setCartLines] = useState<CartLineItem[]>(() => {
-    if (typeof window !== 'undefined') {
-      try {
-        const saved = localStorage.getItem('dineflow_customer_cart_v2');
-        if (saved) {
-          const parsed = JSON.parse(saved);
-          if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-        }
-      } catch {}
-    }
-    return [];
-  });
+  // Cart & Line Items (with robust localStorage persistence and SSR hydration safety)
+  const [isMounted, setIsMounted] = useState(false);
+  const [cartLines, setCartLines] = useState<CartLineItem[]>([]);
+  const [isAvailableCouponsOpen, setIsAvailableCouponsOpen] = useState(false);
 
-  // Sync cartLines to localStorage whenever changed
+  // Load cart from localStorage once on client mount to avoid SSR hydration mismatches
   useEffect(() => {
-    if (typeof window !== 'undefined') {
-      try {
-        if (cartLines.length > 0) {
-          localStorage.setItem('dineflow_customer_cart_v2', JSON.stringify(cartLines));
-        } else {
-          localStorage.removeItem('dineflow_customer_cart_v2');
+    setIsMounted(true);
+    try {
+      const saved = localStorage.getItem('dineflow_customer_cart_v2');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          setCartLines(parsed);
         }
-      } catch {}
-    }
-  }, [cartLines]);
+      }
+    } catch {}
+  }, []);
+
+  // Sync cartLines to localStorage whenever changed (strictly after initial client mount)
+  useEffect(() => {
+    if (!isMounted) return;
+    try {
+      if (cartLines.length > 0) {
+        localStorage.setItem('dineflow_customer_cart_v2', JSON.stringify(cartLines));
+      } else {
+        localStorage.removeItem('dineflow_customer_cart_v2');
+      }
+    } catch {}
+  }, [cartLines, isMounted]);
   const [isCartOpen, setIsCartOpen] = useState(false);
   const [isPlacingOrder, setIsPlacingOrder] = useState(false);
   const [appliedCoupon, setAppliedCoupon] = useState<string | null>(null);
   const [couponInput, setCouponInput] = useState('');
+  const [couponError, setCouponError] = useState<string | null>(null);
 
   // Accordion-style in-place customisation state (Only one item expanded at a time)
   const [expandedAccordionItemId, setExpandedAccordionItemId] = useState<string | null>(null);
@@ -1562,19 +1651,69 @@ export default function CustomerDineInPage() {
   const [sessionOrders, setSessionOrders] = useState<TableOrderRecord[]>([]);
   const [isOrdersHistoryOpen, setIsOrdersHistoryOpen] = useState(false);
   const [ordersFilterTab, setOrdersFilterTab] = useState<'PREPARING' | 'ON_HOLD' | 'SERVED' | 'CANCELLED'>('PREPARING');
-  const [releasedHoldPlateKeys, setReleasedHoldPlateKeys] = useState<Record<string, boolean>>({});
+  const [releasedHoldPlateKeys, setReleasedHoldPlateKeys] = useState<Record<string, boolean>>(() => {
+    if (typeof window === 'undefined') return {};
+    try {
+      const raw = localStorage.getItem('dineflow_released_holds');
+      return raw ? JSON.parse(raw) : {};
+    } catch {
+      return {};
+    }
+  });
   const [expandedPlateKeys, setExpandedPlateKeys] = useState<Record<string, boolean>>({});
 
-  const handleReleaseHold = (plateKeys: string[], itemName?: string) => {
+  const handleReleaseHold = async (plateKeys: string[], itemName?: string) => {
+    // 1. Optimistically update state & persist to localStorage immediately
     setReleasedHoldPlateKeys((prev) => {
       const next = { ...prev };
       plateKeys.forEach((k) => {
         next[k] = true;
       });
+      if (typeof window !== 'undefined') {
+        try {
+          localStorage.setItem('dineflow_released_holds', JSON.stringify(next));
+        } catch {}
+      }
       return next;
     });
+
     setToastMessage(`🍳 Sent to kitchen! Chef will start preparing ${itemName || 'your item'} now.`);
     setTimeout(() => setToastMessage(null), 4000);
+
+    // 2. Persist to PostgreSQL database via backend API for each plate's item
+    const pairs = new Set<string>();
+    plateKeys.forEach((k) => {
+      // Plate key format: `${ord.id}-${it.id}-${pIdx}`
+      const parts = k.split('-');
+      if (parts.length >= 10) {
+        const orderId = parts.slice(0, 5).join('-');
+        const itemId = parts.slice(5, 10).join('-');
+        pairs.add(`${orderId}::${itemId}`);
+      }
+    });
+
+    for (const pair of pairs) {
+      const [orderId, itemId] = pair.split('::');
+      if (orderId && itemId) {
+        try {
+          await customerApiFetch(
+            `/api/v1/customer/orders/${encodeURIComponent(orderId)}/items/${encodeURIComponent(itemId)}/release-hold`,
+            {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+            },
+            { preferToken: loadCustomerAuth() ? 'customer' : 'guest' },
+          );
+        } catch (err) {
+          console.error('Failed to notify backend of hold release:', err);
+        }
+      }
+    }
+
+    // 3. Re-sync live session orders from backend
+    if (activeSessionId) {
+      void fetchSessionOrders(activeSessionId);
+    }
   };
 
   // Customer Authentication & Profile State
@@ -1634,6 +1773,15 @@ export default function CustomerDineInPage() {
   const [paymentQrData, setPaymentQrData] = useState<{ paymentId: string; orderId?: string; sessionId?: string; qrCodeUrl: string; upiString: string; redirectUrl?: string } | null>(null);
   const [paymentSuccessData, setPaymentSuccessData] = useState<{ paymentId: string; totalPaise: number } | null>(null);
 
+  // Food Item Reviews State
+  const [reviewingOrder, setReviewingOrder] = useState<TableOrderRecord | null>(null);
+  const [dishRatings, setDishRatings] = useState<Record<string, { rating: number; review: string }>>({});
+  const [overallOrderRating, setOverallOrderRating] = useState<number>(0);
+  const [overallOrderComment, setOverallOrderComment] = useState<string>('');
+  const [selectedReviewTags, setSelectedReviewTags] = useState<string[]>([]);
+  const [submittingReview, setSubmittingReview] = useState<boolean>(false);
+  const [reviewedOrderIds, setReviewedOrderIds] = useState<Set<string>>(new Set());
+
   // Chef AI Chat State
   const [isAiOpen, setIsAiOpen] = useState(false);
   const [aiInput, setAiInput] = useState('');
@@ -1649,6 +1797,7 @@ export default function CustomerDineInPage() {
         name: string;
         quantity: number;
         pricePaise: number;
+        notes?: string;
       }>;
     }>
   >([
@@ -2054,8 +2203,32 @@ export default function CustomerDineInPage() {
               const existing = seen.get(key);
               if (!existing) {
                 seen.set(key, item);
-              } else if ((item.modifierGroups?.length || 0) > (existing.modifierGroups?.length || 0)) {
-                seen.set(key, item);
+              } else {
+                const itemHasLivePhoto =
+                  typeof item.imageUrl === 'string' && item.imageUrl.trim().length > 0;
+                const existingHasLivePhoto =
+                  typeof existing.imageUrl === 'string' && existing.imageUrl.trim().length > 0;
+                const chosenImg = itemHasLivePhoto
+                  ? item.imageUrl
+                  : existingHasLivePhoto
+                  ? existing.imageUrl
+                  : item.imageUrl || existing.imageUrl;
+
+                const chosenModGroups =
+                  (item.modifierGroups?.length || 0) >= (existing.modifierGroups?.length || 0)
+                    ? item.modifierGroups
+                    : existing.modifierGroups;
+                const chosenModifiers =
+                  (item.modifiers?.length || 0) >= (existing.modifiers?.length || 0)
+                    ? item.modifiers
+                    : existing.modifiers;
+
+                seen.set(key, {
+                  ...((item.modifierGroups?.length || 0) >= (existing.modifierGroups?.length || 0) ? item : existing),
+                  imageUrl: chosenImg,
+                  modifierGroups: chosenModGroups,
+                  modifiers: chosenModifiers,
+                });
               }
             }
             setMenuItems(Array.from(seen.values()));
@@ -2066,6 +2239,13 @@ export default function CustomerDineInPage() {
       }
     }
     fetchLiveMenu();
+    const onFocus = () => { void fetchLiveMenu(); };
+    window.addEventListener('focus', onFocus);
+    const interval = setInterval(() => { void fetchLiveMenu(); }, 12000);
+    return () => {
+      window.removeEventListener('focus', onFocus);
+      clearInterval(interval);
+    };
   }, [activeOrgId, activeOutletId]);
 
   // ── 4. Fetch Orders History (Scoped strictly to logged-in account OR active temp customer ID) ──
@@ -2381,6 +2561,11 @@ export default function CustomerDineInPage() {
 
   const toggleWishlist = (itemId: string, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
+    if (!customerToken) {
+      openBottomAuthSheet('SIGNIN');
+      showToast('Please sign in to save dishes to your favorites ❤️');
+      return;
+    }
     setWishlist((prev) => {
       const next = new Set(prev);
       if (next.has(itemId)) {
@@ -2406,14 +2591,9 @@ export default function CustomerDineInPage() {
 
   const discountPaise = useMemo(() => {
     if (!appliedCoupon) return 0;
-    if (appliedCoupon === 'ROYAL15') {
-      return cartSubtotalPaise >= 50000 ? Math.round(cartSubtotalPaise * 0.15) : 0;
-    }
-    if (appliedCoupon === 'DINEFIRST') {
-      return 10000;
-    }
-    if (appliedCoupon === 'AWADHI50') {
-      return 5000;
+    const found = AVAILABLE_COUPONS.find((c) => c.code === appliedCoupon);
+    if (found) {
+      return computeCouponDiscountPaise(found, cartSubtotalPaise);
     }
     return 0;
   }, [appliedCoupon, cartSubtotalPaise]);
@@ -2462,7 +2642,9 @@ export default function CustomerDineInPage() {
           }
 
           const plateKey = `${ord.id}-${it.id}-${pIdx}`;
-          const isReleased = !!releasedHoldPlateKeys[plateKey];
+          const isReleased =
+            Boolean(releasedHoldPlateKeys[plateKey]) ||
+            Boolean(it.notes && it.notes.includes('[RELEASED_TO_KITCHEN]'));
           const plateItemStatus = (it as { status?: string }).status || ord.status;
           const isPlateServed = plateItemStatus === 'SERVED' || ord.status === 'SERVED' || ord.status === 'BILLED';
           const isPlateCancelled = plateItemStatus === 'CANCELLED' || ord.status === 'CANCELLED';
@@ -2822,7 +3004,14 @@ export default function CustomerDineInPage() {
 
   // ── Combo Customization Handlers ──
   const openComboCustomizer = (combo: ComboOffer) => {
-    setActiveComboOffer(combo);
+    const liveComboItem = menuItems.find(
+      (m) => m.id === combo.id || m.name.toLowerCase() === combo.name.toLowerCase(),
+    );
+    const effectiveCombo =
+      liveComboItem?.imageUrl && liveComboItem.imageUrl.trim().length > 0
+        ? { ...combo, imageUrl: liveComboItem.imageUrl }
+        : combo;
+    setActiveComboOffer(effectiveCombo);
     const initialDishPlates: Record<string, ComboDishPlate[]> = {};
     const initialActivePlateIds: Record<string, string> = {};
     const defaultDrinks: Record<string, string> = {};
@@ -3604,14 +3793,29 @@ export default function CustomerDineInPage() {
 
   // Apply Coupon
   const handleApplyCoupon = (code: string) => {
-    const found = OFFERS_DATA.find((o) => o.code.toUpperCase() === code.trim().toUpperCase());
-    if (found) {
-      setAppliedCoupon(found.code);
-      setCouponInput(found.code);
-      showToast(`Coupon ${found.code} applied! 🎉`);
-    } else {
-      showToast('Invalid coupon code');
+    const trimmed = (code || '').trim().toUpperCase();
+    if (!trimmed) {
+      setCouponError('Please enter a coupon code.');
+      return;
     }
+    const found = AVAILABLE_COUPONS.find((c) => c.code.toUpperCase() === trimmed);
+    if (!found) {
+      setCouponError(`Coupon code "${trimmed}" is not valid.`);
+      setAppliedCoupon(null);
+      return;
+    }
+    if (cartSubtotalPaise < found.minOrderPaise) {
+      const deficit = found.minOrderPaise - cartSubtotalPaise;
+      setCouponError(
+        `Minimum order of ₹${(found.minOrderPaise / 100).toFixed(0)} required for ${found.code} (add ₹${(deficit / 100).toFixed(0)} more).`,
+      );
+      setAppliedCoupon(null);
+      return;
+    }
+    setCouponError(null);
+    setAppliedCoupon(found.code);
+    setCouponInput(found.code);
+    showToast(`Coupon ${found.code} applied! 🎉`);
   };
 
   // ── 10. Real Order Placement with Cook Notes & Modifiers ────────────────────
@@ -4336,12 +4540,19 @@ export default function CustomerDineInPage() {
     setAiLoading(true);
 
     try {
+      const wishlistNames = Array.from(wishlist)
+        .map((id) => menuItems.find((m) => m.id === id)?.name)
+        .filter(Boolean) as string[];
+
       const sendRequest = async (sessionIdToUse: string | null) => {
         const payload: Record<string, unknown> = {
           org_id: targetOrgId,
           outlet_id: targetOutletId,
           message: userMsg,
         };
+        if (wishlistNames.length > 0) {
+          payload['wishlistDishNames'] = wishlistNames;
+        }
         if (sessionIdToUse) {
           payload['session_id'] = sessionIdToUse;
         }
@@ -4416,13 +4627,16 @@ export default function CustomerDineInPage() {
     name: string;
     quantity: number;
     pricePaise: number;
+    notes?: string;
   }) => {
     const matched = menuItems.find(
       (m) => m.id === proposed.itemId || m.name.toLowerCase() === proposed.name.toLowerCase(),
     );
     if (matched) {
       setCartLines((prev) => {
-        const existingIdx = prev.findIndex((c) => c.item.id === matched.id && !c.plateLabel && !c.notes);
+        const existingIdx = prev.findIndex(
+          (c) => c.item.id === matched.id && !c.plateLabel && c.notes === (proposed.notes || undefined),
+        );
         if (existingIdx >= 0) {
           const copy = [...prev];
           copy[existingIdx] = {
@@ -4438,13 +4652,114 @@ export default function CustomerDineInPage() {
             item: matched,
             quantity: proposed.quantity || 1,
             spiceLevel: matched.spiceLevel,
+            notes: proposed.notes || undefined,
             selectedModifiers: [],
           },
         ];
       });
-      showToast(`Added ${matched.name} to cart! 🛒`);
+      showToast(`Added ${matched.name}${proposed.notes ? ` (${proposed.notes})` : ''} to cart! 🛒`);
     } else {
       showToast(`Dish "${proposed.name}" added to order!`);
+    }
+  };
+
+  const openReviewModal = (order: TableOrderRecord) => {
+    // Collect ONLY the items from this order that have been served!
+    const servedPlateItemIds = new Set(
+      servedPlates.filter((p) => p.orderId === order.id).map((p) => p.itemId),
+    );
+    const servedItems = order.items.filter((item, idx) => {
+      const key = (item as any).menu_item_id || (item as any).itemId || `item-${idx}`;
+      return (
+        order.status === 'SERVED' ||
+        order.status === 'BILLED' ||
+        item.status === 'SERVED' ||
+        item.status === 'BILLED' ||
+        servedPlateItemIds.has(item.id) ||
+        servedPlateItemIds.has(key)
+      );
+    });
+
+    if (servedItems.length === 0) {
+      showToast('Dishes are still cooking in the kitchen! Rating unlocks once served to your table 🍽️');
+      return;
+    }
+
+    const initialDishRatings: Record<string, { rating: number; review: string }> = {};
+    servedItems.forEach((item, idx) => {
+      const key = (item as any).menu_item_id || (item as any).itemId || `item-${idx}`;
+      initialDishRatings[key] = { rating: 0, review: '' };
+    });
+    setDishRatings(initialDishRatings);
+    setOverallOrderRating(0);
+    setOverallOrderComment('');
+    setSelectedReviewTags([]);
+    setReviewingOrder({
+      ...order,
+      items: servedItems,
+    });
+  };
+
+  const handleSubmitDishReviews = async () => {
+    if (!reviewingOrder) return;
+    const hasAnyDishRating = Object.values(dishRatings).some((r) => r.rating > 0);
+    if (overallOrderRating === 0 && !hasAnyDishRating) {
+      showToast('Please tap a star rating before submitting ⭐');
+      return;
+    }
+    setSubmittingReview(true);
+    try {
+      const reviews = reviewingOrder.items
+        .map((item, idx) => {
+          const menuItemId = (item as any).menu_item_id || (item as any).itemId || `item-${idx}`;
+          const matchedMenu = menuItems.find((m) => m.name.toLowerCase() === item.name_snapshot.toLowerCase());
+          const realId = matchedMenu?.id || (menuItemId.length === 36 ? menuItemId : '00000000-0000-0000-0000-000000000001');
+          const record = dishRatings[menuItemId] || { rating: 0, review: '' };
+          const ratingToSubmit = record.rating > 0 ? record.rating : overallOrderRating > 0 ? overallOrderRating : 5;
+          return {
+            menuItemId: realId,
+            dishName: item.name_snapshot,
+            rating: ratingToSubmit,
+            review: record.review.trim() || undefined,
+            userRated: record.rating > 0,
+          };
+        })
+        .filter((r) => r.userRated || overallOrderRating > 0)
+        .map(({ userRated: _, ...r }) => r);
+
+      const payload = {
+        orderId: reviewingOrder.id,
+        overallRating: overallOrderRating > 0 ? overallOrderRating : 5,
+        overallComment: overallOrderComment.trim() || undefined,
+        tags: selectedReviewTags,
+        reviews,
+      };
+
+      const endpoint = customerToken ? '/api/v1/me/dish-reviews' : '/api/v1/public/dish-reviews';
+      const tokenMode = customerToken ? 'customer' : 'guest';
+
+      const res = await customerApiFetch(
+        endpoint,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        },
+        { preferToken: tokenMode, ...(customerToken ? { tokenOverride: customerToken } : {}) },
+      );
+
+      if (res.ok) {
+        setReviewedOrderIds((prev) => new Set([...prev, reviewingOrder.id]));
+        showToast('Thank you for reviewing! Your feedback has been saved ❤️ +₹10 store reward earned!');
+        setReviewingOrder(null);
+      } else {
+        const err = (await res.json().catch(() => null)) as { detail?: string; message?: string } | null;
+        showToast(err?.detail || err?.message || 'Failed to submit review. Please try again.');
+      }
+    } catch {
+      showToast('Network error while saving review. Please try again.');
+    } finally {
+      setSubmittingReview(false);
     }
   };
 
@@ -4482,7 +4797,7 @@ export default function CustomerDineInPage() {
   // ==========================================================================
 
   return (
-    <div style={{ minHeight: '100vh', paddingBottom: cartItemCount > 0 ? '110px' : '80px', position: 'relative' }}>
+    <div style={{ minHeight: '100vh', paddingBottom: (isMounted && cartItemCount > 0) ? '110px' : '80px', position: 'relative' }}>
       {/* ─── Flying Ghost Animation Element ──────────────────────────────── */}
       {flyingGhost && (
         <img
@@ -4617,9 +4932,10 @@ export default function CustomerDineInPage() {
                 className={`nav-icon-btn nav-cart-btn ${cartPulse ? 'cart-icon-pulse' : ''}`}
                 onClick={() => setIsCartOpen(true)}
                 title="View Shopping Cart"
+                suppressHydrationWarning
               >
                 <span>🛒</span>
-                {cartItemCount > 0 && <span className="cart-count-badge">{cartItemCount}</span>}
+                {isMounted && cartItemCount > 0 && <span className="cart-count-badge" suppressHydrationWarning>{cartItemCount}</span>}
               </button>
             </div>
           </header>
@@ -4627,11 +4943,25 @@ export default function CustomerDineInPage() {
           {/* 2. Hero Section (Auto-rotating Banner Carousel) */}
           <div className="hero-carousel-container">
             <div className="hero-slide-wrapper">
-              <img
-                src={HERO_SLIDES[heroIndex]!.img}
-                alt={HERO_SLIDES[heroIndex]!.title}
-                className="hero-slide-img"
-              />
+              {(() => {
+                const currentSlide = HERO_SLIDES[heroIndex]!;
+                let resolvedSlideImg = currentSlide.img;
+                if (currentSlide.dishTarget) {
+                  const match = menuItems.find((it) =>
+                    it.name.toLowerCase().includes(currentSlide.dishTarget!.toLowerCase()),
+                  );
+                  if (match?.imageUrl && match.imageUrl.trim().length > 0) {
+                    resolvedSlideImg = match.imageUrl;
+                  }
+                }
+                return (
+                  <img
+                    src={resolvedSlideImg}
+                    alt={currentSlide.title}
+                    className="hero-slide-img"
+                  />
+                );
+              })()}
               <div className="hero-slide-gradient">
                 <span className="hero-slide-tag">{HERO_SLIDES[heroIndex]!.tag}</span>
                 <h1 className="hero-slide-title">{HERO_SLIDES[heroIndex]!.title}</h1>
@@ -4756,19 +5086,27 @@ export default function CustomerDineInPage() {
             </div>
 
             <div className="home-horizontal-scroll">
-              {COMBO_OFFERS.map((combo) => (
-                <div
-                  key={combo.id}
-                  className="combo-offer-card"
-                  onClick={() => navigateToCombo(combo)}
-                >
-                  <div className="combo-card-banner">
-                    <img
-                      src={combo.imageUrl}
-                      alt={combo.name}
-                      className="combo-card-img"
-                      loading="lazy"
-                    />
+              {COMBO_OFFERS.map((combo) => {
+                const liveComboItem = menuItems.find(
+                  (m) => m.id === combo.id || m.name.toLowerCase() === combo.name.toLowerCase(),
+                );
+                const comboImg =
+                  liveComboItem?.imageUrl && liveComboItem.imageUrl.trim().length > 0
+                    ? liveComboItem.imageUrl
+                    : combo.imageUrl;
+                return (
+                  <div
+                    key={combo.id}
+                    className="combo-offer-card"
+                    onClick={() => navigateToCombo(combo)}
+                  >
+                    <div className="combo-card-banner">
+                      <img
+                        src={comboImg}
+                        alt={combo.name}
+                        className="combo-card-img"
+                        loading="lazy"
+                      />
                     <span className="combo-card-badge">{combo.badge}</span>
                     <span className="combo-card-pax-tag">{combo.tag}</span>
                     <button
@@ -4826,7 +5164,8 @@ export default function CustomerDineInPage() {
                     </div>
                   </div>
                 </div>
-              ))}
+              );
+            })}
             </div>
           </section>
 
@@ -5177,9 +5516,10 @@ export default function CustomerDineInPage() {
                 className={`nav-icon-btn nav-cart-btn ${cartPulse ? 'cart-icon-pulse' : ''}`}
                 onClick={() => setIsCartOpen(true)}
                 title="Shopping Cart"
+                suppressHydrationWarning
               >
                 <span>🛒</span>
-                {cartItemCount > 0 && <span className="cart-count-badge">{cartItemCount}</span>}
+                {isMounted && cartItemCount > 0 && <span className="cart-count-badge" suppressHydrationWarning>{cartItemCount}</span>}
               </button>
             </div>
           </header>
@@ -5402,7 +5742,7 @@ export default function CustomerDineInPage() {
       <div
         className="floating-bottom-actions"
         style={{
-          bottom: cartItemCount > 0 ? '84px' : '24px',
+          bottom: (isMounted && cartItemCount > 0) ? '84px' : '24px',
         }}
       >
         {/* Sticky Chatbot Button (Bottom-left) */}
@@ -5415,23 +5755,6 @@ export default function CustomerDineInPage() {
           <span>Chef AI</span>
         </button>
 
-        {/* Sticky Orders Button (Center - visible on both Home & Menu when there are active orders) */}
-        {flattenedPlates.length > 0 && (
-          <button
-            className="floating-circular-btn floating-orders-btn"
-            onClick={() => setIsOrdersHistoryOpen(true)}
-            title="Track Table Orders"
-            style={{
-              background: 'linear-gradient(135deg, rgba(16, 185, 129, 0.25), rgba(5, 150, 105, 0.45))',
-              color: '#34d399',
-              border: '1px solid rgba(16, 185, 129, 0.6)',
-              boxShadow: '0 8px 25px rgba(0, 0, 0, 0.5), 0 0 15px rgba(16, 185, 129, 0.25)',
-            }}
-          >
-            <span style={{ fontSize: '1.2rem' }}>📋</span>
-            <span>Orders ({flattenedPlates.length})</span>
-          </button>
-        )}
 
         {/* Sticky Menu Button (Bottom-right - jumps to Menu view) */}
         {currentView === 'home' ? (
@@ -5459,7 +5782,7 @@ export default function CustomerDineInPage() {
           - ONLY appears when cart has at least 1 item
           - Sits on the very bottom edge
       */}
-      {cartItemCount > 0 && (
+      {isMounted && cartItemCount > 0 && (
         <div className="floating-cart-bottom-bar">
           <div className="cart-bar-left-info">
             <div className="cart-bar-count-price">
@@ -7094,27 +7417,64 @@ export default function CustomerDineInPage() {
 
                   {/* Apply Coupon Input */}
                   <div style={{ marginTop: '10px' }}>
-                    <div style={{ fontSize: '0.78rem', fontWeight: 700, color: '#94a3b8', marginBottom: '4px' }}>
-                      Have a coupon?
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
+                      <span style={{ fontSize: '0.78rem', fontWeight: 700, color: '#94a3b8' }}>
+                        Have a coupon?
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setIsAvailableCouponsOpen(true)}
+                        style={{
+                          background: 'rgba(245, 158, 11, 0.12)',
+                          border: '1px solid rgba(245, 158, 11, 0.35)',
+                          color: '#fbbf24',
+                          padding: '3px 9px',
+                          borderRadius: '6px',
+                          fontSize: '0.72rem',
+                          fontWeight: 700,
+                          cursor: 'pointer',
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '4px',
+                        }}
+                      >
+                        <span>🏷️</span>
+                        <span>Available Coupons</span>
+                      </button>
                     </div>
                     <div style={{ display: 'flex', gap: '8px' }}>
                       <input
                         type="text"
                         placeholder="e.g. ROYAL15"
                         value={couponInput}
-                        onChange={(e) => setCouponInput(e.target.value.toUpperCase())}
+                        onChange={(e) => {
+                          setCouponInput(e.target.value.toUpperCase());
+                          if (couponError) setCouponError(null);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            handleApplyCoupon(couponInput);
+                          }
+                        }}
                         style={{
                           flex: 1,
                           padding: '8px 12px',
                           background: 'rgba(255,255,255,0.05)',
-                          border: '1px solid rgba(255,255,255,0.1)',
+                          border: couponError
+                            ? '1px solid #ef4444'
+                            : appliedCoupon
+                            ? '1px solid #10b981'
+                            : '1px solid rgba(255,255,255,0.1)',
                           borderRadius: '8px',
                           color: '#fff',
                           fontSize: '0.85rem',
                           fontFamily: 'monospace',
+                          outline: 'none',
                         }}
                       />
                       <button
+                        type="button"
                         onClick={() => handleApplyCoupon(couponInput)}
                         style={{
                           background: 'rgba(245,158,11,0.2)',
@@ -7124,14 +7484,63 @@ export default function CustomerDineInPage() {
                           borderRadius: '8px',
                           fontWeight: 700,
                           fontSize: '0.8rem',
+                          cursor: 'pointer',
                         }}
                       >
                         Apply
                       </button>
                     </div>
-                    {appliedCoupon && (
-                      <div style={{ fontSize: '0.75rem', color: '#10b981', marginTop: '4px' }}>
-                        ✓ Applied: {appliedCoupon} (-₹{(discountPaise / 100).toFixed(0)})
+
+                    {/* Inline error message under the writing space */}
+                    {couponError && (
+                      <div
+                        style={{
+                          fontSize: '0.74rem',
+                          color: '#f87171',
+                          marginTop: '6px',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '5px',
+                          fontWeight: 600,
+                        }}
+                      >
+                        <span>⚠️</span>
+                        <span>{couponError}</span>
+                      </div>
+                    )}
+
+                    {appliedCoupon && !couponError && (
+                      <div
+                        style={{
+                          fontSize: '0.75rem',
+                          color: '#10b981',
+                          marginTop: '6px',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          fontWeight: 700,
+                        }}
+                      >
+                        <span>✓ Applied: {appliedCoupon} (-₹{(discountPaise / 100).toFixed(0)})</span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setAppliedCoupon(null);
+                            setCouponInput('');
+                            setCouponError(null);
+                          }}
+                          style={{
+                            background: 'transparent',
+                            border: 'none',
+                            color: '#f87171',
+                            fontSize: '0.72rem',
+                            cursor: 'pointer',
+                            textDecoration: 'underline',
+                            padding: '0 4px',
+                          }}
+                        >
+                          Remove
+                        </button>
                       </div>
                     )}
                   </div>
@@ -7281,6 +7690,245 @@ export default function CustomerDineInPage() {
                 </div>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Available Coupons Modal Sheet (Drawer over Cart / Checkout) */}
+      {isAvailableCouponsOpen && (
+        <div
+          className="side-drawer-wrap"
+          style={{ zIndex: 120 }}
+          onClick={() => setIsAvailableCouponsOpen(false)}
+        >
+          <div
+            className="side-drawer-panel"
+            style={{ maxWidth: '440px' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="drawer-header" style={{ padding: '16px 20px', borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
+              <div>
+                <div className="drawer-title" style={{ fontSize: '1.05rem', fontWeight: 800, color: '#fff', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <span>🏷️</span>
+                  <span>Available Coupons</span>
+                </div>
+                <div style={{ fontSize: '0.74rem', color: '#94a3b8', marginTop: '2px' }}>
+                  Cart Total: <strong style={{ color: '#fbbf24' }}>₹{(cartSubtotalPaise / 100).toFixed(0)}</strong> · Select any eligible coupon
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsAvailableCouponsOpen(false)}
+                style={{
+                  background: 'rgba(255, 255, 255, 0.05)',
+                  border: '1px solid rgba(255, 255, 255, 0.1)',
+                  borderRadius: '8px',
+                  color: '#94a3b8',
+                  fontSize: '1rem',
+                  width: '32px',
+                  height: '32px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  cursor: 'pointer',
+                }}
+              >
+                ✕
+              </button>
+            </div>
+
+            <div style={{ flex: 1, overflowY: 'auto', padding: '16px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+              {AVAILABLE_COUPONS.map((coupon) => {
+                const isApplied = appliedCoupon === coupon.code;
+                const isEligible = cartSubtotalPaise >= coupon.minOrderPaise;
+                const estSavingsPaise = computeCouponDiscountPaise(coupon, cartSubtotalPaise);
+                const deficitPaise = coupon.minOrderPaise > cartSubtotalPaise ? coupon.minOrderPaise - cartSubtotalPaise : 0;
+
+                return (
+                  <div
+                    key={coupon.code}
+                    style={{
+                      borderRadius: '12px',
+                      padding: '14px',
+                      border: isApplied
+                        ? '1.5px solid #10b981'
+                        : isEligible
+                        ? '1.5px solid rgba(245, 158, 11, 0.45)'
+                        : '1px solid rgba(255, 255, 255, 0.08)',
+                      background: isApplied
+                        ? 'rgba(16, 185, 129, 0.08)'
+                        : isEligible
+                        ? 'rgba(245, 158, 11, 0.04)'
+                        : 'rgba(255, 255, 255, 0.02)',
+                      opacity: isEligible || isApplied ? 1 : 0.72,
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: '10px',
+                      transition: 'all 0.2s ease',
+                    }}
+                  >
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '6px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <span
+                          style={{
+                            fontFamily: 'monospace',
+                            fontWeight: 900,
+                            fontSize: '0.92rem',
+                            padding: '4px 8px',
+                            borderRadius: '6px',
+                            background: isApplied ? 'rgba(16, 185, 129, 0.25)' : 'rgba(245, 158, 11, 0.18)',
+                            color: isApplied ? '#34d399' : '#fbbf24',
+                            border: `1px solid ${isApplied ? '#10b981' : 'rgba(245, 158, 11, 0.4)'}`,
+                            letterSpacing: '0.5px',
+                          }}
+                        >
+                          {coupon.code}
+                        </span>
+                        <span
+                          style={{
+                            fontSize: '0.72rem',
+                            fontWeight: 800,
+                            padding: '3px 7px',
+                            borderRadius: '4px',
+                            background: 'rgba(255, 255, 255, 0.08)',
+                            color: '#cbd5e1',
+                          }}
+                        >
+                          {coupon.tag}
+                        </span>
+                      </div>
+
+                      {isApplied ? (
+                        <span style={{ color: '#10b981', fontSize: '0.78rem', fontWeight: 800 }}>
+                          ✓ Applied
+                        </span>
+                      ) : isEligible ? (
+                        <span style={{ color: '#34d399', fontSize: '0.76rem', fontWeight: 700 }}>
+                          ● Eligible
+                        </span>
+                      ) : (
+                        <span style={{ color: '#f59e0b', fontSize: '0.74rem', fontWeight: 700 }}>
+                          🔒 Min ₹{(coupon.minOrderPaise / 100).toFixed(0)}
+                        </span>
+                      )}
+                    </div>
+
+                    <div>
+                      <div style={{ fontSize: '0.86rem', fontWeight: 700, color: '#fff' }}>
+                        {coupon.title}
+                      </div>
+                      <div style={{ fontSize: '0.76rem', color: '#94a3b8', marginTop: '2px', lineHeight: 1.4 }}>
+                        {coupon.description}
+                      </div>
+                    </div>
+
+                    {/* Condition / Savings Note */}
+                    <div
+                      style={{
+                        fontSize: '0.74rem',
+                        padding: '6px 10px',
+                        borderRadius: '6px',
+                        background: isApplied
+                          ? 'rgba(16, 185, 129, 0.12)'
+                          : isEligible
+                          ? 'rgba(245, 158, 11, 0.1)'
+                          : 'rgba(239, 68, 68, 0.1)',
+                        color: isApplied
+                          ? '#34d399'
+                          : isEligible
+                          ? '#fcd34d'
+                          : '#fca5a5',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                      }}
+                    >
+                      <span>
+                        {isApplied
+                          ? `Saves ₹${(discountPaise / 100).toFixed(0)} on this order!`
+                          : isEligible
+                          ? `Eligible! Saves ₹${(estSavingsPaise / 100).toFixed(0)}`
+                          : `Add items worth ₹${(deficitPaise / 100).toFixed(0)} more to unlock`}
+                      </span>
+                      <span style={{ opacity: 0.75, fontSize: '0.7rem' }}>
+                        Min ₹{(coupon.minOrderPaise / 100).toFixed(0)}
+                      </span>
+                    </div>
+
+                    {/* Action Button */}
+                    <div>
+                      {isApplied ? (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setAppliedCoupon(null);
+                            setCouponInput('');
+                            setCouponError(null);
+                            showToast(`Removed coupon ${coupon.code}`);
+                          }}
+                          style={{
+                            width: '100%',
+                            padding: '8px 12px',
+                            borderRadius: '8px',
+                            background: 'rgba(239, 68, 68, 0.15)',
+                            border: '1px solid rgba(239, 68, 68, 0.35)',
+                            color: '#f87171',
+                            fontWeight: 800,
+                            fontSize: '0.78rem',
+                            cursor: 'pointer',
+                          }}
+                        >
+                          ✕ Remove Coupon
+                        </button>
+                      ) : isEligible ? (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setAppliedCoupon(coupon.code);
+                            setCouponInput(coupon.code);
+                            setCouponError(null);
+                            setIsAvailableCouponsOpen(false);
+                            showToast(`✅ Applied coupon ${coupon.code}! Saved ₹${(estSavingsPaise / 100).toFixed(0)}`);
+                          }}
+                          style={{
+                            width: '100%',
+                            padding: '8px 12px',
+                            borderRadius: '8px',
+                            background: 'linear-gradient(135deg, #f59e0b, #d97706)',
+                            border: 'none',
+                            color: '#000',
+                            fontWeight: 900,
+                            fontSize: '0.8rem',
+                            cursor: 'pointer',
+                            boxShadow: '0 2px 8px rgba(245, 158, 11, 0.3)',
+                          }}
+                        >
+                          Apply Coupon (Save ₹{(estSavingsPaise / 100).toFixed(0)})
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          disabled
+                          style={{
+                            width: '100%',
+                            padding: '8px 12px',
+                            borderRadius: '8px',
+                            background: 'rgba(255, 255, 255, 0.05)',
+                            border: '1px solid rgba(255, 255, 255, 0.08)',
+                            color: '#64748b',
+                            fontWeight: 700,
+                            fontSize: '0.76rem',
+                            cursor: 'not-allowed',
+                          }}
+                        >
+                          🔒 Add ₹{(deficitPaise / 100).toFixed(0)} more to unlock
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           </div>
         </div>
       )}
@@ -7526,7 +8174,7 @@ export default function CustomerDineInPage() {
                         className="accordion-add-action-btn"
                         style={{ margin: '0 auto', fontSize: '0.82rem', padding: '8px 16px' }}
                       >
-                        {cartLines.length > 0 ? `View Cart (${cartItemCount} Pending)` : 'Browse Menu & Order'}
+                        {isMounted && cartLines.length > 0 ? `View Cart (${cartItemCount} Pending)` : 'Browse Menu & Order'}
                       </button>
                     </div>
                   );
@@ -7859,6 +8507,33 @@ export default function CustomerDineInPage() {
                                   ? 'SERVED 🍽️'
                                   : 'PREPARING 🍳'}
                               </span>
+                              {(plate.orderStatus === 'SERVED' || plate.orderStatus === 'BILLED') && (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    const parentOrder = sessionOrders.find((o) => o.id === plate.orderId);
+                                    if (parentOrder) {
+                                      openReviewModal(parentOrder);
+                                    }
+                                  }}
+                                  style={{
+                                    background: 'rgba(245, 158, 11, 0.18)',
+                                    border: '1px solid rgba(245, 158, 11, 0.5)',
+                                    borderRadius: '6px',
+                                    color: '#fbbf24',
+                                    fontSize: '0.72rem',
+                                    fontWeight: 800,
+                                    padding: '2px 8px',
+                                    cursor: 'pointer',
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    gap: '4px',
+                                  }}
+                                >
+                                  ⭐ Rate Dish
+                                </button>
+                              )}
                               <span style={{ fontWeight: 800, color: '#fbbf24', fontSize: '0.92rem' }}>
                                 ₹{(plate.plateTotalPaise / 100).toFixed(0)}
                               </span>
@@ -8279,6 +8954,57 @@ export default function CustomerDineInPage() {
             {flattenedPlates.length > 0 && (
               <div className="drawer-footer" style={{ padding: '16px', borderTop: '1px solid rgba(255, 255, 255, 0.08)' }}>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                  {servedPlates.length > 0 ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const servedOrderIds = new Set(servedPlates.map((p) => p.orderId));
+                        const orderToReview = sessionOrders.find((o) => servedOrderIds.has(o.id));
+                        if (orderToReview) {
+                          openReviewModal(orderToReview);
+                        } else {
+                          showToast('No served dishes available to review yet.');
+                        }
+                      }}
+                      style={{
+                        width: '100%',
+                        padding: '11px 16px',
+                        borderRadius: '10px',
+                        background: 'linear-gradient(135deg, rgba(245, 158, 11, 0.22), rgba(217, 119, 6, 0.22))',
+                        border: '1.5px solid rgba(245, 158, 11, 0.5)',
+                        color: '#fbbf24',
+                        fontWeight: 800,
+                        fontSize: '0.85rem',
+                        cursor: 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        gap: '8px',
+                        boxShadow: '0 4px 12px rgba(245, 158, 11, 0.15)',
+                      }}
+                    >
+                      ⭐ Rate & Review Served Food (+₹10 Reward)
+                    </button>
+                  ) : (
+                    <div
+                      style={{
+                        padding: '10px 14px',
+                        borderRadius: '10px',
+                        background: 'rgba(255, 255, 255, 0.04)',
+                        border: '1px solid rgba(255, 255, 255, 0.08)',
+                        color: '#94a3b8',
+                        fontSize: '0.78rem',
+                        textAlign: 'center',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        gap: '6px',
+                      }}
+                    >
+                      <span>⏳</span>
+                      <span>Dishes are cooking in the kitchen! Rating unlocks once served to your table 🍽️</span>
+                    </div>
+                  )}
                   <button
                     className="accordion-add-action-btn"
                     onClick={() => setIsOrdersHistoryOpen(false)}
@@ -8292,6 +9018,263 @@ export default function CustomerDineInPage() {
                 </div>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* ── Rate & Review Food Items Modal Sheet ── */}
+      {reviewingOrder && (
+        <div className="filter-sheet-overlay" onClick={() => setReviewingOrder(null)} style={{ zIndex: 130 }}>
+          <div
+            className="filter-sheet-panel"
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              maxHeight: '85vh',
+              overflowY: 'auto',
+              background: '#0f172a',
+              border: '1px solid rgba(255, 255, 255, 0.12)',
+              borderRadius: '16px 16px 0 0',
+              padding: '20px',
+            }}
+          >
+            {/* Header */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+              <div>
+                <h3 style={{ fontSize: '1.15rem', fontWeight: 800, color: '#fff', margin: 0 }}>
+                  ⭐ Rate & Review Your Food
+                </h3>
+                <div style={{ fontSize: '0.75rem', color: '#94a3b8', marginTop: '2px' }}>
+                  Order #{((reviewingOrder as any).order_number || reviewingOrder.id.slice(0, 8)).toUpperCase()} · Table {selectedTable}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setReviewingOrder(null)}
+                style={{
+                  background: 'rgba(255,255,255,0.08)',
+                  border: 'none',
+                  color: '#94a3b8',
+                  borderRadius: '50%',
+                  width: '32px',
+                  height: '32px',
+                  fontSize: '1rem',
+                  cursor: 'pointer',
+                }}
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Overall Experience Stars */}
+            <div
+              style={{
+                background: 'rgba(255, 255, 255, 0.03)',
+                border: '1px solid rgba(255, 255, 255, 0.08)',
+                borderRadius: '12px',
+                padding: '14px',
+                marginBottom: '16px',
+                textAlign: 'center',
+              }}
+            >
+              <div style={{ fontSize: '0.82rem', color: '#cbd5e1', fontWeight: 700, marginBottom: '8px' }}>
+                How was your dining experience?
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'center', gap: '10px', fontSize: '1.8rem', cursor: 'pointer' }}>
+                {[1, 2, 3, 4, 5].map((star) => (
+                  <span
+                    key={star}
+                    onClick={() => setOverallOrderRating(star)}
+                    style={{
+                      color: star <= overallOrderRating && overallOrderRating > 0 ? '#fbbf24' : '#475569',
+                      transition: 'transform 0.15s ease',
+                      transform: star <= overallOrderRating && overallOrderRating > 0 ? 'scale(1.1)' : 'scale(1)',
+                    }}
+                  >
+                    ★
+                  </span>
+                ))}
+              </div>
+              <div style={{ fontSize: '0.74rem', color: overallOrderRating > 0 ? '#fbbf24' : '#94a3b8', marginTop: '4px', fontWeight: 700 }}>
+                {overallOrderRating === 5
+                  ? 'Exceptional! 🌟'
+                  : overallOrderRating === 4
+                  ? 'Very Good! 😊'
+                  : overallOrderRating === 3
+                  ? 'Good 👍'
+                  : overallOrderRating === 2
+                  ? 'Fair 😐'
+                  : overallOrderRating === 1
+                  ? 'Needs Improvement 😞'
+                  : 'Tap stars to rate your overall dining experience'}
+              </div>
+            </div>
+
+            {/* Per-Dish Ratings */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', marginBottom: '16px' }}>
+              <div style={{ fontSize: '0.85rem', fontWeight: 800, color: '#f8fafc' }}>
+                Served dishes in this order ({reviewingOrder.items.length}):
+              </div>
+              {reviewingOrder.items.map((item, idx) => {
+                const menuItemId = (item as any).menu_item_id || (item as any).itemId || `item-${idx}`;
+                const currentRating = dishRatings[menuItemId]?.rating ?? 0;
+                const currentReview = dishRatings[menuItemId]?.review || '';
+                const matchedMenu = menuItems.find((m) => m.name.toLowerCase() === item.name_snapshot.toLowerCase());
+
+                return (
+                  <div
+                    key={idx}
+                    style={{
+                      background: 'rgba(255, 255, 255, 0.04)',
+                      border: '1px solid rgba(255, 255, 255, 0.08)',
+                      borderRadius: '12px',
+                      padding: '12px',
+                    }}
+                  >
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        {matchedMenu?.imageUrl && (
+                          <img
+                            src={matchedMenu.imageUrl}
+                            alt={item.name_snapshot}
+                            style={{ width: '36px', height: '36px', borderRadius: '6px', objectFit: 'cover' }}
+                          />
+                        )}
+                        <div>
+                          <div style={{ fontWeight: 700, fontSize: '0.88rem', color: '#fff' }}>
+                            {item.name_snapshot}
+                          </div>
+                          <div style={{ fontSize: '0.72rem', color: '#94a3b8' }}>
+                            {item.quantity}x · ₹{(((item.unit_price_paise || item.line_total_paise || 0)) / 100).toFixed(0)}
+                          </div>
+                        </div>
+                      </div>
+                      {/* Star Rating for Dish */}
+                      <div style={{ display: 'flex', gap: '4px', fontSize: '1.3rem', cursor: 'pointer' }}>
+                        {[1, 2, 3, 4, 5].map((s) => (
+                          <span
+                            key={s}
+                            onClick={() => {
+                              setDishRatings((prev) => ({
+                                ...prev,
+                                [menuItemId]: {
+                                  rating: s,
+                                  review: prev[menuItemId]?.review || '',
+                                },
+                              }));
+                            }}
+                            style={{ color: s <= currentRating && currentRating > 0 ? '#fbbf24' : '#475569' }}
+                          >
+                            ★
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                    {/* Review text for Dish */}
+                    <input
+                      type="text"
+                      placeholder={`What did you like about ${item.name_snapshot}? (optional)`}
+                      value={currentReview}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setDishRatings((prev) => ({
+                          ...prev,
+                          [menuItemId]: {
+                            rating: prev[menuItemId]?.rating ?? 0,
+                            review: val,
+                          },
+                        }));
+                      }}
+                      style={{
+                        width: '100%',
+                        padding: '8px 10px',
+                        borderRadius: '8px',
+                        background: 'rgba(0, 0, 0, 0.4)',
+                        border: '1px solid rgba(255, 255, 255, 0.1)',
+                        color: '#fff',
+                        fontSize: '0.78rem',
+                        marginTop: '4px',
+                      }}
+                    />
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Quick Review Tags */}
+            <div style={{ marginBottom: '16px' }}>
+              <div style={{ fontSize: '0.78rem', color: '#94a3b8', fontWeight: 600, marginBottom: '6px' }}>
+                Highlights:
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                {['Delicious Food', 'Authentic Flavors', 'Perfect Spice', 'Hot & Fresh', 'Quick Service', 'Great Ambience'].map((tag) => {
+                  const isSelected = selectedReviewTags.includes(tag);
+                  return (
+                    <button
+                      key={tag}
+                      type="button"
+                      onClick={() => {
+                        setSelectedReviewTags((prev) =>
+                          isSelected ? prev.filter((t) => t !== tag) : [...prev, tag]
+                        );
+                      }}
+                      style={{
+                        background: isSelected ? 'rgba(245, 158, 11, 0.25)' : 'rgba(255, 255, 255, 0.05)',
+                        border: isSelected ? '1px solid #f59e0b' : '1px solid rgba(255, 255, 255, 0.1)',
+                        color: isSelected ? '#fbbf24' : '#94a3b8',
+                        padding: '4px 10px',
+                        borderRadius: '999px',
+                        fontSize: '0.72rem',
+                        fontWeight: 600,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      {tag}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Overall Comments */}
+            <div style={{ marginBottom: '18px' }}>
+              <textarea
+                placeholder="Additional comments or chef feedback (optional)..."
+                value={overallOrderComment}
+                onChange={(e) => setOverallOrderComment(e.target.value)}
+                rows={2}
+                style={{
+                  width: '100%',
+                  padding: '8px 10px',
+                  borderRadius: '8px',
+                  background: 'rgba(0, 0, 0, 0.4)',
+                  border: '1px solid rgba(255, 255, 255, 0.1)',
+                  color: '#fff',
+                  fontSize: '0.78rem',
+                  resize: 'none',
+                }}
+              />
+            </div>
+
+            {/* Submit Button */}
+            <button
+              type="button"
+              disabled={submittingReview}
+              onClick={handleSubmitDishReviews}
+              style={{
+                width: '100%',
+                padding: '12px',
+                borderRadius: '10px',
+                background: 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)',
+                color: '#000',
+                fontWeight: 800,
+                fontSize: '0.92rem',
+                border: 'none',
+                cursor: submittingReview ? 'not-allowed' : 'pointer',
+                boxShadow: '0 4px 14px rgba(245, 158, 11, 0.35)',
+              }}
+            >
+              {submittingReview ? 'Submitting Review...' : 'Submit Food Review & Earn Rewards ⭐'}
+            </button>
           </div>
         </div>
       )}
@@ -9619,42 +10602,108 @@ export default function CustomerDineInPage() {
                       <span style={{ fontSize: '0.72rem', color: 'var(--accent-gold)', fontWeight: 700 }}>
                         Chef suggestions for your cart:
                       </span>
-                      {msg.proposedCartItems.map((prop, idx) => (
-                        <div
-                          key={idx}
-                          style={{
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'space-between',
-                            background: 'rgba(0,0,0,0.3)',
-                            padding: '6px 10px',
-                            borderRadius: '8px',
-                            border: '1px solid rgba(255,255,255,0.1)',
-                          }}
-                        >
-                          <div>
-                            <div style={{ fontWeight: 700, fontSize: '0.82rem' }}>{prop.name}</div>
-                            <div style={{ fontSize: '0.72rem', color: '#94a3b8' }}>
-                              ₹{(prop.pricePaise / 100).toFixed(0)} {prop.quantity > 1 ? `· Qty: ${prop.quantity}` : ''}
-                            </div>
-                          </div>
-                          <button
-                            onClick={() => handleAddProposedItemToCart(prop)}
+                      {msg.proposedCartItems.map((prop, idx) => {
+                        const matched = menuItems.find(
+                          (m) => m.id === prop.itemId || m.name.toLowerCase() === prop.name.toLowerCase(),
+                        );
+                        const cartQty = getItemCartQty(matched?.id || prop.itemId);
+
+                        return (
+                          <div
+                            key={idx}
                             style={{
-                              background: 'var(--accent-gold)',
-                              color: '#000',
-                              border: 'none',
-                              padding: '4px 10px',
-                              borderRadius: '6px',
-                              fontSize: '0.75rem',
-                              fontWeight: 800,
-                              cursor: 'pointer',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'space-between',
+                              background: 'rgba(0,0,0,0.3)',
+                              padding: '8px 10px',
+                              borderRadius: '8px',
+                              border: '1px solid rgba(255,255,255,0.1)',
+                              gap: '8px',
                             }}
                           >
-                            + Add
-                          </button>
-                        </div>
-                      ))}
+                            <div style={{ flex: 1 }}>
+                              <div style={{ fontWeight: 700, fontSize: '0.82rem' }}>{prop.name}</div>
+                              <div style={{ fontSize: '0.72rem', color: '#94a3b8' }}>
+                                ₹{(prop.pricePaise / 100).toFixed(0)} {prop.quantity > 1 ? `· Qty: ${prop.quantity}` : ''}
+                              </div>
+                              {prop.notes && (
+                                <div
+                                  style={{
+                                    display: 'inline-block',
+                                    marginTop: '3px',
+                                    fontSize: '0.70rem',
+                                    color: '#fbbf24',
+                                    background: 'rgba(245, 158, 11, 0.15)',
+                                    border: '1px solid rgba(245, 158, 11, 0.3)',
+                                    borderRadius: '4px',
+                                    padding: '1px 6px',
+                                    fontWeight: 600,
+                                  }}
+                                >
+                                  📝 {prop.notes}
+                                </div>
+                              )}
+                            </div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                              {cartQty > 0 ? (
+                                <div className="menu-stepper-wrap" style={{ transform: 'scale(0.85)', margin: 0 }}>
+                                  <button onClick={(e) => handleQuickDecrement(matched?.id || prop.itemId, e)}>
+                                    −
+                                  </button>
+                                  <span>{cartQty}</span>
+                                  <button
+                                    onClick={(e) => {
+                                      if (matched) handleQuickAdd(matched, e);
+                                      else handleAddProposedItemToCart(prop);
+                                    }}
+                                  >
+                                    +
+                                  </button>
+                                </div>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() => handleAddProposedItemToCart(prop)}
+                                  style={{
+                                    background: 'var(--accent-gold)',
+                                    color: '#000',
+                                    border: 'none',
+                                    padding: '5px 12px',
+                                    borderRadius: '6px',
+                                    fontSize: '0.75rem',
+                                    fontWeight: 800,
+                                    cursor: 'pointer',
+                                    boxShadow: '0 2px 8px rgba(245, 158, 11, 0.3)',
+                                  }}
+                                >
+                                  + Add
+                                </button>
+                              )}
+                              {matched && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenAccordion(matched)}
+                                  style={{
+                                    background: 'rgba(255, 255, 255, 0.08)',
+                                    color: '#cbd5e1',
+                                    border: '1px solid rgba(255, 255, 255, 0.16)',
+                                    padding: '5px 8px',
+                                    borderRadius: '6px',
+                                    fontSize: '0.72rem',
+                                    fontWeight: 700,
+                                    cursor: 'pointer',
+                                    whiteSpace: 'nowrap',
+                                  }}
+                                  title="Customize spice, portion & modifiers"
+                                >
+                                  ⚙️ Customize
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
                     </div>
                   )}
                 </div>
