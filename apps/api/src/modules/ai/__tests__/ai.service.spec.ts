@@ -347,5 +347,95 @@ describe('AiService (Phase 10)', () => {
       expect(goldRes.answer).toContain("I'm not sure — please ask staff");
       expect(goldRes.callWaiterSuggested).toBe(true);
     });
+
+    it('prompts to sign in when asking for favorites or previous order while logged out', async () => {
+      const adapter = new MockAiAdapter();
+      const favRes = await adapter.chat(
+        [{ role: 'user', content: 'what are my favourite items?' }],
+        [],
+        { isLoggedIn: false },
+      );
+      expect(favRes.answer).toContain('Please sign in');
+
+      const prevRes = await adapter.chat(
+        [{ role: 'user', content: 'what was my previous order?' }],
+        [],
+        { isLoggedIn: false },
+      );
+      expect(prevRes.answer).toContain('Please sign in');
+    });
+
+    it('answers favorite items, previous orders, and liked dishes based on reviews when logged in', async () => {
+      const adapter = new MockAiAdapter();
+      const mockContext = {
+        isLoggedIn: true,
+        wishlistDishes: ['Filter Coffee', 'Paneer Tikka'],
+        pastOrders: [
+          {
+            date: '12 Nov 2026',
+            items: [{ name: 'Filter Coffee', quantity: 2, notes: 'Strong brew, less sugar' }],
+          },
+        ],
+        likedDishes: [
+          { dishName: 'Filter Coffee', rating: 5, review: 'Loved the strong brew!' },
+        ],
+      };
+
+      const favRes = await adapter.chat(
+        [{ role: 'user', content: 'what is my wishlist?' }],
+        [
+          {
+            id: '11111111-1111-4111-8111-111111111111',
+            name: 'Filter Coffee',
+            pricePaise: 7900,
+            vegType: 'VEG',
+            allergens: [],
+            spiceLevel: 0,
+            isAvailable: true,
+          },
+        ],
+        mockContext,
+      );
+      expect(favRes.answer).toContain('Filter Coffee');
+      expect(favRes.proposedCartItems?.length).toBeGreaterThan(0);
+
+      const prevRes = await adapter.chat(
+        [{ role: 'user', content: 'what was my previous order?' }],
+        [],
+        mockContext,
+      );
+      expect(prevRes.answer).toContain('12 Nov 2026');
+      expect(prevRes.answer).toContain('Filter Coffee');
+
+      const reviewRes = await adapter.chat(
+        [{ role: 'user', content: 'which one did I like very much based on my reviews?' }],
+        [],
+        mockContext,
+      );
+      expect(reviewRes.answer).toContain('Filter Coffee');
+      expect(reviewRes.answer).toContain('Loved the strong brew!');
+    });
+
+    it('parses requested customizations into proposedCartItems notes', async () => {
+      const adapter = new MockAiAdapter();
+      const res = await adapter.chat(
+        [{ role: 'user', content: 'add coffee and customise it to be more strong and less sugar' }],
+        [
+          {
+            id: '11111111-1111-4111-8111-111111111111',
+            name: 'Filter Coffee',
+            pricePaise: 7900,
+            vegType: 'VEG',
+            allergens: [],
+            spiceLevel: 0,
+            isAvailable: true,
+          },
+        ],
+        { isLoggedIn: true },
+      );
+      expect(res.proposedCartItems?.[0]?.notes).toContain('Strong brew');
+      expect(res.proposedCartItems?.[0]?.notes).toContain('less sugar');
+      expect(res.answer).toContain('customisation');
+    });
   });
 });
