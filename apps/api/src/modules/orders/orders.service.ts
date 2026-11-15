@@ -604,6 +604,158 @@ export class OrdersService {
     });
   }
 
+  /**
+   * Customer signals kitchen that an on-hold dish (e.g. Filter Coffee or dessert)
+   * should now be prepared fresh and sent to the table.
+   */
+  async releaseItemHold(
+    orgId: string,
+    orderId: string,
+    itemId: string,
+    actorId: string,
+    scope: CustomerAccessScope,
+  ) {
+    if (!OrdersService.UUID_RE.test(itemId)) {
+      throw domainError(ErrorCode.NOT_FOUND, 'Order item not found.', 404);
+    }
+    const targetOrgId = await this.resolveOrderOrgId(orgId, orderId);
+
+    return withTenantContextRaw(targetOrgId, async (db) => {
+      const { rows: ordRows } = await db.query<{
+        id: string;
+        outlet_id: string;
+        table_id: string;
+        session_id: string | null;
+        customer_id: string | null;
+        temp_customer_id?: string | null;
+        status: OrderStatus;
+      }>(
+        `SELECT id, outlet_id, table_id, session_id, customer_id, temp_customer_id, status
+         FROM orders WHERE id = $1 AND org_id = $2`,
+        [orderId, targetOrgId],
+      );
+      const order = ordRows[0];
+      if (!order) throw domainError(ErrorCode.NOT_FOUND, 'Order not found.', 404);
+
+      let sessionCustomerId: string | null = null;
+      let sessionTempCustomerId: string | null = null;
+      if (order.session_id) {
+        const { rows: sRows } = await db.query<{
+          customer_id: string | null;
+          temp_customer_id?: string | null;
+        }>(
+          `SELECT customer_id, temp_customer_id FROM table_sessions WHERE id = $1 AND org_id = $2`,
+          [order.session_id, targetOrgId],
+        );
+        sessionCustomerId = sRows[0]?.customer_id ?? null;
+        sessionTempCustomerId = sRows[0]?.temp_customer_id ?? null;
+      }
+      assertCustomerAccessScope(scope, {
+        session_id: order.session_id,
+        customer_id: order.customer_id,
+        session_customer_id: sessionCustomerId,
+        temp_customer_id: order.temp_customer_id ?? null,
+        session_temp_customer_id: sessionTempCustomerId,
+      });
+
+      if (order.status === 'BILLED' || order.status === 'CANCELLED') {
+        throw domainError(
+          ErrorCode.VALIDATION_ERROR,
+          `Cannot release items on '${order.status}' order.`,
+          400,
+        );
+      }
+
+      const { rows: itemRows } = await db.query<{
+        id: string;
+        order_id: string;
+        name_snapshot: string;
+        notes: string | null;
+        status: ItemStatus;
+      }>(
+        `SELECT id, order_id, name_snapshot, notes, status
+         FROM order_items WHERE id = $1 AND org_id = $2 FOR UPDATE`,
+        [itemId, targetOrgId],
+      );
+      const item = itemRows[0];
+      if (!item || item.order_id !== orderId) {
+        throw domainError(ErrorCode.NOT_FOUND, 'Order item not found.', 404);
+      }
+
+      // Append [RELEASED_TO_KITCHEN] if not present
+      const rawNotes = item.notes || '';
+      const updatedNotes = rawNotes.includes('[RELEASED_TO_KITCHEN]')
+        ? rawNotes
+        : rawNotes
+        ? `${rawNotes} · [RELEASED_TO_KITCHEN]`
+        : '[RELEASED_TO_KITCHEN]';
+
+      // Advance item status to PREPARING if it was PENDING
+      const nextItemStatus = item.status === 'PENDING' ? 'PREPARING' : item.status;
+
+      await db.query(
+        `UPDATE order_items
+         SET notes = $1, status = $2, updated_at = now()
+         WHERE id = $3 AND org_id = $4`,
+        [updatedNotes, nextItemStatus, itemId, targetOrgId],
+      );
+
+      // Auto-advance order status if it was CONFIRMED or PENDING
+      if (order.status === 'PENDING' || order.status === 'CONFIRMED') {
+        if (canTransitionOrder(order.status, 'PREPARING').ok) {
+          await db.query(
+            `UPDATE orders SET status = 'PREPARING', updated_at = now() WHERE id = $1 AND org_id = $2`,
+            [orderId, targetOrgId],
+          );
+        }
+      }
+
+      const validActorUuid = this.toValidUuidOrNull(actorId);
+
+      // Append-only audit log
+      await db.query(
+        `INSERT INTO order_events (org_id, order_id, event_type, actor_type, actor_id, payload)
+         VALUES ($1, $2, 'ITEM_RELEASED_FROM_HOLD', 'CUSTOMER', $3, $4)`,
+        [
+          targetOrgId,
+          orderId,
+          validActorUuid,
+          JSON.stringify({
+            itemId,
+            itemName: item.name_snapshot,
+            releasedAt: new Date().toISOString(),
+          }),
+        ],
+      );
+
+      // Realtime Outbox Event
+      await db.query(
+        `INSERT INTO outbox_events (org_id, aggregate, aggregate_id, event_type, payload)
+         VALUES ($1, 'order', $2, 'ORDER_ITEM_RELEASED', $3)`,
+        [
+          targetOrgId,
+          orderId,
+          JSON.stringify({
+            orderId,
+            itemId,
+            itemName: item.name_snapshot,
+            notes: updatedNotes,
+            status: nextItemStatus,
+          }),
+        ],
+      );
+
+      return {
+        id: itemId,
+        order_id: orderId,
+        name_snapshot: item.name_snapshot,
+        notes: updatedNotes,
+        status: nextItemStatus,
+        is_released: true,
+      };
+    });
+  }
+
   // ─── Update Order Status ─────────────────────────────────────────────────────
 
   async updateOrderStatus(
