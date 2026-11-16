@@ -4,10 +4,12 @@ import { z } from 'zod';
 
 function loadLocalEnvIfPresent() {
   const candidates = [
-    path.resolve(process.cwd(), '.env.local'),
-    path.resolve(process.cwd(), '.env'),
-    path.resolve(process.cwd(), '../../.env.local'),
+    path.resolve(process.cwd(), '../.env'),
     path.resolve(process.cwd(), '../../.env'),
+    path.resolve(process.cwd(), '.env'),
+    path.resolve(process.cwd(), '../.env.local'),
+    path.resolve(process.cwd(), '../../.env.local'),
+    path.resolve(process.cwd(), '.env.local'),
   ];
   for (const file of candidates) {
     if (fs.existsSync(file)) {
@@ -19,9 +21,7 @@ function loadLocalEnvIfPresent() {
         if (eqIdx > 0) {
           const key = trimmed.slice(0, eqIdx).trim();
           const val = trimmed.slice(eqIdx + 1).trim();
-          if (process.env[key] === undefined || process.env[key] === '') {
-            process.env[key] = val;
-          }
+          process.env[key] = val;
         }
       }
     }
@@ -41,6 +41,7 @@ const envSchema = z
   .object({
     NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
     PORT: z.coerce.number().int().positive().default(3000),
+    DISABLE_RATE_LIMIT: z.enum(['true', 'false']).optional().default('false'),
 
     // Database
     DATABASE_URL: z
@@ -79,6 +80,7 @@ const envSchema = z
     PHONEPE_CLIENT_ID:         z.string().min(1).optional().default('PGTESTPAYUAT86'),
     PHONEPE_CLIENT_SECRET:     z.string().min(1).optional().default('96434309-7796-489d-8924-ab56988a6076'),
     PHONEPE_CLIENT_VERSION:    z.coerce.number().int().positive().default(1),
+    PHONEPE_SALT_INDEX:        z.coerce.number().int().positive().optional().default(1),
     PHONEPE_ENV:               z.enum(['SANDBOX', 'PRODUCTION']).default('SANDBOX'),
     PHONEPE_WEBHOOK_USERNAME:  z.string().min(1).optional().default('phonepe_webhook_user'),
     PHONEPE_WEBHOOK_PASSWORD:  z.string().min(1).optional().default('phonepe_webhook_pass'),
