@@ -1,6 +1,17 @@
 'use client';
 
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { useOrderStore } from '../store/useOrderStore';
+import { SquareItemCard, FALLBACK_DISH_IMG } from '../components/menu/SquareItemCard';
+import { DineInCheckoutModal, DineInBillBreakdown } from '../components/checkout/DineInCheckoutModal';
+import { CartDrawer } from '../components/cart/CartDrawer';
+import { ItemCustomizerModal } from '../components/modals/ItemCustomizerModal';
+import { MenuGrid } from '../components/menu/MenuGrid';
+import { DEFAULT_CATEGORIES } from '../components/menu/menu-constants';
+import { OrdersHistoryView } from '../components/orders/OrdersHistoryView';
+import { CustomerAuthModal } from '../components/modals/CustomerAuthModal';
+import { TopNavBar } from '../components/layout/TopNavBar';
+import { OrderTrackerBanner } from '../components/layout/OrderTrackerBanner';
 import {
   buildSignedQrTokenFromSearch,
   extractUrlTableAndOutlet,
@@ -1497,16 +1508,26 @@ export default function CustomerDineInPage() {
   // Navigation View: 'home' (Discovery & Browse Feed) | 'menu' (Full Menu Page)
   const [currentView, setCurrentView] = useState<'home' | 'menu'>('home');
 
-  // Table and Dining Session State (verified exclusively via signed QR token)
-  const [selectedTable, setSelectedTable] = useState('--');
-  const [tablePax, setTablePax] = useState(2);
-  const [activeSessionId, setActiveSessionId] = useState<string>('');
-  const [activeTableId, setActiveTableId] = useState<string>('');
-  const [activeOrgId, setActiveOrgId] = useState<string>(() => resolveTenantIds().orgId);
-  const [activeOutletId, setActiveOutletId] = useState<string>(() => resolveTenantIds().outletId);
+  // Table and Dining Session State (sourced strictly from Zustand store)
+  const selectedTable = useOrderStore((s) => s.selectedTable);
+  const setSelectedTable = useOrderStore((s) => s.setSelectedTable);
+  const isTableVerified = useOrderStore((s) => s.isTableVerified);
+  const setIsTableVerified = useOrderStore((s) => s.setIsTableVerified);
+  const isTableModalOpen = useOrderStore((s) => s.isTableModalOpen);
+  const setIsTableModalOpen = useOrderStore((s) => s.setIsTableModalOpen);
+  const activeSessionId = useOrderStore((s) => s.activeSessionId);
+  const activeTableId = useOrderStore((s) => s.activeTableId);
+  const activeOrgId = useOrderStore((s) => s.activeOrgId || resolveTenantIds().orgId);
+  const activeOutletId = useOrderStore((s) => s.activeOutletId || resolveTenantIds().outletId);
+  const tablePax = useOrderStore((s) => s.tablePax);
+  const setSessionDetails = useOrderStore((s) => s.setSessionDetails);
+
+  const setActiveSessionId = useCallback((id: string) => setSessionDetails({ sessionId: id }), [setSessionDetails]);
+  const setActiveTableId = useCallback((id: string) => setSessionDetails({ tableId: id }), [setSessionDetails]);
+  const setActiveOrgId = useCallback((id: string) => setSessionDetails({ orgId: id }), [setSessionDetails]);
+  const setActiveOutletId = useCallback((id: string) => setSessionDetails({ outletId: id }), [setSessionDetails]);
+  const setTablePax = useCallback((pax: number) => useOrderStore.setState({ tablePax: pax }), []);
   const [manualQrInput, setManualQrInput] = useState('');
-  const [isTableVerified, setIsTableVerified] = useState(false);
-  const [isTableModalOpen, setIsTableModalOpen] = useState(false);
   const [isTopTableClosing, setIsTopTableClosing] = useState(false);
   const [outletTables, setOutletTables] = useState<OutletTableInfo[]>([]);
   const [outletTablesLoaded, setOutletTablesLoaded] = useState(false);
@@ -1546,63 +1567,27 @@ export default function CustomerDineInPage() {
   // Menu items list
   const [menuItems, setMenuItems] = useState<MenuItem[]>(PILOT_MENU);
 
-  // Cart & Line Items (with robust localStorage persistence and SSR hydration safety)
+  // Cart & Line Items (with robust localStorage persistence and SSR hydration safety via Zustand)
   const [isMounted, setIsMounted] = useState(false);
-  const [cartLines, setCartLines] = useState<CartLineItem[]>([]);
+  const cartLines = useOrderStore((state) => state.cartLines);
+  const setCartLines = useOrderStore((state) => state.setCartLines);
   const [isAvailableCouponsOpen, setIsAvailableCouponsOpen] = useState(false);
 
   // Load cart from localStorage once on client mount to avoid SSR hydration mismatches
   useEffect(() => {
     setIsMounted(true);
-    try {
-      const saved = localStorage.getItem('dineflow_customer_cart_v2');
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          setCartLines(parsed);
-        }
-      }
-    } catch {}
+    useOrderStore.getState().hydrateFromStorage();
   }, []);
-
-  // Sync cartLines to localStorage whenever changed (strictly after initial client mount)
-  useEffect(() => {
-    if (!isMounted) return;
-    try {
-      if (cartLines.length > 0) {
-        localStorage.setItem('dineflow_customer_cart_v2', JSON.stringify(cartLines));
-      } else {
-        localStorage.removeItem('dineflow_customer_cart_v2');
-      }
-    } catch {}
-  }, [cartLines, isMounted]);
-  const [isCartOpen, setIsCartOpen] = useState(false);
+  const isCartOpen = useOrderStore((s) => s.isCartOpen);
+  const setIsCartOpen = useOrderStore((s) => s.setIsCartOpen);
   const [isPlacingOrder, setIsPlacingOrder] = useState(false);
-  const [appliedCoupon, setAppliedCoupon] = useState<string | null>(null);
+  const appliedCoupon = useOrderStore((s) => s.appliedCoupon);
+  const setAppliedCoupon = useOrderStore((s) => s.setAppliedCoupon);
   const [couponInput, setCouponInput] = useState('');
   const [couponError, setCouponError] = useState<string | null>(null);
 
   // Accordion-style in-place customisation state (Only one item expanded at a time)
   const [expandedAccordionItemId, setExpandedAccordionItemId] = useState<string | null>(null);
-  const [accordionQty, setAccordionQty] = useState(1);
-  const [accordionPortion, setAccordionPortion] = useState<'FULL' | 'HALF'>('FULL');
-  const [accordionSpice, setAccordionSpice] = useState<'MILD' | 'MEDIUM' | 'HOT' | 'NONE'>('MEDIUM');
-  const [accordionNote, setAccordionNote] = useState('');
-  const [accordionModifiers, setAccordionModifiers] = useState<ModifierOption[]>([]);
-
-  // Per-Plate Customisation State: the "one spicy biryani out of three" case
-  const [isPerPlateSplit, setIsPerPlateSplit] = useState(false);
-  const [activePlateIndex, setActivePlateIndex] = useState(1);
-  const [plateConfigs, setPlateConfigs] = useState<
-    Array<{
-      plateIndex: number;
-      customName?: string;
-      portion?: 'FULL' | 'HALF';
-      spice: 'MILD' | 'MEDIUM' | 'HOT' | 'NONE';
-      notes: string;
-      modifiers: ModifierOption[];
-    }>
-  >([]);
 
   // ── Diner Profiles & Taste Preferences State ──
   // Saved diner profiles belong strictly to authenticated customers.
@@ -1623,7 +1608,8 @@ export default function CustomerDineInPage() {
   const [newProfileNotes, setNewProfileNotes] = useState('');
 
   // ── Item & Combo Customization State ──
-  const [activeCustomizingItem, setActiveCustomizingItem] = useState<MenuItem | null>(null);
+  const activeCustomizingItem = useOrderStore((s) => s.customizingItem);
+  const setActiveCustomizingItem = useOrderStore((s) => s.setCustomizingItem);
   const [activeComboOffer, setActiveComboOffer] = useState<ComboOffer | null>(null);
   const [comboDishPlates, setComboDishPlates] = useState<Record<string, ComboDishPlate[]>>({});
   const [activeDishPlateId, setActiveDishPlateId] = useState<Record<string, string>>({});
@@ -1649,7 +1635,8 @@ export default function CustomerDineInPage() {
   // Orders History State: Only paid orders are visible (unpaid/pending items remain in cart)
   // Four sections for order status: PREPARING, ON_HOLD (Serve Later), SERVED, CANCELLED
   const [sessionOrders, setSessionOrders] = useState<TableOrderRecord[]>([]);
-  const [isOrdersHistoryOpen, setIsOrdersHistoryOpen] = useState(false);
+  const isOrdersHistoryOpen = useOrderStore((s) => s.isOrdersHistoryOpen);
+  const setIsOrdersHistoryOpen = useOrderStore((s) => s.setIsOrdersHistoryOpen);
   const [ordersFilterTab, setOrdersFilterTab] = useState<'PREPARING' | 'ON_HOLD' | 'SERVED' | 'CANCELLED'>('PREPARING');
   const [releasedHoldPlateKeys, setReleasedHoldPlateKeys] = useState<Record<string, boolean>>(() => {
     if (typeof window === 'undefined') return {};
@@ -1716,25 +1703,10 @@ export default function CustomerDineInPage() {
     }
   };
 
-  // Customer Authentication & Profile State
-  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
-  const [isAuthClosing, setIsAuthClosing] = useState(false);
-  const [authMode, setAuthMode] = useState<'SIGNIN' | 'SIGNUP'>('SIGNIN');
+  // Customer Authentication & Profile State (isAuthModalOpen sourced from Zustand store)
+  const isAuthModalOpen = useOrderStore((s) => s.isAuthModalOpen);
+  const setIsAuthModalOpen = useOrderStore((s) => s.setIsAuthModalOpen);
   const [isProfileOpen, setIsProfileOpen] = useState(false);
-  const [customerPhoneInput, setCustomerPhoneInput] = useState('');
-  const [authEmailInput, setAuthEmailInput] = useState('');
-  const [authEmailLocked, setAuthEmailLocked] = useState(false);
-  const [authDisplayNameInput, setAuthDisplayNameInput] = useState('');
-  const [googlePreRegToken, setGooglePreRegToken] = useState<string | null>(null);
-  const [authChannelLabel, setAuthChannelLabel] = useState<'WhatsApp' | 'SMS' | null>(null);
-  const [showDevGooglePicker, setShowDevGooglePicker] = useState(false);
-  const [devGoogleEmailInput, setDevGoogleEmailInput] = useState('');
-  const [devGoogleNameInput, setDevGoogleNameInput] = useState('');
-  const [customerOtpInput, setCustomerOtpInput] = useState('');
-  const [authStep, setAuthStep] = useState<'PHONE' | 'OTP'>('PHONE');
-  const [authLoading, setAuthLoading] = useState(false);
-  const [authDevCode, setAuthDevCode] = useState<string | null>(null);
-  const [authError, setAuthError] = useState('');
   const [customerToken, setCustomerToken] = useState<string | null>(null);
   const [customerId, setCustomerId] = useState<string | null>(null);
   const [customerProfile, setCustomerProfile] = useState<{
@@ -1766,12 +1738,17 @@ export default function CustomerDineInPage() {
   const [editorNutAllergy, setEditorNutAllergy] = useState<DinerPreferences['nutAllergyPreference']>('REGULAR_NUTS');
   const [editorNotes, setEditorNotes] = useState('');
 
-  // Payment Settlement State
-  const [isPaymentModalOpen, setIsPaymentModalOpen] = useState(false);
-  const [selectedPaymentMethod, setSelectedPaymentMethod] = useState<'UPI' | 'CASH'>('UPI');
-  const [paymentLoading, setPaymentLoading] = useState(false);
-  const [paymentQrData, setPaymentQrData] = useState<{ paymentId: string; orderId?: string; sessionId?: string; qrCodeUrl: string; upiString: string; redirectUrl?: string } | null>(null);
-  const [paymentSuccessData, setPaymentSuccessData] = useState<{ paymentId: string; totalPaise: number } | null>(null);
+  // Payment Settlement State (sourced from Zustand store)
+  const isPaymentModalOpen = useOrderStore((s) => s.isPaymentModalOpen);
+  const setIsPaymentModalOpen = useOrderStore((s) => s.setIsPaymentModalOpen);
+  const selectedPaymentMethod = useOrderStore((s) => s.selectedPaymentMethod);
+  const setSelectedPaymentMethod = useOrderStore((s) => s.setSelectedPaymentMethod);
+  const paymentLoading = useOrderStore((s) => s.paymentLoading);
+  const setPaymentLoading = useOrderStore((s) => s.setPaymentLoading);
+  const paymentQrData = useOrderStore((s) => s.paymentQrData);
+  const setPaymentQrData = useOrderStore((s) => s.setPaymentQrData);
+  const paymentSuccessData = useOrderStore((s) => s.paymentSuccessData);
+  const setPaymentSuccessData = useOrderStore((s) => s.setPaymentSuccessData);
 
   // Food Item Reviews State
   const [reviewingOrder, setReviewingOrder] = useState<TableOrderRecord | null>(null);
@@ -1863,31 +1840,29 @@ export default function CustomerDineInPage() {
     }, 300);
   }, [isTableModalOpen, isTopTableClosing]);
 
-  const openBottomAuthSheet = useCallback(
-    (mode: 'SIGNIN' | 'SIGNUP' = 'SIGNIN') => {
-      setIsAuthClosing(false);
-      setAuthMode(mode);
-      setAuthStep('PHONE');
-      setAuthError('');
-      setAuthDevCode(null);
-      setShowDevGooglePicker(false);
-      if (mode === 'SIGNIN') {
-        setAuthEmailLocked(false);
-        setGooglePreRegToken(null);
+  // Synchronize top table drawer inputs & tables whenever isTableModalOpen opens (e.g. via TopNavBar)
+  useEffect(() => {
+    if (isTableModalOpen) {
+      setIsTopTableClosing(false);
+      setTableNumberInput((prev) => prev || (selectedTable !== '--' ? sanitizeTableDigits(selectedTable) : ''));
+      const tenant = resolveTenantIds(loadGuestSession());
+      const targetOutlet = activeOutletId || tenant.outletId || undefined;
+      if (!outletTablesLoaded || outletTables.length === 0) {
+        void loadOutletTablesForTenant(targetOutlet, activeSlug);
       }
+    }
+  }, [isTableModalOpen, activeOutletId, activeSlug, loadOutletTablesForTenant, outletTables.length, outletTablesLoaded, selectedTable]);
+
+  const openBottomAuthSheet = useCallback(
+    (_mode: 'SIGNIN' | 'SIGNUP' = 'SIGNIN') => {
       setIsAuthModalOpen(true);
     },
-    [],
+    [setIsAuthModalOpen],
   );
 
   const closeBottomAuthSheet = useCallback(() => {
-    if (!isAuthModalOpen || isAuthClosing) return;
-    setIsAuthClosing(true);
-    setTimeout(() => {
-      setIsAuthModalOpen(false);
-      setIsAuthClosing(false);
-    }, 260);
-  }, [isAuthClosing, isAuthModalOpen]);
+    setIsAuthModalOpen(false);
+  }, [setIsAuthModalOpen]);
 
   const getLiveTableValidation = useCallback(
     (digits: string): { matched: OutletTableInfo | null; error: string } => {
@@ -1931,18 +1906,20 @@ export default function CustomerDineInPage() {
   const establishSignedTableSession = async (qrToken: string, pax: number = 2) => {
     const res = await openSignedTableSession(qrToken, pax);
     if (!res.ok) {
-      setIsTableVerified(false);
+      useOrderStore.getState().setIsTableVerified(false);
       showToast(res.error);
       return null;
     }
-    setActiveSessionId(res.session.sessionId);
-    setActiveTableId(res.session.tableId);
-    setActiveOrgId(res.session.orgId);
-    setActiveOutletId(res.session.outletId);
+    useOrderStore.getState().setSessionDetails({
+      sessionId: res.session.sessionId,
+      tableId: res.session.tableId,
+      orgId: res.session.orgId,
+      outletId: res.session.outletId,
+    });
     if (res.session.tableNumber) {
-      setSelectedTable(res.session.tableNumber);
+      useOrderStore.getState().setSelectedTable(res.session.tableNumber);
     }
-    setIsTableVerified(true);
+    useOrderStore.getState().setIsTableVerified(true);
     void loadOutletTablesForTenant(res.session.outletId);
     fetchSessionOrders(res.session.sessionId);
     return res.session;
@@ -1959,12 +1936,14 @@ export default function CustomerDineInPage() {
       showToast(res.error);
       return null;
     }
-    setActiveSessionId(res.session.sessionId);
-    setActiveTableId(res.session.tableId);
-    setActiveOrgId(res.session.orgId);
-    setActiveOutletId(res.session.outletId);
-    setSelectedTable(res.session.tableNumber || tableNumber);
-    setIsTableVerified(true);
+    useOrderStore.getState().setSessionDetails({
+      sessionId: res.session.sessionId,
+      tableId: res.session.tableId,
+      orgId: res.session.orgId,
+      outletId: res.session.outletId,
+    });
+    useOrderStore.getState().setSelectedTable(res.session.tableNumber || tableNumber);
+    useOrderStore.getState().setIsTableVerified(true);
     void loadOutletTablesForTenant(res.session.outletId, slugToUse ?? activeSlug);
     fetchSessionOrders(res.session.sessionId);
     return res.session;
@@ -1972,14 +1951,16 @@ export default function CustomerDineInPage() {
 
   const applyActiveGuestSession = useCallback(
     (sess: GuestSessionState, slugHint?: string) => {
-      setActiveSessionId(sess.sessionId);
-      setActiveTableId(sess.tableId);
-      setActiveOrgId(sess.orgId);
-      setActiveOutletId(sess.outletId);
+      useOrderStore.getState().setSessionDetails({
+        sessionId: sess.sessionId,
+        tableId: sess.tableId,
+        orgId: sess.orgId,
+        outletId: sess.outletId,
+      });
       if (sess.tableNumber) {
-        setSelectedTable(sess.tableNumber);
+        useOrderStore.getState().setSelectedTable(sess.tableNumber);
       }
-      setIsTableVerified(true);
+      useOrderStore.getState().setIsTableVerified(true);
       void loadOutletTablesForTenant(sess.outletId, slugHint);
     },
     [loadOutletTablesForTenant],
@@ -1996,22 +1977,47 @@ export default function CustomerDineInPage() {
       const targetOutletId = outletIdParam || tenant.outletId || undefined;
       if (slugParam) setActiveSlug(slugParam);
 
+      // 1. Sync Table Selection immediately when URL params are parsed
+      if (tableNumberParam) {
+        useOrderStore.getState().setSelectedTable(tableNumberParam);
+      }
+
       if (targetOutletId) {
-        setActiveOutletId(targetOutletId);
+        useOrderStore.getState().setSessionDetails({
+          outletId: targetOutletId,
+          orgId: tenant.orgId,
+        });
       }
       void loadOutletTablesForTenant(targetOutletId, slugParam || undefined);
 
+      // 2. Pre-hydrate from local/session storage if existing guest session is present
+      const existing = loadGuestSession();
+      if (existing?.sessionId) {
+        useOrderStore.getState().setSessionDetails({
+          sessionId: existing.sessionId,
+          tableId: existing.tableId,
+          orgId: existing.orgId,
+          outletId: existing.outletId,
+        });
+        if (existing.tableNumber) {
+          useOrderStore.getState().setSelectedTable(existing.tableNumber);
+        }
+        useOrderStore.getState().setIsTableVerified(true);
+      }
+
+      // 3. If signed QR token is present, establish signed session
       if (signedQrToken) {
         await establishSignedTableSession(signedQrToken, tablePax);
         return;
       }
 
+      // 4. If table number param without QR token, establish manual session
       if (tableNumberParam) {
         await establishManualTableSession(targetOutletId, tableNumberParam, tablePax, slugParam || undefined);
         return;
       }
 
-      // Restore persistent temporary customer & active table from HttpOnly cookie (survives refresh & PhonePe tabs)
+      // 5. Restore persistent temporary customer & active table from HttpOnly cookie (survives refresh & PhonePe tabs)
       const remote = await fetchCurrentGuestSessionRemote();
       if (!active) return;
 
@@ -2022,10 +2028,12 @@ export default function CustomerDineInPage() {
       }
 
       if (remote?.dissolved) {
-        setActiveSessionId('');
-        setActiveTableId('');
-        setSelectedTable('--');
-        setIsTableVerified(false);
+        useOrderStore.getState().setSessionDetails({
+          sessionId: '',
+          tableId: '',
+        });
+        useOrderStore.getState().setSelectedTable('--');
+        useOrderStore.getState().setIsTableVerified(false);
         if (!loadCustomerAuth()) {
           setSessionOrders([]);
         }
@@ -2035,7 +2043,6 @@ export default function CustomerDineInPage() {
         return;
       }
 
-      const existing = loadGuestSession();
       if (existing && remote === null) {
         applyActiveGuestSession(existing, slugParam || undefined);
         void fetchSessionOrders(existing.sessionId);
@@ -2052,7 +2059,7 @@ export default function CustomerDineInPage() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [applyActiveGuestSession, loadOutletTablesForTenant, tablePax]);
 
   // ── 3. Fetch Live Menu from API ───────────────────────────────────────────
   useEffect(() => {
@@ -2394,62 +2401,7 @@ export default function CustomerDineInPage() {
     return count;
   }, [filterNorthIndian, filterSouthIndian, filterHealthy, filterAvailableOnly]);
 
-  const filteredItems = useMemo(() => {
-    return menuItems.filter((item) => {
-      // Dietary filter chip
-      if (dietaryFilter === 'VEG' && item.dietaryTag !== 'VEG') return false;
-      if (dietaryFilter === 'NON_VEG' && item.dietaryTag !== 'NON_VEG') return false;
-
-      // Filter Funnel Options
-      if (filterNorthIndian && !filterSouthIndian && item.cuisine !== 'NORTH_INDIAN') return false;
-      if (filterSouthIndian && !filterNorthIndian && item.cuisine !== 'SOUTH_INDIAN') return false;
-      if (filterHealthy && !item.isHealthy) return false;
-      if (filterAvailableOnly && !item.isAvailable) return false;
-
-      // Search Query
-      if (searchQuery.trim()) {
-        const q = searchQuery.toLowerCase();
-        return (
-          item.name.toLowerCase().includes(q) ||
-          item.description.toLowerCase().includes(q) ||
-          item.category.toLowerCase().includes(q)
-        );
-      }
-      return true;
-    }).sort((a, b) => {
-      if (sortOption === 'PRICE_ASC') return a.pricePaise - b.pricePaise;
-      if (sortOption === 'PRICE_DESC') return b.pricePaise - a.pricePaise;
-      if (sortOption === 'RATING') return b.rating - a.rating;
-      if (sortOption === 'PREP_TIME') return a.prepTimeMinutes - b.prepTimeMinutes;
-      return b.ordersCount - a.ordersCount; // Default: Popular
-    });
-  }, [
-    menuItems,
-    dietaryFilter,
-    filterNorthIndian,
-    filterSouthIndian,
-    filterHealthy,
-    filterAvailableOnly,
-    searchQuery,
-    sortOption,
-  ]);
-
-  // Group filtered items by category for Menu view
-  const groupedItems = useMemo(() => {
-    const groups: Record<string, MenuItem[]> = {};
-    CATEGORIES_LIST.forEach((cat) => {
-      groups[cat] = [];
-    });
-    filteredItems.forEach((item) => {
-      if (!groups[item.category]) {
-        groups[item.category] = [];
-      }
-      groups[item.category]!.push(item);
-    });
-    return groups;
-  }, [filteredItems]);
-
-  // ── 7. Category Scroll-Spy & Smooth Navigation ────────────────────────────
+  // ── 7. Category Navigation ────────────────────────────────────────────────
   const isManualScrollRef = useRef(false);
   const manualScrollTimerRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -2469,70 +2421,6 @@ export default function CustomerDineInPage() {
       el.scrollIntoView({ behavior: 'smooth' });
     }
   };
-
-  useEffect(() => {
-    if (currentView !== 'menu') return;
-    const handleScroll = () => {
-      if (isManualScrollRef.current) return;
-
-      // 1. Check if user reached near the bottom of the page (e.g. final category like Beverages)
-      const scrollHeight = document.documentElement.scrollHeight || document.body.scrollHeight;
-      const scrollBottom = window.innerHeight + window.scrollY;
-      const isNearBottom = scrollHeight - scrollBottom <= 80;
-
-      if (isNearBottom) {
-        const availableCats = CATEGORIES_LIST.filter((c) => (groupedItems[c] || []).length > 0);
-        if (availableCats.length > 0) {
-          const lastCat = availableCats[availableCats.length - 1];
-          if (lastCat) {
-            setActiveCategory((prev) => {
-              if (prev !== lastCat) {
-                const pillEl = document.getElementById(`pill-${lastCat}`);
-                if (pillEl) {
-                  pillEl.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
-                }
-                return lastCat;
-              }
-              return prev;
-            });
-            return;
-          }
-        }
-      }
-
-      // 2. Viewport-mid check: section becomes active as its header/content enters middle of screen
-      const viewportMid = window.innerHeight * 0.5;
-      let candidateCat: string | null = null;
-
-      for (const cat of CATEGORIES_LIST) {
-        const el = document.getElementById(`cat-section-${cat}`);
-        if (el) {
-          const rect = el.getBoundingClientRect();
-          // The section top has reached the middle of viewport (or above), and has not scrolled off the top
-          if (rect.top <= viewportMid && rect.bottom > 120) {
-            candidateCat = cat;
-          }
-        }
-      }
-
-      if (candidateCat) {
-        const chosen = candidateCat;
-        setActiveCategory((prev) => {
-          if (prev !== chosen) {
-            const pillEl = document.getElementById(`pill-${chosen}`);
-            if (pillEl) {
-              pillEl.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
-            }
-            return chosen;
-          }
-          return prev;
-        });
-      }
-    };
-
-    window.addEventListener('scroll', handleScroll, { passive: true });
-    return () => window.removeEventListener('scroll', handleScroll);
-  }, [currentView, groupedItems]);
 
   // ── 8. Home Discovery Rows Data ───────────────────────────────────────────
   // Top Sellers: sorted by orders count
@@ -2566,6 +2454,7 @@ export default function CustomerDineInPage() {
       showToast('Please sign in to save dishes to your favorites ❤️');
       return;
     }
+    useOrderStore.getState().toggleWishlist(itemId);
     setWishlist((prev) => {
       const next = new Set(prev);
       if (next.has(itemId)) {
@@ -2693,6 +2582,11 @@ export default function CustomerDineInPage() {
 
     return list;
   }, [sessionOrders, selectedTable, releasedHoldPlateKeys]);
+
+  // Keep Zustand store activeOrderCount in sync with flattened active plates
+  useEffect(() => {
+    useOrderStore.getState().setActiveOrderCount(flattenedPlates.length);
+  }, [flattenedPlates.length]);
 
   // Four distinct order sections: PREPARING (Cooking), ON_HOLD (Serve Later), SERVED, CANCELLED
   const onHoldPlates = useMemo(
@@ -2823,44 +2717,8 @@ export default function CustomerDineInPage() {
       return;
     }
 
-    const groups = resolveItemModifierGroups(item);
-    const initialMods: ModifierOption[] = [];
-    groups.forEach((g) => {
-      if (g.selectionType === 'SINGLE' && g.isRequired && g.modifiers.length > 0) {
-        const preferred =
-          g.modifiers.find((m) => {
-            const nl = m.name.toLowerCase();
-            return (
-              (nl.includes('regular') || nl.includes('medium') || nl.includes('normal') || nl.includes('standard')) &&
-              m.pricePaise === 0
-            );
-          }) ||
-          g.modifiers.find((m) => m.pricePaise === 0) ||
-          g.modifiers[0];
-        if (preferred) {
-          initialMods.push(preferred);
-        }
-      }
-    });
-
     setExpandedAccordionItemId(item.id);
     setActiveCustomizingItem(item);
-    setAccordionQty(1);
-    setAccordionPortion('FULL');
-    setAccordionSpice(item.spiceLevel);
-    setAccordionNote('');
-    setAccordionModifiers(initialMods);
-    setIsPerPlateSplit(false);
-    setActivePlateIndex(1);
-    setPlateConfigs([
-      {
-        plateIndex: 1,
-        portion: 'FULL',
-        spice: item.spiceLevel,
-        notes: '',
-        modifiers: [...initialMods],
-      },
-    ]);
   };
 
   // ── Homepage Navigation Handlers (Navigates to Menu, Scrolls to Product at Top & Opens Customizer) ──
@@ -2914,92 +2772,6 @@ export default function CustomerDineInPage() {
         }
       }
     }, 120);
-  };
-
-  // When quantity changes in accordion and per-plate is active, update plateConfigs
-  const handleAccordionQtyChange = (newQty: number) => {
-    const q = Math.max(1, newQty);
-    setAccordionQty(q);
-    if (isPerPlateSplit) {
-      setPlateConfigs((prev) => {
-        const updated = [...prev];
-        while (updated.length < q) {
-          updated.push({
-            plateIndex: updated.length + 1,
-            portion: accordionPortion,
-            spice: accordionSpice,
-            notes: '',
-            modifiers: [...accordionModifiers],
-          });
-        }
-        return updated.slice(0, q);
-      });
-      setActivePlateIndex((curr) => Math.min(curr, q));
-    }
-  };
-
-  const handleTogglePerPlateSplit = () => {
-    const nextVal = !isPerPlateSplit;
-    setIsPerPlateSplit(nextVal);
-    setActivePlateIndex(1);
-    if (nextVal) {
-      const initialConfigs = Array.from({ length: accordionQty }, (_, i) => ({
-        plateIndex: i + 1,
-        portion: accordionPortion,
-        spice: accordionSpice,
-        notes: accordionNote ? `${accordionNote} (Plate ${i + 1})` : '',
-        modifiers: [...accordionModifiers],
-      }));
-      setPlateConfigs(initialConfigs);
-    }
-  };
-
-  // Add Configured Accordion Item to Cart
-  const handleAddAccordionToCart = (item: MenuItem, e: React.MouseEvent) => {
-    triggerFlyToCart(e, item.imageUrl);
-    const { fullPaise, halfPaise } = getPortionPricing(item);
-
-    if (isPerPlateSplit && accordionQty > 1) {
-      // Split into N distinct cart lines: Plate 1, Plate 2...
-      const newLines: CartLineItem[] = plateConfigs.map((cfg) => {
-        const isHalf = cfg.portion === 'HALF';
-        const basePaise = isHalf ? halfPaise : fullPaise;
-        const portionTag = isHalf ? ' [HALF]' : '';
-        const plateName = cfg.customName && cfg.customName.trim() ? cfg.customName.trim() : `Plate ${cfg.plateIndex}`;
-        return {
-          cartLineId: `${item.id}-plate-${cfg.plateIndex}-${Date.now()}-${Math.random()}`,
-          item: { ...item, pricePaise: basePaise },
-          portion: cfg.portion || 'FULL',
-          plateLabel: `${plateName}${isHalf ? ' (Half)' : ''}`,
-          quantity: 1,
-          spiceLevel: cfg.spice,
-          notes: `${cfg.notes || ''}${portionTag}`.trim() || undefined,
-          selectedModifiers: cfg.modifiers,
-        };
-      });
-      setCartLines((prev) => [...prev, ...newLines]);
-    } else {
-      // Combined single line for N plates
-      const isHalf = accordionPortion === 'HALF';
-      const basePaise = isHalf ? halfPaise : fullPaise;
-      const portionTag = isHalf ? ' [HALF]' : '';
-      const customName = plateConfigs[0]?.customName && plateConfigs[0].customName.trim() ? plateConfigs[0].customName.trim() : undefined;
-      const newLine: CartLineItem = {
-        cartLineId: `${item.id}-${Date.now()}-${Math.random()}`,
-        item: { ...item, pricePaise: basePaise },
-        portion: accordionPortion,
-        plateLabel: customName ? `${customName}${isHalf ? ' (Half)' : ''}` : undefined,
-        quantity: accordionQty,
-        spiceLevel: accordionSpice,
-        notes: `${accordionNote || ''}${portionTag}`.trim() || undefined,
-        selectedModifiers: accordionModifiers,
-      };
-      setCartLines((prev) => [...prev, newLine]);
-    }
-
-    setExpandedAccordionItemId(null);
-    setActiveCustomizingItem(null);
-    showToast(`Added ${item.name} to cart! 🍽️`);
   };
 
   // ── Combo Customization Handlers ──
@@ -3231,62 +3003,9 @@ export default function CustomerDineInPage() {
     }
 
     if (plateNamingTarget.type === 'ITEM') {
-      const currentItem =
-        activeCustomizingItem ||
-        menuItems.find((m) => m.id === expandedAccordionItemId) ||
-        PILOT_MENU.find((m) => m.id === expandedAccordionItemId);
-      const cat = currentItem?.category || 'Main Course';
-      const itemName = currentItem?.name || '';
-      const groups = currentItem ? resolveItemModifierGroups(currentItem) : [];
-
-      const applied = applyProfileToContext(profile, {
-        category: cat,
-        itemName,
-        availableModifierGroups: groups,
-      });
-
-      const isMultiPlate = isPerPlateSplit && accordionQty > 1;
-      if (isMultiPlate && plateNamingTarget.plateIndex) {
-        setPlateConfigs((prev) =>
-          prev.map((p) => {
-            if (p.plateIndex === plateNamingTarget.plateIndex) {
-              return {
-                ...p,
-                customName: applied.appliedName,
-                spice: applied.spiceLevel !== 'NONE' ? applied.spiceLevel : p.spice,
-                notes: applied.chefNotes || p.notes,
-                modifiers: applied.selectedModifiers.length > 0 ? applied.selectedModifiers : p.modifiers,
-              };
-            }
-            return p;
-          })
-        );
-      } else {
-        if (applied.spiceLevel !== 'NONE') setAccordionSpice(applied.spiceLevel);
-        setAccordionNote(applied.chefNotes);
-        if (applied.selectedModifiers.length > 0) {
-          setAccordionModifiers((prev) => {
-            const groupIdsToReplace = new Set(applied.selectedModifiers.map((m) => m.groupId).filter(Boolean));
-            const filtered = prev.filter((m) => !m.groupId || !groupIdsToReplace.has(m.groupId));
-            return [...filtered, ...applied.selectedModifiers];
-          });
-        }
-        setPlateConfigs((prev) =>
-          prev.map((p, idx) =>
-            idx === 0
-              ? {
-                  ...p,
-                  customName: applied.appliedName,
-                  spice: applied.spiceLevel !== 'NONE' ? applied.spiceLevel : p.spice,
-                  notes: applied.chefNotes,
-                }
-              : p
-          )
-        );
-      }
-
-      showToast(applied.toastMessage);
+      showToast(profile ? `Applied ${profile.name}'s preferences 👨‍🍳` : 'Profile applied');
       setPlateNamingTarget(null);
+      return;
     }
   };
 
@@ -3564,19 +3283,6 @@ export default function CustomerDineInPage() {
           ),
         };
       });
-    } else if (plateNamingTarget.type === 'ITEM') {
-      const isMultiPlate = isPerPlateSplit && accordionQty > 1;
-      if (isMultiPlate && plateNamingTarget.plateIndex) {
-        setPlateConfigs((prev) =>
-          prev.map((p) =>
-            p.plateIndex === plateNamingTarget.plateIndex ? { ...p, customName: trimmed } : p
-          )
-        );
-      } else {
-        setPlateConfigs((prev) =>
-          prev.map((p, idx) => (idx === 0 ? { ...p, customName: trimmed } : p))
-        );
-      }
     }
 
     showToast(`Plate named "${trimmed}" 🍽️`);
@@ -4095,8 +3801,9 @@ export default function CustomerDineInPage() {
       loyaltyPoints?: number;
     },
     fallbackPhone: string,
-    targetOrgId: string,
+    targetOrgId?: string,
   ) => {
+    const effectiveOrgId = targetOrgId || activeOrgId || resolveTenantIds(loadGuestSession()).orgId;
     saveCustomerAuth({ accessToken: data.accessToken, customerId: data.customerId });
     setCustomerToken(data.accessToken);
     setCustomerId(data.customerId);
@@ -4104,7 +3811,7 @@ export default function CustomerDineInPage() {
     const profRes = await customerApiFetch(
       '/api/v1/auth/customer/profile',
       undefined,
-      { preferToken: 'customer', tokenOverride: data.accessToken, orgIdOverride: targetOrgId },
+      { preferToken: 'customer', tokenOverride: data.accessToken, orgIdOverride: effectiveOrgId },
     ).catch(() => null);
 
     if (profRes && profRes.ok) {
@@ -4124,243 +3831,12 @@ export default function CustomerDineInPage() {
 
     await fetchCustomerDinerProfiles(data.customerId, data.accessToken);
     void fetchSessionOrders(undefined, data.accessToken);
-    closeBottomAuthSheet();
-    setAuthStep('PHONE');
-    setAuthDevCode(null);
-    setCustomerOtpInput('');
-    setGooglePreRegToken(null);
-    setAuthEmailLocked(false);
-    setShowDevGooglePicker(false);
+    setIsAuthModalOpen(false);
     showToast(
       data.displayName
         ? `Signed in as ${data.displayName}!`
         : 'Signed in successfully! Your mobile session is saved.'
     );
-  };
-
-  const resolveCustomerAuthOrgId = (): string => {
-    const tenant = resolveTenantIds(loadGuestSession());
-    return activeOrgId || tenant.orgId;
-  };
-
-  const formatNormalizedPhone = (raw: string): string => {
-    const cleaned = raw.trim().replace(/[^\d+]/g, '');
-    if (!cleaned) return '';
-    return cleaned.startsWith('+') ? cleaned : `+91${cleaned}`;
-  };
-
-  const handleRequestOtp = async (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
-    setAuthLoading(true);
-    setAuthError('');
-    setAuthDevCode(null);
-    setAuthChannelLabel(null);
-    const targetOrgId = resolveCustomerAuthOrgId();
-    if (!targetOrgId) {
-      setAuthError('Select a hotel table first before signing in.');
-      setAuthLoading(false);
-      return;
-    }
-
-    const formattedPhone = formatNormalizedPhone(customerPhoneInput);
-    if (!/^\+\d{10,15}$/.test(formattedPhone)) {
-      setAuthError('Enter a valid 10-digit mobile number.');
-      setAuthLoading(false);
-      return;
-    }
-
-    const emailTrimmed = authEmailInput.trim();
-    if (authMode === 'SIGNUP' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailTrimmed)) {
-      setAuthError('Enter a valid email ID to link to your mobile number.');
-      setAuthLoading(false);
-      return;
-    }
-
-    try {
-      const res = await fetch('/api/v1/auth/customer/otp/request', {
-        method: 'POST',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-org-id': targetOrgId,
-        },
-        body: JSON.stringify({
-          phone: formattedPhone,
-          mode: authMode,
-          ...(authMode === 'SIGNUP' ? { email: emailTrimmed } : {}),
-        }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        setAuthError(data.detail || data.message || 'Unable to send WhatsApp OTP code.');
-        return;
-      }
-      if (data.channel === 'WHATSAPP') {
-        setAuthChannelLabel('WhatsApp');
-      } else {
-        setAuthChannelLabel('SMS');
-      }
-      if (data.devCode) {
-        setAuthDevCode(data.devCode);
-        setCustomerOtpInput(data.devCode);
-      } else {
-        setCustomerOtpInput('');
-      }
-      setAuthStep('OTP');
-    } catch {
-      setAuthError('Network error requesting OTP.');
-    } finally {
-      setAuthLoading(false);
-    }
-  };
-
-  const handleVerifyOtp = async (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
-    setAuthLoading(true);
-    setAuthError('');
-    const targetOrgId = resolveCustomerAuthOrgId();
-    if (!targetOrgId) {
-      setAuthError('Select a hotel table first before verifying OTP.');
-      setAuthLoading(false);
-      return;
-    }
-    const formattedPhone = formatNormalizedPhone(customerPhoneInput);
-    const enteredCode = customerOtpInput.trim();
-    const emailTrimmed = authEmailInput.trim();
-
-    try {
-      const res = await fetch('/api/v1/auth/customer/otp/verify', {
-        method: 'POST',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-org-id': targetOrgId,
-        },
-        body: JSON.stringify({
-          phone: formattedPhone,
-          code: enteredCode,
-          ...(authMode === 'SIGNUP' && emailTrimmed ? { email: emailTrimmed } : {}),
-          ...(authDisplayNameInput.trim() ? { displayName: authDisplayNameInput.trim() } : {}),
-          ...(googlePreRegToken ? { googlePreRegToken } : {}),
-        }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (res.ok && data.accessToken && data.customerId) {
-        await applyAuthenticatedCustomer(data, formattedPhone, targetOrgId);
-        return;
-      }
-      setAuthError(data.detail || data.message || 'Invalid verification code. Please check and try again.');
-    } catch {
-      setAuthError('Network error connecting to authentication API.');
-    } finally {
-      setAuthLoading(false);
-    }
-  };
-
-  const submitGoogleAuthPayload = async (payload: {
-    idToken?: string;
-    devMockEmail?: string;
-    devMockName?: string;
-  }) => {
-    const targetOrgId = resolveCustomerAuthOrgId();
-    if (!targetOrgId) {
-      setAuthError('Select a hotel table first before signing in with Google.');
-      return;
-    }
-    setAuthLoading(true);
-    setAuthError('');
-    try {
-      const res = await fetch('/api/v1/auth/customer/google', {
-        method: 'POST',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-org-id': targetOrgId,
-        },
-        body: JSON.stringify(payload),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        setAuthError(data.detail || data.message || 'Google sign-in failed.');
-        return;
-      }
-      if (data.registered && data.accessToken && data.customerId) {
-        await applyAuthenticatedCustomer(data, data.phone || '', targetOrgId);
-        return;
-      }
-      // Email is not registered -> route directly to registration to link mobile via WhatsApp OTP.
-      setAuthMode('SIGNUP');
-      setAuthStep('PHONE');
-      setAuthEmailInput(data.email || payload.devMockEmail || '');
-      setAuthEmailLocked(true);
-      setGooglePreRegToken(data.googlePreRegToken || null);
-      if (data.suggestedName || payload.devMockName) {
-        setAuthDisplayNameInput(data.suggestedName || payload.devMockName || '');
-      }
-      setShowDevGooglePicker(false);
-      setAuthError(
-        `${data.email || 'This Google email'} is not registered yet. Enter your mobile number to verify via WhatsApp OTP and complete sign up.`,
-      );
-    } catch {
-      setAuthError('Network error during Google sign-in.');
-    } finally {
-      setAuthLoading(false);
-    }
-  };
-
-  const handleGoogleLoginClick = () => {
-    setAuthError('');
-    const googleClientId = process.env['NEXT_PUBLIC_GOOGLE_CLIENT_ID'] || '';
-    if (!googleClientId) {
-      if (process.env.NODE_ENV !== 'production') {
-        setShowDevGooglePicker((prev) => !prev);
-      } else {
-        setAuthError('Google Sign-In is not configured for this environment yet.');
-      }
-      return;
-    }
-
-    interface GoogleAccountsGlobal {
-      accounts?: {
-        id?: {
-          initialize: (cfg: { client_id: string; callback: (resp: { credential?: string }) => void }) => void;
-          prompt: () => void;
-        };
-      };
-    }
-
-    const startGisPrompt = () => {
-      const googleGlobal = (window as unknown as { google?: GoogleAccountsGlobal }).google;
-      if (!googleGlobal?.accounts?.id) {
-        setAuthError('Google Identity Services could not initialize.');
-        return;
-      }
-      googleGlobal.accounts.id.initialize({
-        client_id: googleClientId,
-        callback: (resp: { credential?: string }) => {
-          if (resp.credential) {
-            void submitGoogleAuthPayload({ idToken: resp.credential });
-          } else {
-            setAuthError('No Google credential returned.');
-          }
-        },
-      });
-      googleGlobal.accounts.id.prompt();
-    };
-
-    const existingGoogle = (window as unknown as { google?: GoogleAccountsGlobal }).google;
-    if (existingGoogle?.accounts?.id) {
-      startGisPrompt();
-      return;
-    }
-
-    const script = document.createElement('script');
-    script.src = 'https://accounts.google.com/gsi/client';
-    script.async = true;
-    script.defer = true;
-    script.onload = startGisPrompt;
-    script.onerror = () => setAuthError('Failed to load Google Sign-In script.');
-    document.head.appendChild(script);
   };
 
   // Profile Name Update in Database
@@ -4476,48 +3952,6 @@ export default function CustomerDineInPage() {
       setPaymentLoading(false);
     }
   };
-
-  // Auto-polling for active QR payment: when user scans QR on mobile and approves,
-  // desktop detects it automatically via interval + window focus!
-  useEffect(() => {
-    if (!isPaymentModalOpen || !paymentQrData?.paymentId || paymentLoading) return;
-    const paymentId = paymentQrData.paymentId;
-    if (paymentId.startsWith('pay_')) return;
-
-    let isSubscribed = true;
-    const checkPaymentOnce = async () => {
-      try {
-        const vRes = await customerApiFetch(
-          `/api/v1/customer/payments/${encodeURIComponent(paymentId)}/verify`,
-          undefined,
-          { preferToken: 'guest' },
-        );
-        if (vRes.ok && isSubscribed) {
-          const vData = await vRes.json();
-          if (vData.status === 'PAID') {
-            clearInterval(pollInterval);
-            await handleConfirmUpiPayment();
-          }
-        }
-      } catch {}
-    };
-
-    const pollInterval = setInterval(() => void checkPaymentOnce(), 2500);
-    const onFocusOrVisible = () => {
-      if (document.visibilityState === 'visible') {
-        void checkPaymentOnce();
-      }
-    };
-    window.addEventListener('focus', onFocusOrVisible);
-    document.addEventListener('visibilitychange', onFocusOrVisible);
-
-    return () => {
-      isSubscribed = false;
-      clearInterval(pollInterval);
-      window.removeEventListener('focus', onFocusOrVisible);
-      document.removeEventListener('visibilitychange', onFocusOrVisible);
-    };
-  }, [isPaymentModalOpen, paymentQrData?.paymentId, paymentLoading]);
 
   // ── 13. Chef AI Send ──────────────────────────────────────────────────────
   const handleSendAiMessage = async (customPrompt?: string) => {
@@ -4845,100 +4279,18 @@ export default function CustomerDineInPage() {
       {currentView === 'home' && (
         <div style={{ maxWidth: '600px', margin: '0 auto', padding: '0 16px' }}>
           {/* 1. Top Nav Bar */}
-          <header className="top-nav-bar" style={{ margin: '0 -16px', padding: '10px 16px' }}>
-            <div className="nav-left-brand">
-              <div style={{ fontSize: '1.4rem' }}>👑</div>
-              <div>
-                <div className="brand-title">Royal Spice Bistro</div>
-                <button
-                  className="table-badge-btn"
-                  onClick={openTopTableDrawer}
-                  title="Click to change or verify table"
-                >
-                  <span
-                    style={{
-                      width: '6px',
-                      height: '6px',
-                      borderRadius: '50%',
-                      background: isTableVerified ? '#10b981' : '#f59e0b',
-                    }}
-                  ></span>
-                  <span>Table {selectedTable}</span>
-                  <span style={{ fontSize: '0.65rem', opacity: 0.8 }}>▼</span>
-                </button>
-              </div>
-            </div>
+          <TopNavBar
+            view="home"
+            onOpenProfile={() => setIsProfileOpen(true)}
+            customerToken={customerToken}
+            customerDisplayName={customerProfile?.displayName}
+            cartPulse={cartPulse}
+            cartIconRef={cartIconRef}
+            showToast={showToast}
+          />
 
-            <div className="nav-right-actions">
-              {/* Language Switcher - Removed when logged in */}
-              {!customerToken && (
-                <button
-                  className="nav-icon-btn"
-                  title="Switch Language"
-                  onClick={() => showToast('Language: English (UK) active')}
-                >
-                  <span style={{ fontSize: '0.85rem', fontWeight: 800 }}>EN</span>
-                </button>
-              )}
-
-              {/* Orders History Icon - Only shows badge for paid dishes */}
-              <button
-                className="nav-icon-btn"
-                onClick={() => setIsOrdersHistoryOpen(true)}
-                title="View Table Orders"
-              >
-                <span>📋</span>
-                {flattenedPlates.length > 0 && (
-                  <span
-                    style={{
-                      position: 'absolute',
-                      top: '-3px',
-                      right: '-3px',
-                      background: '#10b981',
-                      color: '#000',
-                      borderRadius: '50%',
-                      width: '16px',
-                      height: '16px',
-                      fontSize: '0.65rem',
-                      fontWeight: 800,
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                    }}
-                  >
-                    {flattenedPlates.length}
-                  </span>
-                )}
-              </button>
-
-              {/* Profile Icon */}
-              <button
-                className="nav-icon-btn"
-                onClick={() => setIsProfileOpen(true)}
-                title={customerToken ? 'My Account & Preferences' : 'Dining Profiles & Sign In'}
-              >
-                {customerToken ? (
-                  <span style={{ fontSize: '0.78rem', fontWeight: 800, color: '#fbbf24' }}>
-                    {customerProfile?.displayName ? customerProfile.displayName.slice(0, 2).toUpperCase() : 'ME'}
-                  </span>
-                ) : (
-                  <span>👤</span>
-                )}
-              </button>
-
-              {/* Cart Icon (ALWAYS visible, independent of cart bar) */}
-              <button
-                ref={cartIconRef}
-                className={`nav-icon-btn nav-cart-btn ${cartPulse ? 'cart-icon-pulse' : ''}`}
-                onClick={() => setIsCartOpen(true)}
-                title="View Shopping Cart"
-                suppressHydrationWarning
-              >
-                <span>🛒</span>
-                {isMounted && cartItemCount > 0 && <span className="cart-count-badge" suppressHydrationWarning>{cartItemCount}</span>}
-              </button>
-            </div>
-          </header>
+          {/* Active Order Tracker Banner */}
+          <OrderTrackerBanner />
 
           {/* 2. Hero Section (Auto-rotating Banner Carousel) */}
           <div className="hero-carousel-container">
@@ -5191,11 +4543,6 @@ export default function CustomerDineInPage() {
                   <SquareItemCard
                     key={item.id}
                     item={item}
-                    qty={getItemCartQty(item.id)}
-                    isHearted={wishlist.has(item.id)}
-                    onToggleHeart={(e) => toggleWishlist(item.id, e)}
-                    onAdd={(e) => handleQuickAdd(item, e)}
-                    onDecrement={(e) => handleQuickDecrement(item.id, e)}
                     onOpenAccordion={() => navigateToMenuItem(item)}
                   />
                 ))}
@@ -5206,11 +4553,6 @@ export default function CustomerDineInPage() {
                   <SquareItemCard
                     key={item.id}
                     item={item}
-                    qty={getItemCartQty(item.id)}
-                    isHearted={wishlist.has(item.id)}
-                    onToggleHeart={(e) => toggleWishlist(item.id, e)}
-                    onAdd={(e) => handleQuickAdd(item, e)}
-                    onDecrement={(e) => handleQuickDecrement(item.id, e)}
                     onOpenAccordion={() => navigateToMenuItem(item)}
                   />
                 ))}
@@ -5240,11 +4582,6 @@ export default function CustomerDineInPage() {
                     <SquareItemCard
                       key={item.id}
                       item={item}
-                      qty={getItemCartQty(item.id)}
-                      isHearted={wishlist.has(item.id)}
-                      onToggleHeart={(e) => toggleWishlist(item.id, e)}
-                      onAdd={(e) => handleQuickAdd(item, e)}
-                      onDecrement={(e) => handleQuickDecrement(item.id, e)}
                       onOpenAccordion={() => navigateToMenuItem(item)}
                     />
                   ))}
@@ -5255,11 +4592,6 @@ export default function CustomerDineInPage() {
                     <SquareItemCard
                       key={item.id}
                       item={item}
-                      qty={getItemCartQty(item.id)}
-                      isHearted={wishlist.has(item.id)}
-                      onToggleHeart={(e) => toggleWishlist(item.id, e)}
-                      onAdd={(e) => handleQuickAdd(item, e)}
-                      onDecrement={(e) => handleQuickDecrement(item.id, e)}
                       onOpenAccordion={() => navigateToMenuItem(item)}
                     />
                   ))}
@@ -5290,11 +4622,6 @@ export default function CustomerDineInPage() {
                     <SquareItemCard
                       key={item.id}
                       item={item}
-                      qty={getItemCartQty(item.id)}
-                      isHearted={wishlist.has(item.id)}
-                      onToggleHeart={(e) => toggleWishlist(item.id, e)}
-                      onAdd={(e) => handleQuickAdd(item, e)}
-                      onDecrement={(e) => handleQuickDecrement(item.id, e)}
                       onOpenAccordion={() => navigateToMenuItem(item)}
                     />
                   ))}
@@ -5305,11 +4632,6 @@ export default function CustomerDineInPage() {
                     <SquareItemCard
                       key={item.id}
                       item={item}
-                      qty={getItemCartQty(item.id)}
-                      isHearted={wishlist.has(item.id)}
-                      onToggleHeart={(e) => toggleWishlist(item.id, e)}
-                      onAdd={(e) => handleQuickAdd(item, e)}
-                      onDecrement={(e) => handleQuickDecrement(item.id, e)}
                       onOpenAccordion={() => navigateToMenuItem(item)}
                     />
                   ))}
@@ -5340,11 +4662,6 @@ export default function CustomerDineInPage() {
                     <SquareItemCard
                       key={item.id}
                       item={item}
-                      qty={getItemCartQty(item.id)}
-                      isHearted={true}
-                      onToggleHeart={(e) => toggleWishlist(item.id, e)}
-                      onAdd={(e) => handleQuickAdd(item, e)}
-                      onDecrement={(e) => handleQuickDecrement(item.id, e)}
                       onOpenAccordion={() => navigateToMenuItem(item)}
                     />
                   ))}
@@ -5355,11 +4672,6 @@ export default function CustomerDineInPage() {
                     <SquareItemCard
                       key={item.id}
                       item={item}
-                      qty={getItemCartQty(item.id)}
-                      isHearted={true}
-                      onToggleHeart={(e) => toggleWishlist(item.id, e)}
-                      onAdd={(e) => handleQuickAdd(item, e)}
-                      onDecrement={(e) => handleQuickDecrement(item.id, e)}
                       onOpenAccordion={() => navigateToMenuItem(item)}
                     />
                   ))}
@@ -5433,300 +4745,48 @@ export default function CustomerDineInPage() {
       {currentView === 'menu' && (
         <div style={{ maxWidth: '600px', margin: '0 auto' }}>
           {/* 1. Top Nav Bar */}
-          <header className="menu-top-nav-bar">
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-              <button
-                className="menu-back-btn"
-                onClick={() => setCurrentView('home')}
-                title="Return to Home Discovery Feed"
-              >
-                ←
-              </button>
-              <div>
-                <div className="brand-title">Royal Spice Bistro</div>
-                <button
-                  className="table-badge-btn"
-                  onClick={openTopTableDrawer}
-                  style={{ padding: '2px 8px', fontSize: '0.72rem' }}
-                >
-                  <span>Table {selectedTable}</span>
-                </button>
-              </div>
-            </div>
+          <TopNavBar
+            view="menu"
+            onNavigateView={setCurrentView}
+            onOpenFilterSheet={() => setIsFilterSheetOpen(true)}
+            activeFilterCount={activeFilterCount}
+            onOpenProfile={() => setIsProfileOpen(true)}
+            customerToken={customerToken}
+            customerDisplayName={customerProfile?.displayName}
+            cartPulse={cartPulse}
+            cartIconRef={cartIconRef}
+            showToast={showToast}
+          />
 
-            <div className="nav-right-actions">
-              {/* Filter Funnel Icon with Active Badge */}
-              <button
-                className={`filter-funnel-btn ${activeFilterCount > 0 ? 'active' : ''}`}
-                onClick={() => setIsFilterSheetOpen(true)}
-                title="Filter Menu Options"
-              >
-                <span>🌪️</span>
-                {activeFilterCount > 0 && <span className="filter-funnel-badge">{activeFilterCount}</span>}
-              </button>
+          {/* Active Order Tracker Banner */}
+          <OrderTrackerBanner
+            style={{ margin: '8px 16px 12px 16px' }}
+          />
 
-              {/* Orders History Icon - Only shows badge for paid dishes */}
-              <button
-                className="nav-icon-btn"
-                onClick={() => setIsOrdersHistoryOpen(true)}
-                title="View Table Orders"
-              >
-                <span>📋</span>
-                {flattenedPlates.length > 0 && (
-                  <span
-                    style={{
-                      position: 'absolute',
-                      top: '-3px',
-                      right: '-3px',
-                      background: '#10b981',
-                      color: '#000',
-                      borderRadius: '50%',
-                      width: '16px',
-                      height: '16px',
-                      fontSize: '0.65rem',
-                      fontWeight: 800,
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                    }}
-                  >
-                    {flattenedPlates.length}
-                  </span>
-                )}
-              </button>
-
-              {/* Profile Icon */}
-              <button
-                className="nav-icon-btn"
-                onClick={() => setIsProfileOpen(true)}
-                title={customerToken ? 'My Account & Preferences' : 'Dining Profiles & Sign In'}
-              >
-                {customerToken ? (
-                  <span style={{ fontSize: '0.78rem', fontWeight: 800, color: '#fbbf24' }}>
-                    {customerProfile?.displayName ? customerProfile.displayName.slice(0, 2).toUpperCase() : 'ME'}
-                  </span>
-                ) : (
-                  <span>👤</span>
-                )}
-              </button>
-
-              {/* Cart Icon (ALWAYS visible) */}
-              <button
-                ref={cartIconRef}
-                className={`nav-icon-btn nav-cart-btn ${cartPulse ? 'cart-icon-pulse' : ''}`}
-                onClick={() => setIsCartOpen(true)}
-                title="Shopping Cart"
-                suppressHydrationWarning
-              >
-                <span>🛒</span>
-                {isMounted && cartItemCount > 0 && <span className="cart-count-badge" suppressHydrationWarning>{cartItemCount}</span>}
-              </button>
-            </div>
-          </header>
-
-          {/* 2. Search Bar (Directly below top bar, always visible, live filtering) */}
-          <div className="menu-search-container">
-            <div className="menu-search-input-wrap">
-              <span className="menu-search-icon">🔍</span>
-              <input
-                type="text"
-                placeholder="Search dishes, curries, tandoor, desserts..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="menu-search-input"
-              />
-              {searchQuery && (
-                <span className="menu-search-clear" onClick={() => setSearchQuery('')}>
-                  ✕
-                </span>
-              )}
-            </div>
-          </div>
-
-          {/* 3. Category Navigation (Horizontal scrollable pill row, NO 'All' pill, scroll-spy) */}
-          <nav className="menu-category-nav">
-            {CATEGORIES_LIST.map((cat) => (
-              <button
-                key={cat}
-                id={`pill-${cat}`}
-                className={`category-nav-pill ${activeCategory === cat ? 'active' : ''}`}
-                onClick={() => scrollToCategory(cat)}
-              >
-                {cat === 'Combos' ? '🔥 Combos' : cat}
-              </button>
-            ))}
-          </nav>
-
-          {/* 4. Filter Chips + Sort Control */}
-          <div className="menu-filter-sort-row">
-            <div className="dietary-chips-group">
-              <button
-                className={`dietary-chip-btn ${dietaryFilter === 'ALL' ? 'active' : ''}`}
-                onClick={() => setDietaryFilter('ALL')}
-              >
-                All
-              </button>
-              <button
-                className={`dietary-chip-btn ${dietaryFilter === 'VEG' ? 'active' : ''}`}
-                onClick={() => setDietaryFilter((prev) => (prev === 'VEG' ? 'ALL' : 'VEG'))}
-              >
-                <span style={{ color: '#10b981' }}>🟢</span> Veg
-              </button>
-              <button
-                className={`dietary-chip-btn ${dietaryFilter === 'NON_VEG' ? 'active' : ''}`}
-                onClick={() => setDietaryFilter((prev) => (prev === 'NON_VEG' ? 'ALL' : 'NON_VEG'))}
-              >
-                <span style={{ color: '#ef4444' }}>🔴</span> Non-Veg
-              </button>
-            </div>
-
-            <select
-              className="sort-select-dropdown"
-              value={sortOption}
-              onChange={(e) => setSortOption(e.target.value as any)}
-            >
-              <option value="POPULAR">Sort: Popular</option>
-              <option value="PRICE_ASC">Price: Low to High</option>
-              <option value="PRICE_DESC">Price: High to Low</option>
-              <option value="RATING">Rating: High to Low</option>
-              <option value="PREP_TIME">Prep Time</option>
-            </select>
-          </div>
-
-          {/* 5. Menu Item Sections */}
-          <div style={{ paddingBottom: '30px' }}>
-            {CATEGORIES_LIST.map((cat) => {
-              const itemsInCat = groupedItems[cat] || [];
-              if (itemsInCat.length === 0) return null;
-
-              return (
-                <section key={cat} id={`cat-section-${cat}`} className="menu-category-section">
-                  <h3 className="menu-category-header">
-                    {cat === 'Combos' ? '🔥 Combos & Feasts (10% OFF Bundles)' : cat}
-                  </h3>
-                  <div className="menu-items-list">
-                    {itemsInCat.map((item) => {
-                      const isExpanded = expandedAccordionItemId === item.id;
-                      const cartQty = getItemCartQty(item.id);
-                      const matchingCombo = COMBO_OFFERS.find((c) => c.id === item.id);
-
-                      return (
-                        <div
-                          key={item.id}
-                          id={`menu-item-${item.id}`}
-                          className={`menu-item-row-card ${item.category === 'Combos' ? 'combo-item-highlight' : ''}`}
-                        >
-                          {/* Main Row */}
-                          <div
-                            className="menu-item-main-row"
-                            onClick={() => handleOpenAccordion(item)}
-                            style={{ cursor: 'pointer' }}
-                          >
-                            <div className="menu-item-details">
-                              <div className="item-badge-row">
-                                <span style={{ fontSize: '0.75rem' }}>
-                                  {item.dietaryTag === 'VEG' ? '🟢' : '🔴'}
-                                </span>
-                                <span className="item-prep-badge">⏱️ {item.prepTimeMinutes} mins</span>
-                                <span style={{ fontSize: '0.72rem', color: '#fbbf24' }}>
-                                  ★ {item.rating.toFixed(1)}
-                                </span>
-                                {matchingCombo && (
-                                  <span className="combo-card-pax-tag" style={{ position: 'static', padding: '2px 6px', fontSize: '0.64rem' }}>
-                                    {matchingCombo.tag}
-                                  </span>
-                                )}
-                              </div>
-
-                              <div className="menu-item-name">{item.name}</div>
-                              <p className="menu-item-desc">{item.description}</p>
-
-                              <div className="menu-item-price-row">
-                                <span className="menu-item-price">₹{(item.pricePaise / 100).toFixed(0)}</span>
-                                {matchingCombo && (
-                                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                    <span style={{ fontSize: '0.76rem', color: '#64748b', textDecoration: 'line-through' }}>
-                                      ₹{(matchingCombo.originalPricePaise / 100).toFixed(0)}
-                                    </span>
-                                    <span
-                                      style={{
-                                        fontSize: '0.64rem',
-                                        fontWeight: 800,
-                                        padding: '1px 6px',
-                                        borderRadius: '4px',
-                                        background: 'rgba(245, 158, 11, 0.15)',
-                                        color: '#fbbf24',
-                                        border: '1px solid rgba(245, 158, 11, 0.3)',
-                                      }}
-                                    >
-                                      {matchingCombo.badge}
-                                    </span>
-                                  </div>
-                                )}
-                                <button
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    toggleWishlist(item.id, e);
-                                  }}
-                                  style={{
-                                    fontSize: '0.85rem',
-                                    color: wishlist.has(item.id) ? '#f43f5e' : 'rgba(255,255,255,0.4)',
-                                    cursor: 'pointer',
-                                  }}
-                                  title="Save to favorites"
-                                >
-                                  {wishlist.has(item.id) ? '❤️' : '🤍'}
-                                </button>
-                              </div>
-                            </div>
-
-                            {/* Media Column with Image & Overlapping Add Button */}
-                            <div className="menu-item-media-col" onClick={(e) => e.stopPropagation()}>
-                              <div
-                                className="menu-item-thumb-wrap"
-                                onClick={() => handleOpenAccordion(item)}
-                              >
-                                <img
-                                  src={item.imageUrl || FALLBACK_DISH_IMG}
-                                  alt={item.name}
-                                  className="menu-item-thumb-img"
-                                  loading="lazy"
-                                  onError={(e) => {
-                                    e.currentTarget.src = FALLBACK_DISH_IMG;
-                                  }}
-                                />
-                              </div>
-
-                              <div className="menu-item-add-btn-wrap">
-                                {cartQty > 0 ? (
-                                  <div className="menu-stepper-wrap">
-                                    <button onClick={(e) => handleQuickDecrement(item.id, e)}>−</button>
-                                    <span>{cartQty}</span>
-                                    <button onClick={(e) => handleQuickAdd(item, e)}>+</button>
-                                  </div>
-                                ) : (
-                                  <button
-                                    className="menu-add-btn"
-                                    style={item.category === 'Combos' ? { padding: '5px 8px', fontSize: '0.72rem', whiteSpace: 'nowrap' } : undefined}
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      handleOpenAccordion(item);
-                                    }}
-                                  >
-                                    <span>{item.category === 'Combos' ? 'Customize +' : 'Add +'}</span>
-                                  </button>
-                                )}
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </section>
-              );
-            })}
-          </div>
+          {/* Phase 5 Extracted: Main Menu Browsing UI with Category Filters, Search, Dietary Chips, and Category Item Sections */}
+          <MenuGrid
+            menuItems={menuItems}
+            combos={COMBO_OFFERS}
+            onSelectItem={handleOpenAccordion}
+            onQuickAdd={handleQuickAdd}
+            onQuickDecrement={handleQuickDecrement}
+            activeCategory={activeCategory}
+            onCategoryChange={setActiveCategory}
+            wishlist={wishlist}
+            onToggleWishlist={toggleWishlist}
+            filterOptions={{
+              filterNorthIndian,
+              filterSouthIndian,
+              filterHealthy,
+              filterAvailableOnly,
+            }}
+            searchQuery={searchQuery}
+            onSearchChange={setSearchQuery}
+            dietaryFilter={dietaryFilter}
+            onDietaryFilterChange={setDietaryFilter}
+            sortOption={sortOption}
+            onSortOptionChange={setSortOption}
+          />
         </div>
       )}
 
@@ -5904,556 +4964,6 @@ export default function CustomerDineInPage() {
         </div>
       )}
 
-      {/* ── Interactive Dish Customizer Drawer / Bottom Sheet (Desktop Right Drawer / Mobile 80% Bottom Sheet) ── */}
-      {activeCustomizingItem && (() => {
-        const item = activeCustomizingItem;
-        const { fullPaise, halfPaise, upgradeDiffPaise } = getPortionPricing(item);
-        const hasPortions = isPortionApplicable(item);
-        const groups = resolveItemModifierGroups(item);
-        const hasSpiceModifierGroup = groups.some((g) => g.name.toLowerCase().includes('spice'));
-
-        const currentTotalPricePaise = isPerPlateSplit && accordionQty > 1
-          ? plateConfigs.reduce((sum, cfg) => {
-              const bPrice = cfg.portion === 'HALF' ? halfPaise : fullPaise;
-              const mSum = (cfg.modifiers || []).reduce((acc, m) => acc + m.pricePaise, 0);
-              return sum + bPrice + mSum;
-            }, 0)
-          : ((accordionPortion === 'HALF' ? halfPaise : fullPaise) +
-              accordionModifiers.reduce((acc, m) => acc + m.pricePaise, 0)) *
-            accordionQty;
-
-        const isMultiPlate = isPerPlateSplit && accordionQty > 1;
-        const currentPlate = isMultiPlate
-          ? plateConfigs.find((p) => p.plateIndex === activePlateIndex) || plateConfigs[0] || {
-              plateIndex: 1,
-              customName: 'Plate 1',
-              portion: 'FULL',
-              spice: accordionSpice,
-              notes: '',
-              modifiers: [],
-            }
-          : null;
-
-        const activePlateDisplayName = isMultiPlate
-          ? (currentPlate?.customName || `Plate ${currentPlate?.plateIndex}`)
-          : (plateConfigs[0]?.customName || 'Plate 1');
-
-        const activePortion = isMultiPlate ? (currentPlate?.portion || 'FULL') : accordionPortion;
-        const activeSpice = currentPlate ? currentPlate.spice : accordionSpice;
-        const activeNote = currentPlate ? currentPlate.notes : accordionNote;
-        const activeModifiers = currentPlate ? (currentPlate.modifiers || []) : accordionModifiers;
-
-        const onSelectPortion = (port: 'FULL' | 'HALF') => {
-          if (isMultiPlate) {
-            setPlateConfigs((prev) =>
-              prev.map((p) => (p.plateIndex === (currentPlate?.plateIndex ?? activePlateIndex) ? { ...p, portion: port } : p))
-            );
-          } else {
-            setAccordionPortion(port);
-          }
-        };
-
-        const onSelectSpice = (sp: 'MILD' | 'MEDIUM' | 'HOT' | 'NONE') => {
-          if (isMultiPlate) {
-            setPlateConfigs((prev) =>
-              prev.map((p) => (p.plateIndex === (currentPlate?.plateIndex ?? activePlateIndex) ? { ...p, spice: sp } : p))
-            );
-          } else {
-            setAccordionSpice(sp);
-          }
-        };
-
-        const onChangeNote = (val: string) => {
-          if (isMultiPlate) {
-            setPlateConfigs((prev) =>
-              prev.map((p) => (p.plateIndex === (currentPlate?.plateIndex ?? activePlateIndex) ? { ...p, notes: val } : p))
-            );
-          } else {
-            setAccordionNote(val);
-          }
-        };
-
-        const onToggleChip = (chip: string) => {
-          if (isMultiPlate) {
-            setPlateConfigs((prev) =>
-              prev.map((p) => {
-                if (p.plateIndex !== (currentPlate?.plateIndex ?? activePlateIndex)) return p;
-                const nextNotes = toggleChipInNotes(p.notes || '', chip);
-                return { ...p, notes: nextNotes };
-              })
-            );
-          } else {
-            setAccordionNote((prev) => toggleChipInNotes(prev, chip));
-          }
-        };
-
-        const onToggleModifier = (mod: ModifierOption, group: ModifierGroup) => {
-          const isSingle = group.selectionType === 'SINGLE';
-
-          if (isMultiPlate) {
-            setPlateConfigs((prev) =>
-              prev.map((p) => {
-                if (p.plateIndex !== (currentPlate?.plateIndex ?? activePlateIndex)) return p;
-                const currentMods = p.modifiers || [];
-                const isAlreadySelected = currentMods.some((m) => m.id === mod.id);
-
-                let nextMods: ModifierOption[];
-                if (isSingle) {
-                  if (isAlreadySelected) {
-                    nextMods = group.isRequired ? currentMods : currentMods.filter((m) => m.id !== mod.id);
-                  } else {
-                    const withoutGroup = currentMods.filter((m) => !group.modifiers.some((gm) => gm.id === m.id));
-                    nextMods = [...withoutGroup, mod];
-                  }
-                } else {
-                  if (isAlreadySelected) {
-                    nextMods = currentMods.filter((m) => m.id !== mod.id);
-                  } else {
-                    const groupCount = currentMods.filter((m) => group.modifiers.some((gm) => gm.id === m.id)).length;
-                    if (group.maxSelections && groupCount >= group.maxSelections) {
-                      showToast(`Max ${group.maxSelections} selection${group.maxSelections > 1 ? 's' : ''} allowed`);
-                      return p;
-                    }
-                    nextMods = [...currentMods, mod];
-                  }
-                }
-                return { ...p, modifiers: nextMods };
-              })
-            );
-          } else {
-            setAccordionModifiers((prev) => {
-              const isAlreadySelected = prev.some((m) => m.id === mod.id);
-
-              if (isSingle) {
-                if (isAlreadySelected) {
-                  return group.isRequired ? prev : prev.filter((m) => m.id !== mod.id);
-                } else {
-                  const withoutGroup = prev.filter((m) => !group.modifiers.some((gm) => gm.id === m.id));
-                  return [...withoutGroup, mod];
-                }
-              } else {
-                if (isAlreadySelected) {
-                  return prev.filter((m) => m.id !== mod.id);
-                } else {
-                  const groupCount = prev.filter((m) => group.modifiers.some((gm) => gm.id === m.id)).length;
-                  if (group.maxSelections && groupCount >= group.maxSelections) {
-                    showToast(`Max ${group.maxSelections} selection${group.maxSelections > 1 ? 's' : ''} allowed`);
-                    return prev;
-                  }
-                  return [...prev, mod];
-                }
-              }
-            });
-          }
-        };
-
-        const notePlaceholder = isMultiPlate
-          ? (item.category === 'Beverages'
-              ? `Note for Portion ${currentPlate?.plateIndex} (e.g. less ice, strong)...`
-              : item.category === 'Desserts'
-              ? `Note for Portion ${currentPlate?.plateIndex} (e.g. served warm, nut-free)...`
-              : item.category === 'Breads'
-              ? `Note for Portion ${currentPlate?.plateIndex} (e.g. extra crisp, buttered)...`
-              : `Note for Plate ${currentPlate?.plateIndex} (e.g. less salt, well done)...`)
-          : getNotePlaceholder(item.category);
-
-        return (
-          <div
-            className="side-drawer-wrap customizer-drawer-wrap"
-            onClick={() => {
-              setActiveCustomizingItem(null);
-              setExpandedAccordionItemId(null);
-            }}
-          >
-            <div
-              className="side-drawer-panel combo-drawer-panel customizer-drawer-panel"
-              onClick={(e) => e.stopPropagation()}
-              style={{ maxWidth: '560px', width: '100%', padding: 0 }}
-            >
-              {/* Mobile grab handle */}
-              <div className="bottom-sheet-drag-handle" />
-
-              {/* Banner / Header */}
-              <div className="combo-drawer-banner">
-                <img
-                  src={item.imageUrl || FALLBACK_DISH_IMG}
-                  alt={item.name}
-                  className="combo-drawer-banner-img"
-                  onError={(e) => {
-                    e.currentTarget.src = FALLBACK_DISH_IMG;
-                  }}
-                />
-                <div className="combo-drawer-banner-gradient">
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                      <span style={{ fontSize: '0.85rem' }}>{item.dietaryTag === 'VEG' ? '🟢' : '🔴'}</span>
-                      <span className="combo-card-pax-tag" style={{ position: 'static' }}>{item.category}</span>
-                    </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          toggleWishlist(item.id, e);
-                        }}
-                        style={{
-                          background: 'rgba(0,0,0,0.6)',
-                          color: wishlist.has(item.id) ? '#f43f5e' : '#fff',
-                          border: '1px solid rgba(255,255,255,0.2)',
-                          borderRadius: '50%',
-                          width: '32px',
-                          height: '32px',
-                          fontSize: '1rem',
-                          cursor: 'pointer',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                        }}
-                        title={wishlist.has(item.id) ? 'In favorites' : 'Add to favorites'}
-                      >
-                        {wishlist.has(item.id) ? '❤️' : '🤍'}
-                      </button>
-                      <button
-                        onClick={() => {
-                          setActiveCustomizingItem(null);
-                          setExpandedAccordionItemId(null);
-                        }}
-                        style={{
-                          background: 'rgba(0,0,0,0.6)',
-                          color: '#fff',
-                          border: '1px solid rgba(255,255,255,0.2)',
-                          borderRadius: '50%',
-                          width: '32px',
-                          height: '32px',
-                          fontSize: '1rem',
-                          cursor: 'pointer',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                        }}
-                        title="Close"
-                      >
-                        ✕
-                      </button>
-                    </div>
-                  </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '6px' }}>
-                    <span style={{ fontSize: '0.75rem', color: '#cbd5e1' }}>⏱️ {item.prepTimeMinutes} mins</span>
-                    <span style={{ fontSize: '0.75rem', color: '#fbbf24', fontWeight: 700 }}>★ {item.rating.toFixed(1)}</span>
-                  </div>
-                  <h2 className="combo-drawer-title">{item.name}</h2>
-                </div>
-              </div>
-
-              {/* Scrollable Customization Content */}
-              <div className="drawer-body customizer-drawer-body" style={{ padding: '16px 20px', overflowY: 'auto' }}>
-                <p style={{ fontSize: '0.8rem', color: '#94a3b8', lineHeight: 1.4, marginBottom: '14px' }}>
-                  {item.description}
-                </p>
-
-                {/* Main Dish Customization Card matching Combo styling */}
-                <div className="combo-builder-dish-card" style={{ marginBottom: '16px' }}>
-                  {/* Dish Card Header with Quantity Stepper */}
-                  <div className="combo-dish-header" style={{ marginBottom: '12px' }}>
-                    <div className="combo-dish-name">
-                      <span>{item.dietaryTag === 'VEG' ? '🟢' : '🔴'}</span>
-                      <span>Order Quantity:</span>
-                    </div>
-                    <div className="combo-stepper-control">
-                      <button
-                        type="button"
-                        className="combo-stepper-btn"
-                        onClick={() => handleAccordionQtyChange(accordionQty - 1)}
-                        disabled={accordionQty <= 1}
-                      >
-                        −
-                      </button>
-                      <span style={{ fontSize: '0.92rem', fontWeight: 800, color: '#fbbf24', minWidth: '18px', textAlign: 'center' }}>
-                        {accordionQty}
-                      </span>
-                      <button
-                        type="button"
-                        className="combo-stepper-btn"
-                        onClick={() => handleAccordionQtyChange(accordionQty + 1)}
-                      >
-                        +
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* Multi-plate split toggle: Only visible when Quantity > 1 */}
-                  {accordionQty > 1 && (
-                    <div
-                      className="plate-split-toggle-box"
-                      onClick={handleTogglePerPlateSplit}
-                      style={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'space-between',
-                        padding: '10px 14px',
-                        background: isPerPlateSplit ? 'rgba(245, 158, 11, 0.12)' : 'rgba(255, 255, 255, 0.04)',
-                        border: isPerPlateSplit ? '1px solid #f59e0b' : '1px solid rgba(255, 255, 255, 0.1)',
-                        borderRadius: '10px',
-                        marginBottom: '14px',
-                        cursor: 'pointer',
-                      }}
-                    >
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.82rem', color: '#f8fafc', fontWeight: 600 }}>
-                        <span>🔀</span>
-                        <span>Customise each plate separately</span>
-                      </div>
-                      <input
-                        type="checkbox"
-                        checked={isPerPlateSplit}
-                        onChange={handleTogglePerPlateSplit}
-                        style={{ accentColor: '#f59e0b', width: '16px', height: '16px', cursor: 'pointer' }}
-                      />
-                    </div>
-                  )}
-
-                  {/* Horizontal Selectable Plate Tabs: ONLY when per-plate split is active */}
-                  {isPerPlateSplit && accordionQty > 1 && (
-                    <div style={{ marginBottom: '14px' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
-                        <span style={{ fontSize: '0.74rem', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.04em', fontWeight: 600 }}>
-                          Select plate to customise (tap tab):
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setPlateNamingTarget({
-                              type: 'ITEM',
-                              plateIndex: activePlateIndex,
-                              currentName: activePlateDisplayName,
-                            });
-                            setPlateNameInput(activePlateDisplayName);
-                          }}
-                          className="plate-assign-trigger-btn"
-                          title="Rename plate or assign diner profile"
-                        >
-                          ✏️ {currentPlate?.customName && !currentPlate.customName.startsWith('Plate') ? currentPlate.customName : 'Assign Profile'}
-                        </button>
-                      </div>
-
-                      <div className="combo-plate-tabs-scroll">
-                        {plateConfigs.map((cfg) => {
-                          const isActive = cfg.plateIndex === activePlateIndex;
-                          const cfgPortion = cfg.portion || 'FULL';
-                          const basePrice = cfgPortion === 'HALF' ? halfPaise : fullPaise;
-                          const plateModsTotal = (cfg.modifiers || []).reduce((sum, m) => sum + m.pricePaise, 0);
-                          const plateTotalPaise = basePrice + plateModsTotal;
-
-                          return (
-                            <button
-                              key={cfg.plateIndex}
-                              type="button"
-                              className={`combo-plate-tab ${isActive ? 'active' : ''}`}
-                              onClick={() => setActivePlateIndex(cfg.plateIndex)}
-                            >
-                              <span>🍽️ {cfg.customName || `Plate ${cfg.plateIndex}`}{cfgPortion === 'HALF' ? ' (Half)' : ''}</span>
-                              <span className="combo-plate-tab-badge">
-                                ₹{(plateTotalPaise / 100).toFixed(0)}
-                              </span>
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Portion Size Selector (Full vs Half) */}
-                  {hasPortions && (
-                    <div style={{ marginBottom: '16px' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
-                        <span style={{ fontSize: '0.82rem', fontWeight: 700, color: '#f8fafc' }}>
-                          Portion Size{isMultiPlate ? ` for ${activePlateDisplayName}` : ''}:
-                        </span>
-                        {halfPaise < fullPaise && (
-                          <span style={{ fontSize: '0.72rem', color: '#fbbf24', fontWeight: 600 }}>
-                            Save ₹{(upgradeDiffPaise / 100).toFixed(0)} on Half
-                          </span>
-                        )}
-                      </div>
-                      <div className="combo-portion-selector-grid">
-                        <button
-                          type="button"
-                          className={`combo-portion-toggle-btn ${activePortion === 'HALF' ? 'active' : ''}`}
-                          onClick={() => onSelectPortion('HALF')}
-                        >
-                          <div className="portion-title">
-                            <span>{activePortion === 'HALF' ? '✓ ' : '○ '}Half Portion</span>
-                          </div>
-                          <div className="portion-subtitle">₹{(halfPaise / 100).toFixed(0)}</div>
-                        </button>
-
-                        <button
-                          type="button"
-                          className={`combo-portion-toggle-btn ${activePortion === 'FULL' ? 'active' : ''}`}
-                          onClick={() => onSelectPortion('FULL')}
-                        >
-                          <div className="portion-title">
-                            <span>{activePortion === 'FULL' ? '✓ ' : '○ '}Full Portion</span>
-                          </div>
-                          <div className="portion-subtitle">₹{(fullPaise / 100).toFixed(0)}</div>
-                        </button>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Spice Level Preference: Deduplicated so it only shows if dish has NO spice modifier group */}
-                  {!hasSpiceModifierGroup && item.category !== 'Desserts' && item.category !== 'Beverages' && (
-                    <div style={{ marginBottom: '16px' }}>
-                      <div style={{ fontSize: '0.82rem', fontWeight: 700, color: '#f8fafc', marginBottom: '8px' }}>
-                        Spice Preference{isMultiPlate ? ` for ${activePlateDisplayName}` : ''}:
-                      </div>
-                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '6px' }}>
-                        {(['MILD', 'MEDIUM', 'HOT', 'NONE'] as const).map((sp) => {
-                          const isSpActive = activeSpice === sp;
-                          return (
-                            <button
-                              key={sp}
-                              type="button"
-                              className={`combo-option-pill ${isSpActive ? 'active' : ''}`}
-                              style={{ textAlign: 'center', padding: '8px 4px' }}
-                              onClick={() => onSelectSpice(sp)}
-                            >
-                              {sp === 'MILD' ? '🌿 Mild' : sp === 'MEDIUM' ? '🌶️ Medium' : sp === 'HOT' ? '🔥 Hot' : '🚫 Plain'}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Modifier Groups & Add-ons formatted with combo-addon-item-card */}
-                  {groups.length > 0 && (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', marginBottom: '16px' }}>
-                      {groups.map((grp) => {
-                        const isSingle = grp.selectionType === 'SINGLE';
-                        return (
-                          <div key={grp.id}>
-                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-                              <div>
-                                <span style={{ fontSize: '0.82rem', fontWeight: 700, color: '#f8fafc' }}>{grp.name}</span>
-                                {grp.isRequired && <span style={{ color: '#f59e0b', fontSize: '0.72rem', marginLeft: '6px' }}>*Required</span>}
-                              </div>
-                              <span style={{ fontSize: '0.72rem', color: '#94a3b8' }}>
-                                {isSingle ? 'Choose 1' : grp.maxSelections ? `Up to ${grp.maxSelections}` : 'Optional'}
-                              </span>
-                            </div>
-
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                              {grp.modifiers.map((mod) => {
-                                const isSelected = activeModifiers.some((m) => m.id === mod.id);
-                                return (
-                                  <div
-                                    key={mod.id}
-                                    className={`combo-addon-item-card ${isSelected ? 'selected' : ''}`}
-                                    onClick={() => onToggleModifier(mod, grp)}
-                                  >
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                      <div
-                                        className="combo-addon-checkbox"
-                                        style={isSingle ? { borderRadius: '50%' } : {}}
-                                      >
-                                        {isSelected && '✓'}
-                                      </div>
-                                      <span style={{ fontSize: '0.78rem', color: isSelected ? '#fff' : '#cbd5e1', fontWeight: isSelected ? 600 : 400 }}>
-                                        {mod.name}
-                                      </span>
-                                    </div>
-                                    <span className={`combo-addon-price-tag ${mod.pricePaise === 0 ? 'free' : ''}`}>
-                                      {mod.pricePaise > 0 ? `+₹${(mod.pricePaise / 100).toFixed(0)}` : 'Free'}
-                                    </span>
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-
-                  {/* Chef Cooking Instructions & Notes */}
-                  <div style={{ marginBottom: '14px' }}>
-                    <div style={{ fontSize: '0.82rem', fontWeight: 700, color: '#f8fafc', marginBottom: '8px' }}>
-                      Chef Instructions{isMultiPlate ? ` for ${activePlateDisplayName}` : ''}:
-                    </div>
-                    <div className="combo-pill-options-wrap">
-                      {(CATEGORY_COOK_NOTE_CHIPS[item.category] || ['Less Oil / Less Spicy', 'Crispy', 'Extra Gravy', 'No Onion / Garlic', 'Pack Separately']).map((chip) => {
-                        const isSelected = (activeNote || '').includes(chip);
-                        return (
-                          <button
-                            key={chip}
-                            type="button"
-                            className={`combo-option-pill ${isSelected ? 'active' : ''}`}
-                            onClick={() => onToggleChip(chip)}
-                          >
-                            {isSelected ? '✓ ' : '+ '} {chip}
-                          </button>
-                        );
-                      })}
-                    </div>
-                    <input
-                      type="text"
-                      placeholder={notePlaceholder}
-                      value={activeNote}
-                      onChange={(e) => onChangeNote(e.target.value)}
-                      className="combo-plate-name-input"
-                      style={{ marginTop: '10px' }}
-                      maxLength={100}
-                    />
-                  </div>
-                </div>
-              </div>
-
-              {/* Sticky Footer: Static Price & Add to Order Button */}
-              <div
-                className="drawer-footer customizer-drawer-footer"
-                style={{
-                  borderTop: '1px solid rgba(255,255,255,0.1)',
-                  background: '#111624',
-                  padding: '14px 20px',
-                }}
-              >
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%', gap: '16px' }}>
-                  <div>
-                    <div style={{ fontSize: '0.72rem', color: '#94a3b8' }}>Total Price:</div>
-                    <div style={{ fontSize: '1.25rem', fontWeight: 800, color: '#fbbf24' }}>
-                      ₹{(currentTotalPricePaise / 100).toFixed(0)}
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    className="hero-action-btn"
-                    style={{
-                      flex: 1,
-                      maxWidth: '260px',
-                      padding: '12px 18px',
-                      fontSize: '0.95rem',
-                      fontWeight: 800,
-                      background: 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)',
-                      color: '#000',
-                      boxShadow: '0 4px 18px rgba(245, 158, 11, 0.35)',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      gap: '8px',
-                      borderRadius: '10px',
-                      border: 'none',
-                      cursor: 'pointer',
-                    }}
-                    onClick={(e) => handleAddAccordionToCart(item, e)}
-                  >
-                    <span>Add to Order ·</span>
-                    <span>₹{(currentTotalPricePaise / 100).toFixed(0)}</span>
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        );
-      })()}
 
       {/* ── Interactive Combo Customizer Drawer / Modal ── */}
       {activeComboOffer && (
@@ -7106,593 +5616,6 @@ export default function CustomerDineInPage() {
         </div>
       )}
 
-      {/* Cart Drawer (Always accessible from top bar cart icon) */}
-      {isCartOpen && (
-        <div className="side-drawer-wrap" onClick={() => setIsCartOpen(false)}>
-          <div className="side-drawer-panel" onClick={(e) => e.stopPropagation()}>
-            <div className="drawer-header">
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <span style={{ fontSize: '1.2rem' }}>🛒</span>
-                <span className="drawer-title">Table {selectedTable} Cart</span>
-              </div>
-              <button onClick={() => setIsCartOpen(false)} style={{ color: '#94a3b8', fontSize: '1.2rem' }}>
-                ✕
-              </button>
-            </div>
-
-            {/* Quick Link to Table Orders if dishes are already placed */}
-            {flattenedPlates.length > 0 && (
-              <div
-                style={{
-                  background: 'linear-gradient(135deg, rgba(16,185,129,0.12), rgba(5,150,105,0.2))',
-                  border: '1px solid rgba(16,185,129,0.3)',
-                  borderRadius: '10px',
-                  padding: '10px 14px',
-                  margin: '12px 16px 0',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  gap: '8px',
-                }}
-              >
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <span style={{ fontSize: '1.2rem' }}>📋</span>
-                  <div>
-                    <div style={{ fontSize: '0.82rem', fontWeight: 700, color: '#34d399' }}>
-                      {flattenedPlates.length} {flattenedPlates.length === 1 ? 'item' : 'items'} ordered for Table {selectedTable}
-                    </div>
-                    <div style={{ fontSize: '0.70rem', color: '#94a3b8' }}>
-                      Cooking, served &amp; course status
-                    </div>
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setIsCartOpen(false);
-                    setIsOrdersHistoryOpen(true);
-                  }}
-                  style={{
-                    background: '#10b981',
-                    color: '#000',
-                    border: 'none',
-                    borderRadius: '6px',
-                    padding: '6px 10px',
-                    fontSize: '0.74rem',
-                    fontWeight: 800,
-                    cursor: 'pointer',
-                    whiteSpace: 'nowrap',
-                  }}
-                >
-                  View Orders →
-                </button>
-              </div>
-            )}
-
-            <div className="drawer-body">
-              {cartLines.length === 0 ? (
-                <div style={{ textAlign: 'center', padding: '60px 20px', color: '#94a3b8' }}>
-                  <div style={{ fontSize: '3rem', marginBottom: '14px' }}>🍽️</div>
-                  <h4 style={{ color: '#fff', marginBottom: '6px' }}>Your cart is empty</h4>
-                  <p style={{ fontSize: '0.85rem', marginBottom: '20px' }}>
-                    Browse our chef specialties or choose from the menu!
-                  </p>
-                  <button
-                    className="hero-action-btn"
-                    onClick={() => {
-                      setIsCartOpen(false);
-                      setCurrentView('menu');
-                    }}
-                  >
-                    Browse Full Menu →
-                  </button>
-                  {flattenedPlates.length > 0 && (
-                    <div style={{ marginTop: '14px' }}>
-                      <button
-                        onClick={() => {
-                          setIsCartOpen(false);
-                          setIsOrdersHistoryOpen(true);
-                        }}
-                        style={{
-                          background: 'rgba(16,185,129,0.15)',
-                          border: '1px solid rgba(16,185,129,0.4)',
-                          color: '#34d399',
-                          borderRadius: '8px',
-                          padding: '10px 18px',
-                          fontSize: '0.85rem',
-                          fontWeight: 700,
-                          cursor: 'pointer',
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          gap: '6px',
-                        }}
-                      >
-                        <span>📋</span>
-                        <span>View Table Orders ({flattenedPlates.length})</span>
-                      </button>
-                    </div>
-                  )}
-                </div>
-              ) : (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
-                  {cartLines.map((line) => {
-                    const modsTotal = line.selectedModifiers.reduce((acc, m) => acc + m.pricePaise, 0);
-                    const linePricePaise = (line.item.pricePaise + modsTotal) * line.quantity;
-
-                    return (
-                      <div
-                        key={line.cartLineId}
-                        style={{
-                          background: 'rgba(255,255,255,0.03)',
-                          border: '1px solid rgba(255,255,255,0.08)',
-                          borderRadius: '12px',
-                          padding: '12px 14px',
-                          display: 'flex',
-                          flexDirection: 'column',
-                          gap: '6px',
-                        }}
-                      >
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                          <div>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                              <span>{line.item.dietaryTag === 'VEG' ? '🟢' : '🔴'}</span>
-                              <span style={{ fontWeight: 700, color: '#fff', fontSize: '0.92rem' }}>
-                                {line.item.name}
-                              </span>
-                              {line.portion === 'HALF' && (
-                                <span
-                                  style={{
-                                    fontSize: '0.66rem',
-                                    fontWeight: 800,
-                                    padding: '1px 6px',
-                                    borderRadius: '4px',
-                                    background: 'rgba(245, 158, 11, 0.2)',
-                                    color: '#fbbf24',
-                                    border: '1px solid rgba(245, 158, 11, 0.4)',
-                                    letterSpacing: '0.04em',
-                                  }}
-                                >
-                                  HALF PLATE
-                                </span>
-                              )}
-                              {line.plateLabel && <span className="plate-badge-pill">{line.plateLabel}</span>}
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  if (cartPlateEditingId === line.cartLineId) {
-                                    setCartPlateEditingId(null);
-                                    setCartPlateDigits('');
-                                  } else {
-                                    setCartPlateEditingId(line.cartLineId);
-                                    setCartPlateDigits(
-                                      sanitizeTableDigits(line.targetTableNumber || (selectedTable !== '--' ? selectedTable : '')),
-                                    );
-                                  }
-                                }}
-                                style={{
-                                  fontSize: '0.68rem',
-                                  fontWeight: 700,
-                                  padding: '2px 7px',
-                                  borderRadius: '999px',
-                                  background: line.targetTableNumber
-                                    ? 'rgba(16, 185, 129, 0.16)'
-                                    : 'rgba(255, 255, 255, 0.08)',
-                                  border: line.targetTableNumber
-                                    ? '1px solid rgba(16, 185, 129, 0.45)'
-                                    : '1px solid rgba(255, 255, 255, 0.16)',
-                                  color: line.targetTableNumber ? '#34d399' : '#cbd5e1',
-                                  cursor: 'pointer',
-                                }}
-                                title="Change table number for this plate before checkout"
-                              >
-                                🪑 Table {line.targetTableNumber || (selectedTable !== '--' ? selectedTable : 'Select')} ✎
-                              </button>
-                            </div>
-                            <div style={{ fontSize: '0.85rem', color: '#fbbf24', fontWeight: 700, marginTop: '2px' }}>
-                              ₹{(linePricePaise / 100).toFixed(0)}
-                            </div>
-                          </div>
-
-                          <button
-                            onClick={() => handleRemoveCartLine(line.cartLineId)}
-                            style={{ color: '#ef4444', fontSize: '0.8rem', padding: '4px' }}
-                            title="Remove line"
-                          >
-                            🗑️
-                          </button>
-                        </div>
-
-                        {cartPlateEditingId === line.cartLineId && (
-                          <div
-                            style={{
-                              background: 'rgba(15, 23, 42, 0.9)',
-                              border: '1px solid rgba(245, 158, 11, 0.35)',
-                              borderRadius: '8px',
-                              padding: '8px 10px',
-                              display: 'flex',
-                              flexDirection: 'column',
-                              gap: '6px',
-                            }}
-                          >
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                              <input
-                                type="text"
-                                inputMode="numeric"
-                                pattern="[0-9]*"
-                                placeholder="Table #"
-                                value={cartPlateDigits}
-                                onChange={(e) => setCartPlateDigits(sanitizeTableDigits(e.target.value))}
-                                style={{
-                                  width: '90px',
-                                  padding: '5px 8px',
-                                  borderRadius: '6px',
-                                  background: 'rgba(255,255,255,0.08)',
-                                  border: '1px solid rgba(255,255,255,0.18)',
-                                  color: '#fff',
-                                  fontSize: '0.82rem',
-                                  fontWeight: 700,
-                                }}
-                              />
-                              <button
-                                type="button"
-                                disabled={!cartPlateValidation.matched}
-                                onClick={() => {
-                                  if (cartPlateValidation.matched) {
-                                    handleAssignCartLineTable(line.cartLineId, cartPlateValidation.matched);
-                                  }
-                                }}
-                                style={{
-                                  padding: '5px 10px',
-                                  borderRadius: '6px',
-                                  border: 'none',
-                                  background: cartPlateValidation.matched
-                                    ? 'linear-gradient(135deg, #f59e0b, #d97706)'
-                                    : 'rgba(255,255,255,0.08)',
-                                  color: cartPlateValidation.matched ? '#000' : '#64748b',
-                                  fontSize: '0.74rem',
-                                  fontWeight: 800,
-                                  cursor: cartPlateValidation.matched ? 'pointer' : 'not-allowed',
-                                }}
-                              >
-                                {line.quantity > 1 ? 'Move 1 Plate' : 'Save Table'}
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setCartPlateEditingId(null);
-                                  setCartPlateDigits('');
-                                }}
-                                style={{
-                                  padding: '5px 8px',
-                                  borderRadius: '6px',
-                                  background: 'transparent',
-                                  border: '1px solid rgba(255,255,255,0.14)',
-                                  color: '#94a3b8',
-                                  fontSize: '0.72rem',
-                                  cursor: 'pointer',
-                                }}
-                              >
-                                Cancel
-                              </button>
-                            </div>
-                            {cartPlateValidation.error && (
-                              <div style={{ fontSize: '0.72rem', color: '#f87171', fontWeight: 600 }}>
-                                {cartPlateValidation.error}
-                              </div>
-                            )}
-                            {cartPlateValidation.matched && (
-                              <div style={{ fontSize: '0.72rem', color: '#34d399', fontWeight: 600 }}>
-                                ✓ Table {cartPlateValidation.matched.table_number} matched
-                              </div>
-                            )}
-                          </div>
-                        )}
-
-                        {/* Modifiers & Notes Badges */}
-                        {(line.spiceLevel || line.notes || line.selectedModifiers.length > 0) && (
-                          <div
-                            style={{
-                              background: 'rgba(0,0,0,0.25)',
-                              padding: '6px 8px',
-                              borderRadius: '6px',
-                              fontSize: '0.74rem',
-                              color: '#cbd5e1',
-                              display: 'flex',
-                              flexDirection: 'column',
-                              gap: '2px',
-                            }}
-                          >
-                            {line.spiceLevel && <span>🌶️ Spice: {line.spiceLevel}</span>}
-                            {line.notes && <span>📝 Note: {line.notes}</span>}
-                            {line.selectedModifiers.map((m) => (
-                              <span key={m.id} style={{ color: m.pricePaise > 0 ? '#fbbf24' : '#94a3b8' }}>
-                                + {m.name} {m.pricePaise > 0 ? `(+₹${(m.pricePaise / 100).toFixed(0)})` : '(Included)'}
-                              </span>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-
-                  {/* Apply Coupon Input */}
-                  <div style={{ marginTop: '10px' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
-                      <span style={{ fontSize: '0.78rem', fontWeight: 700, color: '#94a3b8' }}>
-                        Have a coupon?
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => setIsAvailableCouponsOpen(true)}
-                        style={{
-                          background: 'rgba(245, 158, 11, 0.12)',
-                          border: '1px solid rgba(245, 158, 11, 0.35)',
-                          color: '#fbbf24',
-                          padding: '3px 9px',
-                          borderRadius: '6px',
-                          fontSize: '0.72rem',
-                          fontWeight: 700,
-                          cursor: 'pointer',
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          gap: '4px',
-                        }}
-                      >
-                        <span>🏷️</span>
-                        <span>Available Coupons</span>
-                      </button>
-                    </div>
-                    <div style={{ display: 'flex', gap: '8px' }}>
-                      <input
-                        type="text"
-                        placeholder="e.g. ROYAL15"
-                        value={couponInput}
-                        onChange={(e) => {
-                          setCouponInput(e.target.value.toUpperCase());
-                          if (couponError) setCouponError(null);
-                        }}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') {
-                            e.preventDefault();
-                            handleApplyCoupon(couponInput);
-                          }
-                        }}
-                        style={{
-                          flex: 1,
-                          padding: '8px 12px',
-                          background: 'rgba(255,255,255,0.05)',
-                          border: couponError
-                            ? '1px solid #ef4444'
-                            : appliedCoupon
-                            ? '1px solid #10b981'
-                            : '1px solid rgba(255,255,255,0.1)',
-                          borderRadius: '8px',
-                          color: '#fff',
-                          fontSize: '0.85rem',
-                          fontFamily: 'monospace',
-                          outline: 'none',
-                        }}
-                      />
-                      <button
-                        type="button"
-                        onClick={() => handleApplyCoupon(couponInput)}
-                        style={{
-                          background: 'rgba(245,158,11,0.2)',
-                          border: '1px solid var(--accent-gold)',
-                          color: '#fbbf24',
-                          padding: '0 14px',
-                          borderRadius: '8px',
-                          fontWeight: 700,
-                          fontSize: '0.8rem',
-                          cursor: 'pointer',
-                        }}
-                      >
-                        Apply
-                      </button>
-                    </div>
-
-                    {/* Inline error message under the writing space */}
-                    {couponError && (
-                      <div
-                        style={{
-                          fontSize: '0.74rem',
-                          color: '#f87171',
-                          marginTop: '6px',
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: '5px',
-                          fontWeight: 600,
-                        }}
-                      >
-                        <span>⚠️</span>
-                        <span>{couponError}</span>
-                      </div>
-                    )}
-
-                    {appliedCoupon && !couponError && (
-                      <div
-                        style={{
-                          fontSize: '0.75rem',
-                          color: '#10b981',
-                          marginTop: '6px',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'space-between',
-                          fontWeight: 700,
-                        }}
-                      >
-                        <span>✓ Applied: {appliedCoupon} (-₹{(discountPaise / 100).toFixed(0)})</span>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setAppliedCoupon(null);
-                            setCouponInput('');
-                            setCouponError(null);
-                          }}
-                          style={{
-                            background: 'transparent',
-                            border: 'none',
-                            color: '#f87171',
-                            fontSize: '0.72rem',
-                            cursor: 'pointer',
-                            textDecoration: 'underline',
-                            padding: '0 4px',
-                          }}
-                        >
-                          Remove
-                        </button>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Bill Breakdown */}
-                  <div
-                    style={{
-                      background: 'rgba(255,255,255,0.02)',
-                      borderTop: '1px dashed rgba(255,255,255,0.12)',
-                      paddingTop: '12px',
-                      display: 'flex',
-                      flexDirection: 'column',
-                      gap: '6px',
-                      fontSize: '0.84rem',
-                      color: '#94a3b8',
-                    }}
-                  >
-                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                      <span>Item Total</span>
-                      <span style={{ color: '#fff' }}>₹{(cartSubtotalPaise / 100).toFixed(0)}</span>
-                    </div>
-                    {discountPaise > 0 && (
-                      <div style={{ display: 'flex', justifyContent: 'space-between', color: '#10b981' }}>
-                        <span>Discount ({appliedCoupon})</span>
-                        <span>-₹{(discountPaise / 100).toFixed(0)}</span>
-                      </div>
-                    )}
-                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                      <span>GST (5%)</span>
-                      <span style={{ color: '#fff' }}>₹{(gstPaise / 100).toFixed(0)}</span>
-                    </div>
-                    <div
-                      style={{
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        fontSize: '1.05rem',
-                        fontWeight: 800,
-                        color: '#fbbf24',
-                        borderTop: '1px solid rgba(255,255,255,0.1)',
-                        paddingTop: '8px',
-                        marginTop: '4px',
-                      }}
-                    >
-                      <span>To Pay</span>
-                      <span>₹{(cartGrandTotalPaise / 100).toFixed(0)}</span>
-                    </div>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {cartLines.length > 0 && (
-              <div className="drawer-footer" style={{ padding: '16px', borderTop: '1px solid rgba(255, 255, 255, 0.08)' }}>
-                {(!isTableVerified || !activeSessionId) && (
-                  <div
-                    style={{
-                      background: 'rgba(245, 158, 11, 0.09)',
-                      border: '1px solid rgba(245, 158, 11, 0.35)',
-                      borderRadius: '10px',
-                      padding: '10px 12px',
-                      marginBottom: '12px',
-                    }}
-                  >
-                    <div style={{ fontSize: '0.78rem', fontWeight: 800, color: '#fbbf24', marginBottom: '6px' }}>
-                      🪑 Enter Your Table Number to Checkout
-                    </div>
-                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                      <input
-                        type="text"
-                        inputMode="numeric"
-                        pattern="[0-9]*"
-                        placeholder="Digits only (e.g. 4)"
-                        value={cartCheckoutTableDigits}
-                        onChange={(e) => setCartCheckoutTableDigits(sanitizeTableDigits(e.target.value))}
-                        style={{
-                          flex: 1,
-                          padding: '8px 10px',
-                          borderRadius: '8px',
-                          background: 'rgba(0, 0, 0, 0.35)',
-                          border: cartCheckoutTableValidation.error
-                            ? '1px solid #ef4444'
-                            : '1px solid rgba(255,255,255,0.18)',
-                          color: '#fff',
-                          fontSize: '0.86rem',
-                          fontWeight: 700,
-                        }}
-                      />
-                      <button
-                        type="button"
-                        disabled={!cartCheckoutTableValidation.matched}
-                        onClick={async () => {
-                          const targetOutlet = activeOutletId || resolveTenantIds().outletId || undefined;
-                          if (cartCheckoutTableValidation.matched) {
-                            const session = await establishManualTableSession(
-                              targetOutlet,
-                              cartCheckoutTableValidation.matched.table_number,
-                              tablePax,
-                            );
-                            if (session) {
-                              setCartCheckoutTableDigits('');
-                              showToast(`Saved Table ${session.tableNumber}!`);
-                            }
-                          }
-                        }}
-                        style={{
-                          padding: '8px 12px',
-                          borderRadius: '8px',
-                          border: 'none',
-                          background: cartCheckoutTableValidation.matched
-                            ? 'linear-gradient(135deg, #10b981, #059669)'
-                            : 'rgba(255,255,255,0.08)',
-                          color: cartCheckoutTableValidation.matched ? '#fff' : '#64748b',
-                          fontWeight: 800,
-                          fontSize: '0.76rem',
-                          cursor: cartCheckoutTableValidation.matched ? 'pointer' : 'not-allowed',
-                        }}
-                      >
-                        Save Table
-                      </button>
-                    </div>
-                    {cartCheckoutTableValidation.error && (
-                      <div style={{ fontSize: '0.73rem', color: '#f87171', fontWeight: 600, marginTop: '5px' }}>
-                        {cartCheckoutTableValidation.error}
-                      </div>
-                    )}
-                    {cartCheckoutTableValidation.matched && (
-                      <div style={{ fontSize: '0.73rem', color: '#34d399', fontWeight: 600, marginTop: '5px' }}>
-                        ✓ Found Table {cartCheckoutTableValidation.matched.table_number}
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                <button
-                  className="accordion-add-action-btn"
-                  onClick={handlePlaceOrder}
-                  disabled={
-                    isPlacingOrder ||
-                    ((!isTableVerified || !activeSessionId) && !cartCheckoutTableValidation.matched)
-                  }
-                  style={{ width: '100%', margin: 0, padding: '12px 16px', fontSize: '0.92rem' }}
-                >
-                  {isPlacingOrder ? 'Initiating Payment...' : `💳 Pay ₹${(cartGrandTotalPaise / 100).toFixed(0)} & Send to Kitchen`}
-                </button>
-                <div style={{ textAlign: 'center', fontSize: '0.72rem', color: '#94a3b8', marginTop: '6px' }}>
-                  🔒 Dishes stay in your cart until payment is confirmed.
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
 
       {/* Available Coupons Modal Sheet (Drawer over Cart / Checkout) */}
       {isAvailableCouponsOpen && (
@@ -7933,1094 +5856,8 @@ export default function CustomerDineInPage() {
         </div>
       )}
 
-      {/* Orders History Drawer & Settlement */}
-      {isOrdersHistoryOpen && (
-        <div className="side-drawer-wrap" onClick={() => setIsOrdersHistoryOpen(false)}>
-          <div className="side-drawer-panel" onClick={(e) => e.stopPropagation()}>
-            {/* Drawer Header */}
-            <div className="drawer-header" style={{ padding: '16px 20px', borderBottom: '1px solid rgba(255, 255, 255, 0.08)' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                <span style={{ fontSize: '1.3rem' }}>📋</span>
-                <div>
-                  <div className="drawer-title" style={{ fontSize: '1.05rem', fontWeight: 800, color: '#fff' }}>
-                    Table {selectedTable} Paid Orders
-                  </div>
-                  <div style={{ fontSize: '0.74rem', color: '#94a3b8' }}>
-                    {preparingPlates.length} preparing · {servedPlates.length} served · {cancelledPlates.length} cancelled
-                    {flattenedPlates[0]?.orderCreatedAt && (
-                      <span> · Latest: {formatOrderDateTime(flattenedPlates[0].orderCreatedAt)}</span>
-                    )}
-                  </div>
-                </div>
-              </div>
-              <button
-                onClick={() => setIsOrdersHistoryOpen(false)}
-                style={{
-                  background: 'rgba(255, 255, 255, 0.05)',
-                  border: '1px solid rgba(255, 255, 255, 0.1)',
-                  borderRadius: '8px',
-                  color: '#94a3b8',
-                  fontSize: '1rem',
-                  width: '32px',
-                  height: '32px',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  cursor: 'pointer',
-                }}
-              >
-                ✕
-              </button>
-            </div>
 
-            {/* Filter Tabs: Preparing | Serve Later (On Hold) | Served | Cancelled */}
-            <div
-              style={{
-                display: 'flex',
-                gap: '6px',
-                padding: '10px 14px',
-                background: 'rgba(0, 0, 0, 0.25)',
-                borderBottom: '1px solid rgba(255, 255, 255, 0.06)',
-                overflowX: 'auto',
-              }}
-            >
-              <button
-                type="button"
-                onClick={() => setOrdersFilterTab('PREPARING')}
-                style={{
-                  flex: 1,
-                  padding: '9px 6px',
-                  borderRadius: '8px',
-                  fontSize: '0.74rem',
-                  fontWeight: ordersFilterTab === 'PREPARING' ? 800 : 600,
-                  cursor: 'pointer',
-                  background:
-                    ordersFilterTab === 'PREPARING'
-                      ? 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)'
-                      : 'rgba(255, 255, 255, 0.04)',
-                  color: ordersFilterTab === 'PREPARING' ? '#000' : '#94a3b8',
-                  border:
-                    ordersFilterTab === 'PREPARING'
-                      ? '1px solid #f59e0b'
-                      : '1px solid rgba(255, 255, 255, 0.08)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  gap: '5px',
-                  whiteSpace: 'nowrap',
-                }}
-              >
-                <span>🍳 Preparing</span>
-                <span
-                  style={{
-                    background: ordersFilterTab === 'PREPARING' ? 'rgba(0, 0, 0, 0.25)' : 'rgba(255, 255, 255, 0.1)',
-                    padding: '1px 5px',
-                    borderRadius: '999px',
-                    fontSize: '0.7rem',
-                    fontWeight: 800,
-                  }}
-                >
-                  {preparingPlates.length}
-                </span>
-              </button>
 
-              <button
-                type="button"
-                onClick={() => setOrdersFilterTab('ON_HOLD')}
-                style={{
-                  flex: 1,
-                  padding: '9px 6px',
-                  borderRadius: '8px',
-                  fontSize: '0.74rem',
-                  fontWeight: ordersFilterTab === 'ON_HOLD' ? 800 : 600,
-                  cursor: 'pointer',
-                  background:
-                    ordersFilterTab === 'ON_HOLD'
-                      ? 'linear-gradient(135deg, #06b6d4 0%, #0284c7 100%)'
-                      : 'rgba(255, 255, 255, 0.04)',
-                  color: ordersFilterTab === 'ON_HOLD' ? '#000' : '#94a3b8',
-                  border:
-                    ordersFilterTab === 'ON_HOLD'
-                      ? '1px solid #06b6d4'
-                      : '1px solid rgba(255, 255, 255, 0.08)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  gap: '5px',
-                  whiteSpace: 'nowrap',
-                }}
-              >
-                <span>🍨 Serve Later</span>
-                <span
-                  style={{
-                    background: ordersFilterTab === 'ON_HOLD' ? 'rgba(0, 0, 0, 0.25)' : 'rgba(255, 255, 255, 0.1)',
-                    padding: '1px 5px',
-                    borderRadius: '999px',
-                    fontSize: '0.7rem',
-                    fontWeight: 800,
-                  }}
-                >
-                  {onHoldPlates.length}
-                </span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setOrdersFilterTab('SERVED')}
-                style={{
-                  flex: 1,
-                  padding: '9px 6px',
-                  borderRadius: '8px',
-                  fontSize: '0.74rem',
-                  fontWeight: ordersFilterTab === 'SERVED' ? 800 : 600,
-                  cursor: 'pointer',
-                  background:
-                    ordersFilterTab === 'SERVED'
-                      ? 'linear-gradient(135deg, #10b981 0%, #059669 100%)'
-                      : 'rgba(255, 255, 255, 0.04)',
-                  color: ordersFilterTab === 'SERVED' ? '#fff' : '#94a3b8',
-                  border:
-                    ordersFilterTab === 'SERVED'
-                      ? '1px solid #10b981'
-                      : '1px solid rgba(255, 255, 255, 0.08)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  gap: '5px',
-                  whiteSpace: 'nowrap',
-                }}
-              >
-                <span>🍽️ Served</span>
-                <span
-                  style={{
-                    background: ordersFilterTab === 'SERVED' ? 'rgba(0, 0, 0, 0.25)' : 'rgba(255, 255, 255, 0.1)',
-                    padding: '1px 5px',
-                    borderRadius: '999px',
-                    fontSize: '0.7rem',
-                    fontWeight: 800,
-                  }}
-                >
-                  {servedPlates.length}
-                </span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setOrdersFilterTab('CANCELLED')}
-                style={{
-                  flex: 1,
-                  padding: '9px 6px',
-                  borderRadius: '8px',
-                  fontSize: '0.74rem',
-                  fontWeight: ordersFilterTab === 'CANCELLED' ? 800 : 600,
-                  cursor: 'pointer',
-                  background:
-                    ordersFilterTab === 'CANCELLED'
-                      ? 'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)'
-                      : 'rgba(255, 255, 255, 0.04)',
-                  color: ordersFilterTab === 'CANCELLED' ? '#fff' : '#94a3b8',
-                  border:
-                    ordersFilterTab === 'CANCELLED'
-                      ? '1px solid #ef4444'
-                      : '1px solid rgba(255, 255, 255, 0.08)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  gap: '5px',
-                  whiteSpace: 'nowrap',
-                }}
-              >
-                <span>✕ Cancel</span>
-                <span
-                  style={{
-                    background: ordersFilterTab === 'CANCELLED' ? 'rgba(0, 0, 0, 0.25)' : 'rgba(255, 255, 255, 0.1)',
-                    padding: '1px 5px',
-                    borderRadius: '999px',
-                    fontSize: '0.7rem',
-                    fontWeight: 800,
-                  }}
-                >
-                  {cancelledPlates.length}
-                </span>
-              </button>
-            </div>
-
-            {/* Drawer Body: Plate-level breakdown */}
-            <div className="drawer-body" style={{ padding: '16px' }}>
-              {(() => {
-                const displayPlates =
-                  ordersFilterTab === 'PREPARING'
-                    ? preparingPlates
-                    : ordersFilterTab === 'ON_HOLD'
-                    ? onHoldPlates
-                    : ordersFilterTab === 'SERVED'
-                    ? servedPlates
-                    : cancelledPlates;
-
-                if (flattenedPlates.length === 0) {
-                  return (
-                    <div style={{ textAlign: 'center', padding: '60px 20px', color: '#94a3b8' }}>
-                      <div style={{ fontSize: '3rem', marginBottom: '14px' }}>📋</div>
-                      <h4 style={{ color: '#fff', marginBottom: '6px' }}>No paid orders yet</h4>
-                      <p style={{ fontSize: '0.85rem', lineHeight: 1.5, marginBottom: '16px' }}>
-                        Dishes stay in your cart until paid. Once paid, track their cooking and delivery status here!
-                      </p>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setIsOrdersHistoryOpen(false);
-                          if (cartLines.length > 0) setIsCartOpen(true);
-                        }}
-                        className="accordion-add-action-btn"
-                        style={{ margin: '0 auto', fontSize: '0.82rem', padding: '8px 16px' }}
-                      >
-                        {isMounted && cartLines.length > 0 ? `View Cart (${cartItemCount} Pending)` : 'Browse Menu & Order'}
-                      </button>
-                    </div>
-                  );
-                }
-
-                if (displayPlates.length === 0) {
-                  return (
-                    <div style={{ textAlign: 'center', padding: '40px 16px', color: '#94a3b8' }}>
-                      <div style={{ fontSize: '2.5rem', marginBottom: '12px' }}>
-                        {ordersFilterTab === 'PREPARING' ? '🍳' : ordersFilterTab === 'ON_HOLD' ? '🍨' : ordersFilterTab === 'SERVED' ? '🍽️' : '✨'}
-                      </div>
-                      <h4 style={{ color: '#fff', marginBottom: '6px' }}>
-                        {ordersFilterTab === 'PREPARING'
-                          ? 'No dishes preparing'
-                          : ordersFilterTab === 'ON_HOLD'
-                          ? 'No items held for later'
-                          : ordersFilterTab === 'SERVED'
-                          ? 'No dishes served yet'
-                          : 'No cancelled dishes'}
-                      </h4>
-                      <p style={{ fontSize: '0.82rem', marginBottom: '16px', lineHeight: 1.5 }}>
-                        {ordersFilterTab === 'PREPARING'
-                          ? 'All dishes placed at this table have either been served or completed.'
-                          : ordersFilterTab === 'ON_HOLD'
-                          ? 'Post-meal items like desserts and hot beverages will appear here once ordered. Release them to the kitchen whenever you are ready!'
-                          : ordersFilterTab === 'SERVED'
-                          ? 'The kitchen is preparing your dishes. Once served to your table, they will appear here!'
-                          : 'None of your table orders have been cancelled.'}
-                      </p>
-                    </div>
-                  );
-                }
-
-                const totalDisplayPaise = displayPlates.reduce((sum, p) => sum + p.plateTotalPaise, 0);
-                const allExpanded = displayPlates.every((p) => expandedPlateKeys[p.plateKey]);
-
-                return (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
-                    {/* Sub-header controls: Count & Expand All */}
-                    <div
-                      style={{
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        alignItems: 'center',
-                        fontSize: '0.78rem',
-                        color: '#94a3b8',
-                        paddingBottom: '4px',
-                      }}
-                    >
-                      <span style={{ fontWeight: 600 }}>
-                        {ordersFilterTab === 'PREPARING' && '🍳 '}
-                        {ordersFilterTab === 'ON_HOLD' && '🍨 '}
-                        {ordersFilterTab === 'SERVED' && '🍽️ '}
-                        {ordersFilterTab === 'CANCELLED' && '✕ '}
-                        {displayPlates.length} {ordersFilterTab === 'ON_HOLD' ? 'item' : 'dish'}{displayPlates.length === 1 ? '' : 'es'} · Total ₹
-                        {(totalDisplayPaise / 100).toFixed(0)}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => handleToggleExpandAllPlates(displayPlates)}
-                        style={{
-                          background: 'transparent',
-                          border: 'none',
-                          color: '#fbbf24',
-                          fontSize: '0.75rem',
-                          fontWeight: 700,
-                          cursor: 'pointer',
-                          textDecoration: 'underline',
-                          padding: '2px 4px',
-                        }}
-                      >
-                        {allExpanded ? 'Collapse All ▲' : 'Expand All ▼'}
-                      </button>
-                    </div>
-
-                    {/* Plates List — special grouped render for Serve Later (ON_HOLD) tab */}
-                    {ordersFilterTab === 'ON_HOLD' ? (() => {
-                      // Group onHoldPlates by itemId to show one card per unique menu item
-                      const groupedByItem: Record<string, FlattenedPlateItem[]> = {};
-                      onHoldPlates.forEach((plate) => {
-                        const existing = groupedByItem[plate.itemId];
-                        if (!existing) {
-                          groupedByItem[plate.itemId] = [plate];
-                        } else {
-                          existing.push(plate);
-                        }
-                      });
-
-                      return Object.entries(groupedByItem).map(([itemId, itemPlates]) => {
-                        const firstPlate = itemPlates[0];
-                        if (!firstPlate) return null;
-                        const totalQty = itemPlates.length;
-                        const totalPaise = itemPlates.reduce((s, p) => s + p.plateTotalPaise, 0);
-                        const allPlateKeys = itemPlates.map((p) => p.plateKey);
-
-                        // Pick emoji based on item name
-                        const name = firstPlate.itemName.toLowerCase();
-                        const emoji =
-                          name.includes('coffee') || name.includes('chai') || name.includes('tea')
-                            ? '☕'
-                            : name.includes('ice cream') || name.includes('kulfi')
-                            ? '🍦'
-                            : name.includes('gulab') || name.includes('rasgulla') || name.includes('halwa') || name.includes('sweet')
-                            ? '🍮'
-                            : '🍨';
-
-                        return (
-                          <div
-                            key={itemId}
-                            style={{
-                              background: 'rgba(139, 92, 246, 0.07)',
-                              border: '1.5px solid rgba(139, 92, 246, 0.35)',
-                              borderRadius: '14px',
-                              padding: '16px',
-                              transition: 'all 0.2s ease',
-                            }}
-                          >
-                            {/* Item header */}
-                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '10px' }}>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                <span style={{ fontSize: '1.6rem' }}>{emoji}</span>
-                                <div>
-                                  <div style={{ fontWeight: 800, fontSize: '0.95rem', color: '#f8fafc' }}>
-                                    {totalQty > 1 ? `${totalQty}× ` : ''}{firstPlate.itemName}
-                                  </div>
-                                  <div style={{ fontSize: '0.74rem', color: '#a78bfa', marginTop: '2px' }}>
-                                    ⏳ Waiting for your signal — Chef will prepare fresh
-                                  </div>
-                                  <div style={{ fontSize: '0.72rem', color: '#94a3b8', marginTop: '3px' }}>
-                                    🕒 {formatOrderDateTime(firstPlate.itemCreatedAt || firstPlate.orderCreatedAt)} · Order #{firstPlate.orderNumber}
-                                  </div>
-                                </div>
-                              </div>
-                              <span style={{ fontWeight: 800, color: '#a78bfa', fontSize: '0.9rem', whiteSpace: 'nowrap' }}>
-                                ₹{(totalPaise / 100).toFixed(0)}
-                              </span>
-                            </div>
-
-                            {/* Per-plate breakdown if multiple plates */}
-                            {itemPlates.length > 1 && (
-                              <div
-                                style={{
-                                  background: 'rgba(139, 92, 246, 0.06)',
-                                  borderRadius: '8px',
-                                  padding: '8px 10px',
-                                  marginBottom: '12px',
-                                  display: 'flex',
-                                  flexDirection: 'column',
-                                  gap: '6px',
-                                }}
-                              >
-                                {itemPlates.map((plate, idx) => {
-                                  const plateNote = plate.rawNotes || plate.kitchenNote;
-                                  return (
-                                    <div
-                                      key={plate.plateKey}
-                                      style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.8rem', gap: '8px' }}
-                                    >
-                                      <span style={{ color: '#c4b5fd' }}>
-                                        Plate {idx + 1}
-                                        {plate.portion === 'HALF' ? ' · Half Plate' : ''}
-                                        {plateNote ? ` · Note: ${plateNote}` : ''}
-                                        <span style={{ display: 'block', fontSize: '0.7rem', color: '#94a3b8' }}>
-                                          🕒 {formatOrderDateTime(plate.itemCreatedAt || plate.orderCreatedAt)}
-                                        </span>
-                                      </span>
-                                      <button
-                                        type="button"
-                                        onClick={() => handleReleaseHold([plate.plateKey], firstPlate.itemName)}
-                                        style={{
-                                          background: 'rgba(139, 92, 246, 0.2)',
-                                          border: '1px solid rgba(139, 92, 246, 0.5)',
-                                          borderRadius: '6px',
-                                          color: '#c4b5fd',
-                                          fontSize: '0.72rem',
-                                          fontWeight: 700,
-                                          padding: '3px 8px',
-                                          cursor: 'pointer',
-                                        }}
-                                      >
-                                        Bring This Plate →
-                                      </button>
-                                    </div>
-                                  );
-                                })}
-                              </div>
-                            )}
-
-                            {/* Primary CTA: Bring all plates of this item to kitchen now */}
-                            <button
-                              type="button"
-                              onClick={() => handleReleaseHold(allPlateKeys, firstPlate.itemName)}
-                              style={{
-                                width: '100%',
-                                background: 'linear-gradient(135deg, #7c3aed, #6d28d9)',
-                                color: '#fff',
-                                border: 'none',
-                                borderRadius: '10px',
-                                padding: '12px 16px',
-                                fontWeight: 900,
-                                fontSize: '0.9rem',
-                                cursor: 'pointer',
-                                display: 'flex',
-                                alignItems: 'center',
-                                justifyContent: 'center',
-                                gap: '8px',
-                                boxShadow: '0 4px 14px rgba(109, 40, 217, 0.4)',
-                              }}
-                            >
-                              <span>🍳 Send to Kitchen Now</span>
-                              {totalQty > 1 && <span style={{ opacity: 0.8, fontSize: '0.8rem' }}>({totalQty} plates)</span>}
-                            </button>
-                          </div>
-                        );
-                      });
-                    })() : (
-                    /* Standard Plates List for other tabs */
-                    displayPlates.map((plate) => {
-                      const isExpanded = Boolean(expandedPlateKeys[plate.plateKey]);
-
-                      return (
-                        <div
-                          key={plate.plateKey}
-                          style={{
-                            background: 'rgba(255, 255, 255, 0.03)',
-                            border: isExpanded
-                              ? '1px solid rgba(245, 158, 11, 0.4)'
-                              : '1px solid rgba(255, 255, 255, 0.08)',
-                            borderRadius: '12px',
-                            padding: '14px',
-                            transition: 'all 0.2s ease',
-                            boxShadow: isExpanded ? '0 4px 16px rgba(0, 0, 0, 0.3)' : 'none',
-                          }}
-                        >
-                          {/* Plate Header: Plate Label, Portion Pill, Status & Price */}
-                          <div
-                            style={{
-                              display: 'flex',
-                              justifyContent: 'space-between',
-                              alignItems: 'center',
-                              marginBottom: '8px',
-                            }}
-                          >
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
-                              <span
-                                style={{
-                                  background:
-                                    'linear-gradient(135deg, rgba(245, 158, 11, 0.25) 0%, rgba(217, 119, 6, 0.18) 100%)',
-                                  border: '1px solid rgba(245, 158, 11, 0.45)',
-                                  color: '#fbbf24',
-                                  fontSize: '0.76rem',
-                                  fontWeight: 800,
-                                  padding: '2px 8px',
-                                  borderRadius: '9999px',
-                                  display: 'inline-flex',
-                                  alignItems: 'center',
-                                  gap: '4px',
-                                }}
-                              >
-                                🍽️ {plate.plateName}
-                              </span>
-                              {plate.portion === 'HALF' && (
-                                <span
-                                  style={{
-                                    background: 'rgba(59, 130, 246, 0.15)',
-                                    border: '1px solid rgba(59, 130, 246, 0.35)',
-                                    color: '#60a5fa',
-                                    fontSize: '0.7rem',
-                                    fontWeight: 700,
-                                    padding: '2px 6px',
-                                    borderRadius: '9999px',
-                                  }}
-                                >
-                                  Half Plate
-                                </span>
-                              )}
-                              {plate.spiceLevel && (
-                                <span
-                                  style={{
-                                    background: 'rgba(239, 68, 68, 0.12)',
-                                    border: '1px solid rgba(239, 68, 68, 0.3)',
-                                    color: '#f87171',
-                                    fontSize: '0.7rem',
-                                    fontWeight: 700,
-                                    padding: '2px 6px',
-                                    borderRadius: '9999px',
-                                  }}
-                                >
-                                  {plate.spiceLevel === 'HOT'
-                                    ? '🌶️ Hot'
-                                    : plate.spiceLevel === 'MEDIUM'
-                                    ? '🌶️ Medium'
-                                    : 'Mild'}
-                                </span>
-                              )}
-                            </div>
-
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                              <span
-                                className={`status-badge ${
-                                  plate.orderStatus === 'CANCELLED'
-                                    ? 'cancelled'
-                                    : plate.orderStatus === 'SERVED' || plate.orderStatus === 'BILLED'
-                                    ? 'served'
-                                    : 'cooking'
-                                }`}
-                                style={
-                                  plate.orderStatus === 'CANCELLED'
-                                    ? {
-                                        background: 'rgba(239, 68, 68, 0.15)',
-                                        color: '#f87171',
-                                        border: '1px solid rgba(239, 68, 68, 0.3)',
-                                      }
-                                    : plate.orderStatus === 'SERVED' || plate.orderStatus === 'BILLED'
-                                    ? {
-                                        background: 'rgba(16, 185, 129, 0.15)',
-                                        color: '#10b981',
-                                        border: '1px solid rgba(16, 185, 129, 0.3)',
-                                      }
-                                    : {
-                                        background: 'rgba(245, 158, 11, 0.15)',
-                                        color: '#fbbf24',
-                                        border: '1px solid rgba(245, 158, 11, 0.3)',
-                                      }
-                                }
-                              >
-                                {plate.orderStatus === 'CANCELLED'
-                                  ? 'CANCELLED ✕'
-                                  : plate.orderStatus === 'SERVED' || plate.orderStatus === 'BILLED'
-                                  ? 'SERVED 🍽️'
-                                  : 'PREPARING 🍳'}
-                              </span>
-                              {(plate.orderStatus === 'SERVED' || plate.orderStatus === 'BILLED') && (
-                                <button
-                                  type="button"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    const parentOrder = sessionOrders.find((o) => o.id === plate.orderId);
-                                    if (parentOrder) {
-                                      openReviewModal(parentOrder);
-                                    }
-                                  }}
-                                  style={{
-                                    background: 'rgba(245, 158, 11, 0.18)',
-                                    border: '1px solid rgba(245, 158, 11, 0.5)',
-                                    borderRadius: '6px',
-                                    color: '#fbbf24',
-                                    fontSize: '0.72rem',
-                                    fontWeight: 800,
-                                    padding: '2px 8px',
-                                    cursor: 'pointer',
-                                    display: 'inline-flex',
-                                    alignItems: 'center',
-                                    gap: '4px',
-                                  }}
-                                >
-                                  ⭐ Rate Dish
-                                </button>
-                              )}
-                              <span style={{ fontWeight: 800, color: '#fbbf24', fontSize: '0.92rem' }}>
-                                ₹{(plate.plateTotalPaise / 100).toFixed(0)}
-                              </span>
-                            </div>
-                          </div>
-
-                          {/* Clickable Item Name with Expand/Collapse Action */}
-                          <div
-                            onClick={() => togglePlateExpanded(plate.plateKey)}
-                            style={{
-                              cursor: 'pointer',
-                              display: 'flex',
-                              alignItems: 'center',
-                              justifyContent: 'space-between',
-                              padding: '6px 0',
-                            }}
-                            role="button"
-                            tabIndex={0}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter' || e.key === ' ') {
-                                e.preventDefault();
-                                togglePlateExpanded(plate.plateKey);
-                              }
-                            }}
-                          >
-                            <span
-                              style={{
-                                fontWeight: 700,
-                                fontSize: '0.94rem',
-                                color: '#f8fafc',
-                                textDecoration: isExpanded ? 'none' : 'underline',
-                                textDecorationColor: '#f59e0b',
-                                textUnderlineOffset: '3px',
-                              }}
-                            >
-                              {plate.itemName}
-                            </span>
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                togglePlateExpanded(plate.plateKey);
-                              }}
-                              style={{
-                                background: isExpanded ? 'rgba(245, 158, 11, 0.2)' : 'rgba(255, 255, 255, 0.06)',
-                                border: isExpanded ? '1px solid #f59e0b' : '1px solid rgba(255, 255, 255, 0.12)',
-                                borderRadius: '6px',
-                                color: isExpanded ? '#fbbf24' : '#94a3b8',
-                                fontSize: '0.72rem',
-                                fontWeight: 700,
-                                padding: '3px 8px',
-                                display: 'inline-flex',
-                                alignItems: 'center',
-                                gap: '4px',
-                                cursor: 'pointer',
-                              }}
-                            >
-                              {isExpanded ? '▲ Hide Details' : '▼ Details'}
-                            </button>
-                          </div>
-
-                          {/* Order & Item Date/Time + Per-Plate Table */}
-                          <div
-                            style={{
-                              fontSize: '0.72rem',
-                              color: '#94a3b8',
-                              marginTop: '2px',
-                              display: 'flex',
-                              alignItems: 'center',
-                              gap: '6px',
-                              flexWrap: 'wrap',
-                            }}
-                          >
-                            <span>🕒 {formatOrderDateTime(plate.itemCreatedAt || plate.orderCreatedAt)}</span>
-                            <span>·</span>
-                            <span>Order #{plate.orderNumber}</span>
-                            <span>·</span>
-                            <span
-                              style={{
-                                color: '#fbbf24',
-                                fontWeight: 700,
-                                background: 'rgba(245, 158, 11, 0.12)',
-                                border: '1px solid rgba(245, 158, 11, 0.28)',
-                                borderRadius: '999px',
-                                padding: '1px 7px',
-                              }}
-                            >
-                              🪑 Table {plate.tableNumber}
-                            </span>
-                            {plate.orderStatus !== 'CANCELLED' && (
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  if (editingOrderPlateKey === plate.plateKey) {
-                                    setEditingOrderPlateKey(null);
-                                    setEditingOrderPlateDigits('');
-                                  } else {
-                                    setEditingOrderPlateKey(plate.plateKey);
-                                    setEditingOrderPlateDigits(sanitizeTableDigits(plate.tableNumber));
-                                  }
-                                }}
-                                style={{
-                                  background: 'rgba(255,255,255,0.06)',
-                                  border: '1px solid rgba(255,255,255,0.16)',
-                                  borderRadius: '999px',
-                                  color: '#e2e8f0',
-                                  fontSize: '0.68rem',
-                                  fontWeight: 700,
-                                  padding: '1px 7px',
-                                  cursor: 'pointer',
-                                }}
-                              >
-                                Move Table
-                              </button>
-                            )}
-                          </div>
-
-                          {editingOrderPlateKey === plate.plateKey && (
-                            <div
-                              onClick={(e) => e.stopPropagation()}
-                              style={{
-                                marginTop: '6px',
-                                padding: '8px 10px',
-                                borderRadius: '8px',
-                                background: 'rgba(15, 23, 42, 0.9)',
-                                border: '1px solid rgba(245, 158, 11, 0.35)',
-                                display: 'flex',
-                                flexDirection: 'column',
-                                gap: '6px',
-                              }}
-                            >
-                              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                <input
-                                  type="text"
-                                  inputMode="numeric"
-                                  pattern="[0-9]*"
-                                  placeholder="Table #"
-                                  value={editingOrderPlateDigits}
-                                  onChange={(e) => setEditingOrderPlateDigits(sanitizeTableDigits(e.target.value))}
-                                  style={{
-                                    width: '88px',
-                                    padding: '5px 8px',
-                                    borderRadius: '6px',
-                                    background: 'rgba(255,255,255,0.08)',
-                                    border: orderPlateValidation.error
-                                      ? '1px solid #ef4444'
-                                      : '1px solid rgba(255,255,255,0.18)',
-                                    color: '#fff',
-                                    fontSize: '0.8rem',
-                                    fontWeight: 700,
-                                  }}
-                                />
-                                <button
-                                  type="button"
-                                  disabled={!orderPlateValidation.matched || editingOrderPlateLoading}
-                                  onClick={() => {
-                                    if (orderPlateValidation.matched) {
-                                      void handleMoveOrderPlateTable(plate, orderPlateValidation.matched);
-                                    }
-                                  }}
-                                  style={{
-                                    padding: '5px 10px',
-                                    borderRadius: '6px',
-                                    border: 'none',
-                                    background: orderPlateValidation.matched
-                                      ? 'linear-gradient(135deg, #f59e0b, #d97706)'
-                                      : 'rgba(255,255,255,0.08)',
-                                    color: orderPlateValidation.matched ? '#000' : '#64748b',
-                                    fontSize: '0.74rem',
-                                    fontWeight: 800,
-                                    cursor: orderPlateValidation.matched ? 'pointer' : 'not-allowed',
-                                  }}
-                                >
-                                  {editingOrderPlateLoading ? 'Saving...' : 'Confirm'}
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    setEditingOrderPlateKey(null);
-                                    setEditingOrderPlateDigits('');
-                                  }}
-                                  style={{
-                                    padding: '5px 8px',
-                                    borderRadius: '6px',
-                                    background: 'transparent',
-                                    border: '1px solid rgba(255,255,255,0.14)',
-                                    color: '#94a3b8',
-                                    fontSize: '0.72rem',
-                                    cursor: 'pointer',
-                                  }}
-                                >
-                                  Cancel
-                                </button>
-                              </div>
-                              {orderPlateValidation.error && (
-                                <div style={{ fontSize: '0.72rem', color: '#f87171', fontWeight: 600 }}>
-                                  {orderPlateValidation.error}
-                                </div>
-                              )}
-                              {orderPlateValidation.matched && (
-                                <div style={{ fontSize: '0.72rem', color: '#34d399', fontWeight: 600 }}>
-                                  ✓ Moving plate to Table {orderPlateValidation.matched.table_number}
-                                </div>
-                              )}
-                            </div>
-                          )}
-
-                          {/* Collapsed Preview Hint */}
-                          {!isExpanded && (
-                            <div
-                              onClick={() => togglePlateExpanded(plate.plateKey)}
-                              style={{
-                                fontSize: '0.75rem',
-                                color: '#94a3b8',
-                                marginTop: '4px',
-                                cursor: 'pointer',
-                                display: 'flex',
-                                alignItems: 'center',
-                                gap: '6px',
-                                flexWrap: 'wrap',
-                              }}
-                            >
-                              {plate.kitchenNote ? (
-                                <span style={{ color: '#cbd5e1', fontStyle: 'italic' }}>
-                                  👨‍🍳 &ldquo;{plate.kitchenNote}&rdquo;
-                                </span>
-                              ) : plate.modifiers.length > 0 ? (
-                                <span style={{ color: '#93c5fd' }}>
-                                  {plate.modifiers.length} customisation{plate.modifiers.length > 1 ? 's' : ''} added
-                                </span>
-                              ) : (
-                                <span style={{ color: '#64748b' }}>Standard preparation · Tap to view breakdown</span>
-                              )}
-                            </div>
-                          )}
-
-                          {/* Expanded Card: Kitchen Note & Price Breakdown */}
-                          {isExpanded && (
-                            <div
-                              style={{
-                                marginTop: '12px',
-                                paddingTop: '12px',
-                                borderTop: '1px solid rgba(255, 255, 255, 0.08)',
-                                display: 'flex',
-                                flexDirection: 'column',
-                                gap: '10px',
-                                animation: 'fadeIn 0.2s ease',
-                              }}
-                            >
-                              {/* 1. Note to the Kitchen */}
-                              <div
-                                style={{
-                                  background: 'rgba(245, 158, 11, 0.08)',
-                                  border: '1px solid rgba(245, 158, 11, 0.25)',
-                                  borderRadius: '8px',
-                                  padding: '10px 12px',
-                                }}
-                              >
-                                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '4px' }}>
-                                  <span style={{ fontSize: '0.9rem' }}>👨‍🍳</span>
-                                  <span
-                                    style={{
-                                      fontSize: '0.74rem',
-                                      fontWeight: 800,
-                                      color: '#fbbf24',
-                                      textTransform: 'uppercase',
-                                      letterSpacing: '0.04em',
-                                    }}
-                                  >
-                                    Note to the Kitchen
-                                  </span>
-                                </div>
-                                <p style={{ margin: 0, fontSize: '0.84rem', color: '#f1f5f9', fontStyle: 'italic' }}>
-                                  &ldquo;
-                                  {plate.kitchenNote || 'Standard chef preparation · No special instructions'}
-                                  &rdquo;
-                                </p>
-                              </div>
-
-                              {/* 2. Customisations & Price Breakdown */}
-                              <div
-                                style={{
-                                  background: 'rgba(0, 0, 0, 0.3)',
-                                  border: '1px solid rgba(255, 255, 255, 0.08)',
-                                  borderRadius: '8px',
-                                  padding: '10px 12px',
-                                  display: 'flex',
-                                  flexDirection: 'column',
-                                  gap: '6px',
-                                }}
-                              >
-                                <div
-                                  style={{
-                                    fontSize: '0.74rem',
-                                    fontWeight: 800,
-                                    color: '#94a3b8',
-                                    textTransform: 'uppercase',
-                                    letterSpacing: '0.04em',
-                                  }}
-                                >
-                                  Customisations & Price Breakdown
-                                </div>
-
-                                {/* Base Price */}
-                                <div
-                                  style={{
-                                    display: 'flex',
-                                    justifyContent: 'space-between',
-                                    fontSize: '0.82rem',
-                                    color: '#cbd5e1',
-                                  }}
-                                >
-                                  <span>
-                                    {plate.portion === 'HALF' ? 'Half Plate Base Price' : 'Base Dish Price'}
-                                  </span>
-                                  <span style={{ fontWeight: 600 }}>₹{(plate.basePricePaise / 100).toFixed(0)}</span>
-                                </div>
-
-                                {/* Modifiers */}
-                                {plate.modifiers.length > 0 ? (
-                                  plate.modifiers.map((mod, mIdx) => (
-                                    <div
-                                      key={mIdx}
-                                      style={{
-                                        display: 'flex',
-                                        justifyContent: 'space-between',
-                                        fontSize: '0.82rem',
-                                        color: '#93c5fd',
-                                      }}
-                                    >
-                                      <span>+ {mod.name}</span>
-                                      <span style={{ fontWeight: 600 }}>
-                                        {mod.price_paise > 0
-                                          ? `+₹${(mod.price_paise / 100).toFixed(0)}`
-                                          : 'Included'}
-                                      </span>
-                                    </div>
-                                  ))
-                                ) : (
-                                  <div style={{ fontSize: '0.78rem', color: '#64748b', fontStyle: 'italic' }}>
-                                    No extra add-ons selected
-                                  </div>
-                                )}
-
-                                {/* Spice level */}
-                                {plate.spiceLevel && (
-                                  <div
-                                    style={{
-                                      display: 'flex',
-                                      justifyContent: 'space-between',
-                                      fontSize: '0.82rem',
-                                      color: '#f87171',
-                                    }}
-                                  >
-                                    <span>
-                                      Spice Preference (
-                                      {plate.spiceLevel}{' '}
-                                      {plate.spiceLevel === 'HOT'
-                                        ? '🌶️🌶️🌶️'
-                                        : plate.spiceLevel === 'MEDIUM'
-                                        ? '🌶️🌶️'
-                                        : '🌶️'}
-                                      )
-                                    </span>
-                                    <span style={{ fontWeight: 600, color: '#94a3b8' }}>Included (+₹0)</span>
-                                  </div>
-                                )}
-
-                                {/* Total for this plate */}
-                                <div
-                                  style={{
-                                    borderTop: '1px dashed rgba(255, 255, 255, 0.12)',
-                                    paddingTop: '6px',
-                                    marginTop: '3px',
-                                    display: 'flex',
-                                    justifyContent: 'space-between',
-                                    fontSize: '0.86rem',
-                                    fontWeight: 800,
-                                    color: '#fbbf24',
-                                  }}
-                                >
-                                  <span>Plate Total</span>
-                                  <span>₹{(plate.plateTotalPaise / 100).toFixed(0)}</span>
-                                </div>
-                              </div>
-
-                              {/* 3. Order & Payment Metadata */}
-                              <div
-                                style={{
-                                  display: 'flex',
-                                  justifyContent: 'space-between',
-                                  alignItems: 'center',
-                                  fontSize: '0.74rem',
-                                  color: '#64748b',
-                                  padding: '2px 4px',
-                                }}
-                              >
-                                <span>
-                                  Order #{plate.orderNumber} · Table {plate.tableNumber} · {formatOrderDateTime(plate.orderCreatedAt)}
-                                </span>
-                                <span style={{ color: '#10b981', fontWeight: 700 }}>
-                                  Paid via {plate.paymentMethod || 'UPI'} ✅
-                                </span>
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      );
-                    }))
-                    }
-                  </div>
-                );
-              })()}
-            </div>
-
-            {/* Drawer Footer */}
-            {flattenedPlates.length > 0 && (
-              <div className="drawer-footer" style={{ padding: '16px', borderTop: '1px solid rgba(255, 255, 255, 0.08)' }}>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                  {servedPlates.length > 0 ? (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const servedOrderIds = new Set(servedPlates.map((p) => p.orderId));
-                        const orderToReview = sessionOrders.find((o) => servedOrderIds.has(o.id));
-                        if (orderToReview) {
-                          openReviewModal(orderToReview);
-                        } else {
-                          showToast('No served dishes available to review yet.');
-                        }
-                      }}
-                      style={{
-                        width: '100%',
-                        padding: '11px 16px',
-                        borderRadius: '10px',
-                        background: 'linear-gradient(135deg, rgba(245, 158, 11, 0.22), rgba(217, 119, 6, 0.22))',
-                        border: '1.5px solid rgba(245, 158, 11, 0.5)',
-                        color: '#fbbf24',
-                        fontWeight: 800,
-                        fontSize: '0.85rem',
-                        cursor: 'pointer',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        gap: '8px',
-                        boxShadow: '0 4px 12px rgba(245, 158, 11, 0.15)',
-                      }}
-                    >
-                      ⭐ Rate & Review Served Food (+₹10 Reward)
-                    </button>
-                  ) : (
-                    <div
-                      style={{
-                        padding: '10px 14px',
-                        borderRadius: '10px',
-                        background: 'rgba(255, 255, 255, 0.04)',
-                        border: '1px solid rgba(255, 255, 255, 0.08)',
-                        color: '#94a3b8',
-                        fontSize: '0.78rem',
-                        textAlign: 'center',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        gap: '6px',
-                      }}
-                    >
-                      <span>⏳</span>
-                      <span>Dishes are cooking in the kitchen! Rating unlocks once served to your table 🍽️</span>
-                    </div>
-                  )}
-                  <button
-                    className="accordion-add-action-btn"
-                    onClick={() => setIsOrdersHistoryOpen(false)}
-                    style={{ width: '100%', margin: 0 }}
-                  >
-                    🍽️ Order More Dishes
-                  </button>
-                  <div style={{ textAlign: 'center', fontSize: '0.74rem', color: '#64748b' }}>
-                    ✅ All dishes above are paid & tracked in kitchen. Need assistance? Tap &ldquo;Call Waiter&rdquo;.
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
 
       {/* ── Rate & Review Food Items Modal Sheet ── */}
       {reviewingOrder && (
@@ -9279,202 +6116,6 @@ export default function CustomerDineInPage() {
         </div>
       )}
 
-      {/* Payment Settlement Modal */}
-      {isPaymentModalOpen && (
-        <div
-          className="filter-sheet-overlay"
-          onClick={() => {
-            setIsPaymentModalOpen(false);
-            if (cartLines.length > 0) setIsCartOpen(true);
-          }}
-        >
-          <div className="modal-center-card" onClick={(e) => e.stopPropagation()}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
-              <h3 style={{ fontSize: '1.1rem', fontWeight: 800, color: '#fff' }}>Settle Table Bill</h3>
-              <button
-                onClick={() => {
-                  setIsPaymentModalOpen(false);
-                  if (cartLines.length > 0) {
-                    setIsCartOpen(true);
-                    showToast('Payment postponed. All items saved in your cart.');
-                  }
-                }}
-                style={{ color: '#94a3b8', fontSize: '1.1rem', background: 'none', border: 'none', cursor: 'pointer' }}
-              >
-                ✕
-              </button>
-            </div>
-
-            {paymentSuccessData ? (
-              <div style={{ textAlign: 'center', padding: '20px 10px' }}>
-                <div style={{ fontSize: '3rem', marginBottom: '10px' }}>✅</div>
-                <h3 style={{ color: '#10b981', marginBottom: '6px' }}>Payment Complete!</h3>
-                <p style={{ fontSize: '0.85rem', color: '#94a3b8', marginBottom: '16px' }}>
-                  Bill of ₹{(paymentSuccessData.totalPaise / 100).toFixed(0)} paid. Receipt sent. Thank you!
-                </p>
-                <button
-                  className="filter-apply-btn"
-                  onClick={() => {
-                    setPaymentSuccessData(null);
-                    setIsPaymentModalOpen(false);
-                  }}
-                  style={{ width: '100%' }}
-                >
-                  Done
-                </button>
-              </div>
-            ) : paymentQrData ? (
-              <div style={{ textAlign: 'center', padding: '10px' }}>
-                {paymentQrData.redirectUrl ? (
-                  <div style={{ marginBottom: '16px' }}>
-                    <div
-                      style={{
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        gap: '6px',
-                        background: 'rgba(95, 37, 159, 0.25)',
-                        border: '1px solid rgba(147, 51, 234, 0.45)',
-                        padding: '4px 12px',
-                        borderRadius: '999px',
-                        color: '#c084fc',
-                        fontSize: '0.78rem',
-                        fontWeight: 800,
-                        marginBottom: '12px',
-                      }}
-                    >
-                      <span>⚡</span>
-                      <span>PhonePe Sandbox (UAT) Gateway</span>
-                    </div>
-                    <p style={{ fontSize: '0.84rem', color: '#e2e8f0', lineHeight: 1.4, marginBottom: '14px' }}>
-                      Click below to open the official PhonePe Sandbox checkout link and complete test payment:
-                    </p>
-                    <a
-                      href={paymentQrData.redirectUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="hero-action-btn"
-                      style={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        gap: '8px',
-                        width: '100%',
-                        padding: '12px 16px',
-                        borderRadius: '10px',
-                        background: 'linear-gradient(135deg, #7c3aed 0%, #5b21b6 100%)',
-                        color: '#fff',
-                        fontWeight: 800,
-                        fontSize: '0.92rem',
-                        textDecoration: 'none',
-                        boxShadow: '0 4px 16px rgba(124, 58, 237, 0.4)',
-                        marginBottom: '10px',
-                      }}
-                    >
-                      <span>🚀 Open PhonePe Checkout ↗</span>
-                    </a>
-                  </div>
-                ) : (
-                  <div style={{ fontSize: '0.82rem', color: '#94a3b8', marginBottom: '12px' }}>
-                    Scan UPI QR using Google Pay, PhonePe, or Paytm
-                  </div>
-                )}
-
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                  <button
-                    className="accordion-add-action-btn"
-                    onClick={async () => {
-                      if (!paymentQrData?.paymentId) return;
-                      setPaymentLoading(true);
-                      try {
-                        const vRes = await customerApiFetch(
-                          `/api/v1/customer/payments/${encodeURIComponent(paymentQrData.paymentId)}/verify`,
-                          undefined,
-                          { preferToken: 'guest' },
-                        );
-                        if (vRes.ok) {
-                          const vData = await vRes.json();
-                          if (vData.status === 'PAID') {
-                            await handleConfirmUpiPayment();
-                            return;
-                          } else {
-                            showToast(`Payment status is ${vData.status || 'PENDING'}. Please complete payment on PhonePe.`);
-                            return;
-                          }
-                        } else {
-                          showToast('Could not verify status yet. Your cart items are completely safe!');
-                        }
-                      } catch {
-                        showToast('Status check pending. If cancelled, your cart is preserved.');
-                      } finally {
-                        setPaymentLoading(false);
-                      }
-                    }}
-                    disabled={paymentLoading}
-                    style={{ width: '100%' }}
-                  >
-                    {paymentLoading ? 'Verifying with PhonePe...' : '✓ Verify PhonePe Payment'}
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setIsPaymentModalOpen(false);
-                      setIsCartOpen(true);
-                      showToast('Payment cancelled. All items remain in your cart — tap below to retry!');
-                    }}
-                    style={{
-                      width: '100%',
-                      padding: '10px 14px',
-                      borderRadius: '8px',
-                      background: 'transparent',
-                      border: '1px solid rgba(255, 255, 255, 0.15)',
-                      color: '#94a3b8',
-                      fontSize: '0.84rem',
-                      fontWeight: 600,
-                      cursor: 'pointer',
-                    }}
-                  >
-                    ✕ Cancel & Return to Cart
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                <div
-                  className={`payment-option-card ${selectedPaymentMethod === 'UPI' ? 'selected' : ''}`}
-                  onClick={() => setSelectedPaymentMethod('UPI')}
-                >
-                  <span style={{ fontSize: '1.4rem' }}>📱</span>
-                  <div>
-                    <div style={{ fontWeight: 700, color: '#fff', fontSize: '0.9rem' }}>Instant UPI QR</div>
-                    <div style={{ fontSize: '0.75rem', color: '#94a3b8' }}>GPay, PhonePe, Paytm, BHIM</div>
-                  </div>
-                </div>
-
-                <div
-                  className={`payment-option-card ${selectedPaymentMethod === 'CASH' ? 'selected' : ''}`}
-                  onClick={() => setSelectedPaymentMethod('CASH')}
-                >
-                  <span style={{ fontSize: '1.4rem' }}>💵</span>
-                  <div>
-                    <div style={{ fontWeight: 700, color: '#fff', fontSize: '0.9rem' }}>Pay Cash at Counter</div>
-                    <div style={{ fontSize: '0.75rem', color: '#94a3b8' }}>Staff will collect cash at table</div>
-                  </div>
-                </div>
-
-                <button
-                  className="accordion-add-action-btn"
-                  onClick={handleInitiatePayment}
-                  disabled={paymentLoading}
-                  style={{ width: '100%', marginTop: '8px' }}
-                >
-                  {paymentLoading ? 'Processing...' : 'Proceed to Pay'}
-                </button>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
 
       {/* Top-Quarter Table Number Slide-Down Drawer */}
       {isTableModalOpen && (
@@ -9679,362 +6320,6 @@ export default function CustomerDineInPage() {
         </div>
       )}
 
-      {/* Bottom Slide-Up Auth Sheet (Sign In / Sign Up with WhatsApp OTP + Google) */}
-      {isAuthModalOpen && (
-        <div
-          className={`bottom-auth-overlay ${isAuthClosing ? 'closing' : ''}`}
-          onClick={closeBottomAuthSheet}
-        >
-          <div
-            className={`bottom-auth-sheet ${isAuthClosing ? 'closing' : ''}`}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-              <div>
-                <h3 style={{ fontSize: '1.12rem', fontWeight: 800, color: '#fff', margin: 0 }}>
-                  {authStep === 'OTP'
-                    ? 'Verify WhatsApp OTP'
-                    : authMode === 'SIGNUP'
-                    ? 'Create Dining Account'
-                    : 'Sign In to Dining Account'}
-                </h3>
-                <span style={{ fontSize: '0.72rem', color: '#34d399', fontWeight: 600 }}>
-                  💬 Mobile number verified via WhatsApp OTP · Session saved on device
-                </span>
-              </div>
-              <button
-                type="button"
-                onClick={closeBottomAuthSheet}
-                style={{ color: '#94a3b8', fontSize: '1.15rem', padding: '4px 8px', cursor: 'pointer' }}
-                aria-label="Close authentication drawer"
-              >
-                ✕
-              </button>
-            </div>
-
-            {authStep === 'PHONE' && (
-              <>
-                <div
-                  style={{
-                    display: 'grid',
-                    gridTemplateColumns: '1fr 1fr',
-                    gap: '6px',
-                    background: 'rgba(255,255,255,0.04)',
-                    padding: '4px',
-                    borderRadius: '10px',
-                    marginBottom: '14px',
-                  }}
-                >
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setAuthMode('SIGNIN');
-                      setAuthError('');
-                      setAuthEmailLocked(false);
-                      setGooglePreRegToken(null);
-                    }}
-                    style={{
-                      padding: '8px',
-                      borderRadius: '8px',
-                      border: 'none',
-                      background: authMode === 'SIGNIN' ? 'rgba(245, 158, 11, 0.22)' : 'transparent',
-                      color: authMode === 'SIGNIN' ? '#fbbf24' : '#94a3b8',
-                      fontWeight: 700,
-                      fontSize: '0.82rem',
-                      cursor: 'pointer',
-                    }}
-                  >
-                    Sign In
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setAuthMode('SIGNUP');
-                      setAuthError('');
-                    }}
-                    style={{
-                      padding: '8px',
-                      borderRadius: '8px',
-                      border: 'none',
-                      background: authMode === 'SIGNUP' ? 'rgba(245, 158, 11, 0.22)' : 'transparent',
-                      color: authMode === 'SIGNUP' ? '#fbbf24' : '#94a3b8',
-                      fontWeight: 700,
-                      fontSize: '0.82rem',
-                      cursor: 'pointer',
-                    }}
-                  >
-                    Sign Up (New)
-                  </button>
-                </div>
-
-                <form onSubmit={handleRequestOtp} style={{ display: 'flex', flexDirection: 'column', gap: '11px' }}>
-                  <div>
-                    <label style={{ display: 'block', fontSize: '0.76rem', color: '#cbd5e1', fontWeight: 700, marginBottom: '5px' }}>
-                      Mobile Number (Primary ID)
-                    </label>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                      <span
-                        style={{
-                          padding: '10px 12px',
-                          background: 'rgba(255,255,255,0.06)',
-                          borderRadius: '8px',
-                          color: '#94a3b8',
-                          fontSize: '0.88rem',
-                        }}
-                      >
-                        +91
-                      </span>
-                      <input
-                        type="tel"
-                        inputMode="numeric"
-                        placeholder="9876543210"
-                        value={customerPhoneInput}
-                        onChange={(e) => setCustomerPhoneInput(e.target.value.replace(/[^\d+]/g, ''))}
-                        style={{
-                          flex: 1,
-                          padding: '10px 14px',
-                          background: 'rgba(255,255,255,0.06)',
-                          border: '1px solid rgba(255,255,255,0.12)',
-                          borderRadius: '8px',
-                          color: '#fff',
-                          fontSize: '0.92rem',
-                        }}
-                      />
-                    </div>
-                  </div>
-
-                  {authMode === 'SIGNUP' && (
-                    <>
-                      <div>
-                        <label style={{ display: 'block', fontSize: '0.76rem', color: '#cbd5e1', fontWeight: 700, marginBottom: '5px' }}>
-                          Email ID (1 email per mobile number){authEmailLocked ? ' · Verified via Google' : ''}
-                        </label>
-                        <input
-                          type="email"
-                          required
-                          readOnly={authEmailLocked}
-                          placeholder="you@example.com"
-                          value={authEmailInput}
-                          onChange={(e) => setAuthEmailInput(e.target.value)}
-                          style={{
-                            width: '100%',
-                            padding: '10px 14px',
-                            background: authEmailLocked ? 'rgba(16, 185, 129, 0.08)' : 'rgba(255,255,255,0.06)',
-                            border: authEmailLocked
-                              ? '1px solid rgba(16, 185, 129, 0.45)'
-                              : '1px solid rgba(255,255,255,0.12)',
-                            borderRadius: '8px',
-                            color: '#fff',
-                            fontSize: '0.9rem',
-                          }}
-                        />
-                      </div>
-
-                      <div>
-                        <label style={{ display: 'block', fontSize: '0.76rem', color: '#cbd5e1', fontWeight: 700, marginBottom: '5px' }}>
-                          Full Name (Optional)
-                        </label>
-                        <input
-                          type="text"
-                          placeholder="Your name"
-                          value={authDisplayNameInput}
-                          onChange={(e) => setAuthDisplayNameInput(e.target.value)}
-                          style={{
-                            width: '100%',
-                            padding: '10px 14px',
-                            background: 'rgba(255,255,255,0.06)',
-                            border: '1px solid rgba(255,255,255,0.12)',
-                            borderRadius: '8px',
-                            color: '#fff',
-                            fontSize: '0.9rem',
-                          }}
-                        />
-                      </div>
-                    </>
-                  )}
-
-                  {authError && <div style={{ color: '#f87171', fontSize: '0.79rem', fontWeight: 600 }}>{authError}</div>}
-
-                  <button className="accordion-add-action-btn" type="submit" disabled={authLoading} style={{ marginTop: '2px' }}>
-                    {authLoading
-                      ? 'Sending WhatsApp OTP...'
-                      : authMode === 'SIGNUP'
-                      ? 'Verify Mobile via WhatsApp OTP & Sign Up 📲'
-                      : 'Send WhatsApp OTP Code 📲'}
-                  </button>
-                </form>
-
-                <div style={{ display: 'flex', alignItems: 'center', gap: '10px', margin: '14px 0' }}>
-                  <div style={{ flex: 1, height: '1px', background: 'rgba(255,255,255,0.1)' }} />
-                  <span style={{ fontSize: '0.74rem', color: '#64748b', fontWeight: 700 }}>OR</span>
-                  <div style={{ flex: 1, height: '1px', background: 'rgba(255,255,255,0.1)' }} />
-                </div>
-
-                <button
-                  type="button"
-                  onClick={handleGoogleLoginClick}
-                  disabled={authLoading}
-                  style={{
-                    width: '100%',
-                    padding: '10px 14px',
-                    borderRadius: '10px',
-                    background: '#fff',
-                    color: '#111827',
-                    border: 'none',
-                    fontWeight: 700,
-                    fontSize: '0.88rem',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    gap: '8px',
-                    cursor: 'pointer',
-                  }}
-                >
-                  <span>G</span>
-                  <span>Continue with Google</span>
-                </button>
-
-                {showDevGooglePicker && (
-                  <div
-                    style={{
-                      marginTop: '10px',
-                      padding: '12px',
-                      borderRadius: '10px',
-                      background: 'rgba(255,255,255,0.04)',
-                      border: '1px dashed rgba(245, 158, 11, 0.4)',
-                      display: 'flex',
-                      flexDirection: 'column',
-                      gap: '8px',
-                    }}
-                  >
-                    <div style={{ fontSize: '0.74rem', color: '#fbbf24', fontWeight: 700 }}>
-                      Dev Google Sign-In Picker (NEXT_PUBLIC_GOOGLE_CLIENT_ID unset)
-                    </div>
-                    <input
-                      type="email"
-                      placeholder="Google email (e.g. diner@gmail.com)"
-                      value={devGoogleEmailInput}
-                      onChange={(e) => setDevGoogleEmailInput(e.target.value)}
-                      style={{
-                        padding: '8px 10px',
-                        borderRadius: '8px',
-                        background: 'rgba(0,0,0,0.35)',
-                        border: '1px solid rgba(255,255,255,0.15)',
-                        color: '#fff',
-                        fontSize: '0.82rem',
-                      }}
-                    />
-                    <input
-                      type="text"
-                      placeholder="Display name (optional)"
-                      value={devGoogleNameInput}
-                      onChange={(e) => setDevGoogleNameInput(e.target.value)}
-                      style={{
-                        padding: '8px 10px',
-                        borderRadius: '8px',
-                        background: 'rgba(0,0,0,0.35)',
-                        border: '1px solid rgba(255,255,255,0.15)',
-                        color: '#fff',
-                        fontSize: '0.82rem',
-                      }}
-                    />
-                    <button
-                      type="button"
-                      disabled={!devGoogleEmailInput.trim() || authLoading}
-                      onClick={() =>
-                        void submitGoogleAuthPayload({
-                          devMockEmail: devGoogleEmailInput.trim(),
-                          ...(devGoogleNameInput.trim() ? { devMockName: devGoogleNameInput.trim() } : {}),
-                        })
-                      }
-                      className="accordion-add-action-btn"
-                      style={{ width: '100%', padding: '8px 12px', fontSize: '0.8rem' }}
-                    >
-                      Continue with this Google Email
-                    </button>
-                  </div>
-                )}
-              </>
-            )}
-
-            {authStep === 'OTP' && (
-              <form onSubmit={handleVerifyOtp} style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                {authDevCode && (
-                  <div
-                    style={{
-                      background: 'linear-gradient(135deg, rgba(245, 158, 11, 0.18) 0%, rgba(217, 119, 6, 0.12) 100%)',
-                      border: '1.5px solid rgba(245, 158, 11, 0.45)',
-                      padding: '12px 14px',
-                      borderRadius: '10px',
-                      textAlign: 'center',
-                    }}
-                  >
-                    <div style={{ fontSize: '0.74rem', color: '#fbbf24', textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: 800, marginBottom: '2px' }}>
-                      Dev Preview OTP Code:
-                    </div>
-                    <div style={{ fontSize: '1.5rem', fontWeight: 900, color: '#fbbf24', letterSpacing: '0.25em', margin: '2px 0' }}>
-                      {authDevCode}
-                    </div>
-                  </div>
-                )}
-
-                <p style={{ fontSize: '0.82rem', color: '#cbd5e1', margin: 0 }}>
-                  Enter the 6-digit code sent via{' '}
-                  <strong style={{ color: '#34d399' }}>{authChannelLabel || 'WhatsApp'}</strong> to{' '}
-                  <strong>{formatNormalizedPhone(customerPhoneInput)}</strong>
-                  {authMode === 'SIGNUP' && authEmailInput ? ` (linking ${authEmailInput.trim()})` : ''}:
-                </p>
-
-                <input
-                  type="text"
-                  inputMode="numeric"
-                  maxLength={6}
-                  placeholder="6-digit OTP"
-                  value={customerOtpInput}
-                  onChange={(e) => setCustomerOtpInput(e.target.value.replace(/\D/g, ''))}
-                  style={{
-                    padding: '10px 14px',
-                    background: 'rgba(255,255,255,0.06)',
-                    border: '1px solid rgba(255,255,255,0.12)',
-                    borderRadius: '8px',
-                    color: '#fff',
-                    fontSize: '1.2rem',
-                    textAlign: 'center',
-                    letterSpacing: '0.2em',
-                  }}
-                />
-
-                {authError && <div style={{ color: '#f87171', fontSize: '0.79rem', fontWeight: 600 }}>{authError}</div>}
-
-                <button className="accordion-add-action-btn" type="submit" disabled={authLoading}>
-                  {authLoading ? 'Verifying...' : authMode === 'SIGNUP' ? 'Verify & Complete Sign Up ✓' : 'Verify & Sign In ✓'}
-                </button>
-
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '2px' }}>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setAuthStep('PHONE');
-                      setAuthDevCode(null);
-                      setCustomerOtpInput('');
-                    }}
-                    style={{
-                      background: 'transparent',
-                      border: 'none',
-                      color: '#94a3b8',
-                      fontSize: '0.74rem',
-                      cursor: 'pointer',
-                      padding: 0,
-                    }}
-                  >
-                    ← Back / Change number
-                  </button>
-                </div>
-              </form>
-            )}
-          </div>
-        </div>
-      )}
 
       {/* Customer Profile Drawer */}
       {isProfileOpen && (
@@ -10228,68 +6513,14 @@ export default function CustomerDineInPage() {
               )}
 
               {/* Table Orders Quick Access Card */}
-              <div
-                onClick={() => {
+              <OrderTrackerBanner
+                variant="card"
+                onViewOrders={() => {
                   setIsProfileOpen(false);
                   setIsOrdersHistoryOpen(true);
                 }}
-                style={{
-                  background: 'linear-gradient(135deg, rgba(255,255,255,0.04), rgba(255,255,255,0.02))',
-                  border: '1px solid rgba(255,255,255,0.09)',
-                  borderRadius: '14px',
-                  padding: '14px 16px',
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                  cursor: 'pointer',
-                  transition: 'all 0.2s ease',
-                }}
-              >
-                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                  <div
-                    style={{
-                      width: '40px',
-                      height: '40px',
-                      borderRadius: '10px',
-                      background: 'rgba(16, 185, 129, 0.15)',
-                      border: '1px solid rgba(16, 185, 129, 0.3)',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      fontSize: '1.25rem',
-                    }}
-                  >
-                    📋
-                  </div>
-                  <div>
-                    <div style={{ fontSize: '0.92rem', fontWeight: 800, color: '#fff' }}>
-                      Table {selectedTable} Orders
-                    </div>
-                    <div style={{ fontSize: '0.74rem', color: '#94a3b8' }}>
-                      {flattenedPlates.length > 0
-                        ? `${flattenedPlates.length} active dishes (cooking & served)`
-                        : 'View active orders & course releases'}
-                    </div>
-                  </div>
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  {flattenedPlates.length > 0 && (
-                    <span
-                      style={{
-                        background: '#10b981',
-                        color: '#000',
-                        borderRadius: '999px',
-                        padding: '2px 8px',
-                        fontSize: '0.72rem',
-                        fontWeight: 800,
-                      }}
-                    >
-                      {flattenedPlates.length}
-                    </span>
-                  )}
-                  <span style={{ color: '#94a3b8', fontSize: '1.1rem' }}>→</span>
-                </div>
-              </div>
+                alwaysShow
+              />
 
               {/* Saved Table Diners & Dining Preferences (ONLY VISIBLE WHEN SIGNED IN) */}
               {customerToken ? (
@@ -11431,82 +7662,97 @@ export default function CustomerDineInPage() {
           </div>
         </div>
       )}
-    </div>
-  );
-}
 
-// ============================================================================
-// Square Item Card Component (Claude Spec: 1:1 image, truncated name, price, overlapping circular "+" button)
-// ============================================================================
+      {/* ══════════════════════════════════════════════════════════════════════
+          EXTRACTED GLOBAL MODALS & DRAWERS (ZUSTAND STORE-DRIVEN)
+          ══════════════════════════════════════════════════════════════════════ */}
+      {/* 1. Slide-Out Cart Drawer */}
+      <CartDrawer
+        onPlaceOrder={handlePlaceOrder}
+        isPlacingOrder={isPlacingOrder}
+        onViewOrders={() => setIsOrdersHistoryOpen(true)}
+        flattenedPlatesCount={flattenedPlates.length}
+        onBrowseMenu={() => setCurrentView('menu')}
+        onOpenAvailableCoupons={() => setIsAvailableCouponsOpen(true)}
+        outletTables={outletTables}
+        outletTablesLoaded={outletTablesLoaded}
+        showToast={showToast}
+      />
 
-const FALLBACK_DISH_IMG = 'https://images.unsplash.com/photo-1546833999-b9f581a1996d?auto=format&fit=crop&w=600&q=80';
+      {/* 2. Interactive MenuItem Customizer Modal */}
+      <ItemCustomizerModal
+        item={activeCustomizingItem}
+        isOpen={Boolean(activeCustomizingItem)}
+        onClose={() => {
+          setActiveCustomizingItem(null);
+          setExpandedAccordionItemId(null);
+        }}
+        showToast={showToast}
+        onFlyToCart={triggerFlyToCart}
+        isWishlisted={activeCustomizingItem ? wishlist.has(activeCustomizingItem.id) : false}
+        onToggleWishlist={(e) => {
+          if (activeCustomizingItem) toggleWishlist(activeCustomizingItem.id, e);
+        }}
+        dinerProfiles={dinerProfiles}
+      />
 
-interface SquareItemCardProps {
-  item: MenuItem;
-  qty: number;
-  isHearted: boolean;
-  onToggleHeart: (e: React.MouseEvent) => void;
-  onAdd: (e: React.MouseEvent) => void;
-  onDecrement: (e: React.MouseEvent) => void;
-  onOpenAccordion: () => void;
-}
+      {/* 3. Dine-In Payment Settlement Modal */}
+      <DineInCheckoutModal
+        onPaymentSuccess={async () => {
+          if (activeSessionId) {
+            await fetchSessionOrders(activeSessionId);
+          }
+          setOrdersFilterTab('PREPARING');
+          setIsOrdersHistoryOpen(true);
+          showToast('Payment confirmed! Kitchen is preparing your dishes 🍳');
+        }}
+        onPaymentInitiate={handleInitiatePayment}
+        onPostponePayment={() => {
+          showToast('Payment postponed. All items saved in your cart.');
+        }}
+        showToast={showToast}
+      />
 
-function SquareItemCard({
-  item,
-  qty,
-  isHearted,
-  onToggleHeart,
-  onAdd,
-  onDecrement,
-  onOpenAccordion,
-}: SquareItemCardProps) {
-  return (
-    <div className="square-item-card">
-      <div className="square-img-container" onClick={onOpenAccordion}>
-        <img
-          src={item.imageUrl || FALLBACK_DISH_IMG}
-          alt={item.name}
-          className="square-dish-img"
-          loading="lazy"
-          onError={(e) => {
-            e.currentTarget.src = FALLBACK_DISH_IMG;
-          }}
-        />
+      {/* 4. Active Table Orders History Drawer & Settlement */}
+      <OrdersHistoryView
+        isOpen={isOrdersHistoryOpen}
+        onClose={() => setIsOrdersHistoryOpen(false)}
+        sessionOrders={sessionOrders}
+        flattenedPlates={flattenedPlates}
+        selectedTable={selectedTable}
+        onRefreshOrders={async () => {
+          if (activeSessionId) {
+            await fetchSessionOrders(activeSessionId);
+          }
+        }}
+        onCallWaiter={async (reason) => {
+          try {
+            await customerApiFetch('/api/v1/customer/session/service-call', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                table_number: selectedTable,
+                session_id: activeSessionId,
+                reason,
+              }),
+            });
+            showToast(`🔔 Staff notified for Table ${selectedTable} (${reason})`);
+          } catch {
+            showToast(`🔔 Waiter call registered for Table ${selectedTable}`);
+          }
+        }}
+        onReviewOrder={(order) => openReviewModal(order)}
+        onOrderMore={() => setIsOrdersHistoryOpen(false)}
+        outletTables={outletTables}
+        releasedHoldPlateKeys={releasedHoldPlateKeys}
+        onReleaseHold={handleReleaseHold}
+        onMoveOrderPlateTable={handleMoveOrderPlateTable}
+      />
 
-        {/* Dietary Dot Badge */}
-        <div className="square-veg-badge">
-          <span style={{ fontSize: '0.7rem' }}>{item.dietaryTag === 'VEG' ? '🟢' : '🔴'}</span>
-        </div>
-
-        {/* Wishlist Heart Button */}
-        <button
-          className={`square-wishlist-btn ${isHearted ? 'hearted' : ''}`}
-          onClick={onToggleHeart}
-          title={isHearted ? 'In favorites' : 'Add to favorites'}
-        >
-          {isHearted ? '❤️' : '🤍'}
-        </button>
-
-        {/* Small circular "+" overlapping bottom-right corner of the image (or quantity stepper) */}
-        {qty > 0 ? (
-          <div className="square-stepper-btn" onClick={(e) => e.stopPropagation()}>
-            <button onClick={onDecrement}>−</button>
-            <span>{qty}</span>
-            <button onClick={onAdd}>+</button>
-          </div>
-        ) : (
-          <button className="square-circular-add-btn" onClick={onAdd} title="Add to Order">
-            +
-          </button>
-        )}
-      </div>
-
-      <div className="square-card-body" onClick={onOpenAccordion}>
-        <div className="square-card-name" title={item.name}>
-          {item.name}
-        </div>
-        <div className="square-card-price">₹{(item.pricePaise / 100).toFixed(0)}</div>
-      </div>
+      {/* 5. Customer Authentication & Profile Modal */}
+      <CustomerAuthModal
+        onAuthSuccess={applyAuthenticatedCustomer}
+      />
     </div>
   );
 }
