@@ -108,15 +108,15 @@ export class ConsolePaymentsController {
  *
  * Reference: ARCH §11 (webhook rules), AGENTS §2 rule 9
  */
-@Controller('webhooks')
+@Controller()
 export class PublicWebhookController {
   constructor(private readonly paymentsService: PaymentsService) {}
 
   /**
-   * POST /webhooks/phonepe
+   * POST /webhooks/phonepe & POST /payments/phonepe/webhook
    * PhonePe S2S callback — receives payment status updates.
    */
-  @Post('phonepe')
+  @Post(['webhooks/phonepe', 'payments/phonepe/webhook'])
   @Public()
   @HttpCode(HttpStatus.OK)
   async phonePeWebhook(@Req() req: FastifyRequest, @Res() reply: FastifyReply) {
@@ -131,10 +131,10 @@ export class PublicWebhookController {
   }
 
   /**
-   * POST /webhooks/razorpay
+   * POST /webhooks/razorpay & POST /payments/razorpay/webhook
    * Razorpay event webhook — receives payment.captured, payment.failed, etc.
    */
-  @Post('razorpay')
+  @Post(['webhooks/razorpay', 'payments/razorpay/webhook'])
   @Public()
   @HttpCode(HttpStatus.OK)
   async razorpayWebhook(@Req() req: FastifyRequest, @Res() reply: FastifyReply) {
