@@ -41,6 +41,12 @@ export interface SplitSettlementConfig {
   platformFeePaise?: number;
 }
 
+export interface TenantPaymentCredentials {
+  merchantId?: string;
+  saltKey?: string;
+  saltIndex?: number;
+}
+
 export interface CreatePaymentInput {
   orderId:         string;
   idempotencyKey:  string;
@@ -52,6 +58,7 @@ export interface CreatePaymentInput {
   customerName?:   string;
   notes?:          Record<string, string>;
   splitSettlement?: SplitSettlementConfig;
+  tenantCredentials?: TenantPaymentCredentials;
 }
 
 export interface CreatePaymentResult {
@@ -86,6 +93,7 @@ export interface RefundInput {
   amountPaise:       number;   // integer paise
   reason:            string;
   idempotencyKey:    string;   // mapped to gateway idempotency param
+  tenantCredentials?: TenantPaymentCredentials;
 }
 
 export interface NormalizedRefund {
@@ -112,13 +120,14 @@ export interface PaymentProvider {
   verifyWebhook(
     rawBody: Buffer,
     headers: Record<string, string | string[] | undefined>,
+    tenantCredentials?: TenantPaymentCredentials,
   ): { valid: boolean; eventId: string; event: NormalizedEvent };
 
   /** Pull current payment status from the gateway (for reconciliation). */
-  fetchPayment(providerOrderId: string): Promise<NormalizedPayment>;
+  fetchPayment(providerOrderId: string, tenantCredentials?: TenantPaymentCredentials): Promise<NormalizedPayment>;
 
   /** Initiate a refund. Idempotent via idempotencyKey. */
-  refund(input: RefundInput): Promise<NormalizedRefund>;
+  refund(input: RefundInput, tenantCredentials?: TenantPaymentCredentials): Promise<NormalizedRefund>;
 }
 
 /** Injection token for the provider map */
