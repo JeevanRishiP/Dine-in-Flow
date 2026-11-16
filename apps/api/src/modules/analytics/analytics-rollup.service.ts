@@ -54,13 +54,15 @@ export class AnalyticsRollupService {
   ) {
     return withTenantContextRaw(orgId, async (client) => {
       // 1. Fetch orders created for this outlet
-      // In timezone-aware queries: convert order timestamp to outlet timezone date
+      // SARGABLE: bounded timestamp range [start_time, end_time) in outlet's timezone
+      // enables B-Tree index scan on orders(org_id, outlet_id, created_at)
       const ordersRes = await client.query<RawOrderRow>(
         `SELECT id, subtotal_paise, tax_paise, discount_paise, total_paise, status, created_at
          FROM orders
          WHERE org_id = $1
            AND outlet_id = $2
-           AND (created_at AT TIME ZONE $3)::date = $4::date
+           AND created_at >= ($4::timestamp AT TIME ZONE $3)
+           AND created_at < (($4::timestamp + interval '1 day') AT TIME ZONE $3)
            AND status NOT IN ('CANCELLED', 'PENDING')`,
         [orgId, outletId, timeZone, targetDateStr],
       );
