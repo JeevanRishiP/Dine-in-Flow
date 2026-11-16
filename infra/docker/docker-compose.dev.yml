@@ -20,6 +20,37 @@ services:
       timeout: 5s
       retries: 5
 
+  # PgBouncer: Connection pooling (transaction mode) to protect database
+  # from connection starvation during QR scan flash crowds (ARCH §25, SCL-01)
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    pull_policy: if_not_present
+    container_name: dineflow_pgbouncer
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "6432:6432"
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      DB_NAME: dineflow_dev
+      POOL_MODE: transaction
+      LISTEN_PORT: 6432
+      MAX_CLIENT_CONN: 1000
+      DEFAULT_POOL_SIZE: 25
+      RESERVE_POOL_SIZE: 5
+      AUTH_TYPE: scram-sha-256
+      IGNORE_STARTUP_PARAMETERS: extra_float_digits,search_path
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "localhost", "-p", "6432", "-U", "postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
   redis:
     image: redis:7-alpine   # already available locally — no download needed
     pull_policy: if_not_present
