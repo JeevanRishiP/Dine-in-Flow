@@ -7,8 +7,9 @@
  *
  * Key design decisions:
  *  - createPayment: initiates a Standard Checkout transaction on PhonePe PG API;
- *    returns the real hosted PhonePe Simulator / Checkout URL as checkoutPayload.redirectUrl.
- *  - verifyWebhook: validates X-VERIFY checksum on the raw body; decodes base64 payload.
+ *    supports tenant-scoped credentials if configured on the organization.
+ *  - verifyWebhook: validates X-VERIFY checksum on the raw body (<hash>###<index>);
+ *    strictly verifies saltIndex matches expected credentials.
  *  - fetchPayment: queries PhonePe order status check API for real-time reconciliation.
  *  - refund: PhonePe refund API with idempotencyKey.
  *
@@ -26,20 +27,27 @@ import type {
   NormalizedPayment,
   NormalizedRefund,
   RefundInput,
+  TenantPaymentCredentials,
 } from './payment-provider.interface.js';
 
 const logger = new Logger('PhonePeAdapter');
 
 // Map PhonePe state strings → our normalized status
 const STATE_MAP: Record<string, 'PENDING' | 'PAID' | 'FAILED'> = {
-  PENDING:   'PENDING',
-  COMPLETED: 'PAID',
-  SUCCESS:   'PAID',
+  PENDING:         'PENDING',
+  COMPLETED:       'PAID',
+  SUCCESS:         'PAID',
   PAYMENT_SUCCESS: 'PAID',
-  FAILED:    'FAILED',
-  EXPIRED:   'FAILED',
-  CANCELLED: 'FAILED',
+  FAILED:          'FAILED',
+  EXPIRED:         'FAILED',
+  CANCELLED:       'FAILED',
 };
+
+export interface PhonePeCredentials {
+  merchantId: string;
+  saltKey: string;
+  saltIndex: number;
+}
 
 function getPhonePeBaseUrl(): string {
   const cfg = getConfig();
@@ -48,11 +56,22 @@ function getPhonePeBaseUrl(): string {
     : 'https://api-preprod.phonepe.com/apis/pg-sandbox';
 }
 
-function getCredentials() {
+/**
+ * Resolve PhonePe credentials with tenant override support:
+ * 1. Checks tenant-specific credentials if provided (e.g. from organization settings)
+ * 2. Falls back to global environment configuration
+ */
+export function getPhonePeCredentials(tenantCreds?: Partial<PhonePeCredentials> | TenantPaymentCredentials): PhonePeCredentials {
   const cfg = getConfig();
-  const merchantId = cfg.PHONEPE_CLIENT_ID || 'PGTESTPAYUAT86';
-  const saltKey = cfg.PHONEPE_CLIENT_SECRET || '96434309-7796-489d-8924-ab56988a6076';
-  const saltIndex = cfg.PHONEPE_CLIENT_VERSION || 1;
+  const defaultSaltIndex = cfg.PHONEPE_SALT_INDEX ?? cfg.PHONEPE_CLIENT_VERSION ?? 1;
+
+  const merchantId = tenantCreds?.merchantId || cfg.PHONEPE_CLIENT_ID || 'PGTESTPAYUAT86';
+  const saltKey = tenantCreds?.saltKey || cfg.PHONEPE_CLIENT_SECRET || '96434309-7796-489d-8924-ab56988a6076';
+  const saltIndex =
+    tenantCreds?.saltIndex !== undefined && !isNaN(Number(tenantCreds.saltIndex))
+      ? Number(tenantCreds.saltIndex)
+      : defaultSaltIndex;
+
   return { merchantId, saltKey, saltIndex };
 }
 
@@ -63,7 +82,7 @@ export const PhonePeAdapter: PaymentProvider = {
 
   async createPayment(input: CreatePaymentInput): Promise<CreatePaymentResult> {
     const cfg = getConfig();
-    const { merchantId, saltKey, saltIndex } = getCredentials();
+    const { merchantId, saltKey, saltIndex } = getPhonePeCredentials(input.tenantCredentials);
     const baseUrl = getPhonePeBaseUrl();
 
     // Use idempotencyKey as merchantTransactionId (stable, unique per payment attempt)
@@ -90,7 +109,9 @@ export const PhonePeAdapter: PaymentProvider = {
     const sha256 = crypto.createHash('sha256').update(stringToHash).digest('hex');
     const xVerify = `${sha256}###${saltIndex}`;
 
-    logger.log(`Initiating PhonePe payment: merchantTransactionId=${merchantOrderId} amount=${input.amountPaise} paise`);
+    logger.log(
+      `Initiating PhonePe payment: merchantId=${merchantId} merchantTransactionId=${merchantOrderId} amount=${input.amountPaise} paise saltIndex=${saltIndex}`,
+    );
 
     const res = await fetch(`${baseUrl}/pg/v1/pay`, {
       method: 'POST',
@@ -140,14 +161,34 @@ export const PhonePeAdapter: PaymentProvider = {
   verifyWebhook(
     rawBody: Buffer,
     headers: Record<string, string | string[] | undefined>,
+    tenantCredentials?: Partial<PhonePeCredentials> | TenantPaymentCredentials,
   ): { valid: boolean; eventId: string; event: NormalizedEvent } {
-    const { saltKey } = getCredentials();
+    const { saltKey, saltIndex } = getPhonePeCredentials(tenantCredentials);
 
     const xVerifyHeader = headers['x-verify'] ?? headers['X-VERIFY'];
     const xVerify = Array.isArray(xVerifyHeader) ? xVerifyHeader[0] : xVerifyHeader;
 
     if (!xVerify) {
       logger.warn('PhonePe webhook missing X-VERIFY header');
+      return { valid: false, eventId: '', event: buildEmptyEvent() };
+    }
+
+    // PhonePe S2S spec format: <sha256_hash>###<salt_index>
+    const parts = xVerify.split('###');
+    if (parts.length !== 2) {
+      logger.warn('PhonePe webhook X-VERIFY header malformed (expected <hash>###<index>)');
+      return { valid: false, eventId: '', event: buildEmptyEvent() };
+    }
+
+    const receivedHash = (parts[0] ?? '').trim().toLowerCase();
+    const receivedIndexStr = (parts[1] ?? '').trim();
+    const receivedIndex = parseInt(receivedIndexStr, 10);
+
+    // Strict validation of received saltIndex against expected saltIndex
+    if (isNaN(receivedIndex) || receivedIndex !== saltIndex) {
+      logger.warn(
+        `PhonePe webhook salt index mismatch: received '${receivedIndexStr}', expected '${saltIndex}'`,
+      );
       return { valid: false, eventId: '', event: buildEmptyEvent() };
     }
 
@@ -165,12 +206,11 @@ export const PhonePeAdapter: PaymentProvider = {
       return { valid: false, eventId: '', event: buildEmptyEvent() };
     }
 
-    // Verify SHA256 checksum using constant-time comparison: sha256(responseB64 + saltKey) + '###' + saltIndex
+    // Verify SHA256 checksum: sha256(responseB64 + saltKey) using constant-time comparison
     const expectedHash = crypto
       .createHash('sha256')
       .update(responseB64 + saltKey)
       .digest('hex');
-    const receivedHash = (xVerify.split('###')[0] ?? '').toLowerCase();
 
     const expectedBuf = Buffer.from(expectedHash, 'hex');
     const receivedBuf = /^[0-9a-f]+$/i.test(receivedHash)
@@ -182,7 +222,7 @@ export const PhonePeAdapter: PaymentProvider = {
       expectedBuf.length !== receivedBuf.length ||
       !crypto.timingSafeEqual(expectedBuf, receivedBuf)
     ) {
-      logger.warn('PhonePe webhook signature mismatch');
+      logger.warn('PhonePe webhook signature checksum mismatch');
       return { valid: false, eventId: '', event: buildEmptyEvent() };
     }
 
@@ -223,14 +263,19 @@ export const PhonePeAdapter: PaymentProvider = {
       raw: decodedJson,
     };
 
-    logger.log(`PhonePe webhook verified: orderId=${merchantTransactionId} status=${normalizedEvent.status}`);
+    logger.log(
+      `PhonePe webhook verified: orderId=${merchantTransactionId} status=${normalizedEvent.status} saltIndex=${saltIndex}`,
+    );
     return { valid: true, eventId: uniqueEventId, event: normalizedEvent };
   },
 
   // ─── Fetch Payment (Reconciliation) ─────────────────────────────────────────
 
-  async fetchPayment(providerOrderId: string): Promise<NormalizedPayment> {
-    const { merchantId, saltKey, saltIndex } = getCredentials();
+  async fetchPayment(
+    providerOrderId: string,
+    tenantCredentials?: Partial<PhonePeCredentials> | TenantPaymentCredentials,
+  ): Promise<NormalizedPayment> {
+    const { merchantId, saltKey, saltIndex } = getPhonePeCredentials(tenantCredentials);
     const baseUrl = getPhonePeBaseUrl();
 
     const path = `/pg/v1/status/${merchantId}/${providerOrderId}`;
@@ -238,7 +283,7 @@ export const PhonePeAdapter: PaymentProvider = {
     const sha256 = crypto.createHash('sha256').update(stringToHash).digest('hex');
     const xVerify = `${sha256}###${saltIndex}`;
 
-    logger.log(`Querying PhonePe payment status: ${providerOrderId}`);
+    logger.log(`Querying PhonePe payment status: ${providerOrderId} (merchantId=${merchantId})`);
 
     const res = await fetch(`${baseUrl}${path}`, {
       method: 'GET',
@@ -295,8 +340,11 @@ export const PhonePeAdapter: PaymentProvider = {
 
   // ─── Refund ─────────────────────────────────────────────────────────────────
 
-  async refund(input: RefundInput): Promise<NormalizedRefund> {
-    const { merchantId, saltKey, saltIndex } = getCredentials();
+  async refund(
+    input: RefundInput,
+    tenantCredentials?: Partial<PhonePeCredentials> | TenantPaymentCredentials,
+  ): Promise<NormalizedRefund> {
+    const { merchantId, saltKey, saltIndex } = getPhonePeCredentials(tenantCredentials ?? input.tenantCredentials);
     const baseUrl = getPhonePeBaseUrl();
 
     const refundTransactionId = input.idempotencyKey;
