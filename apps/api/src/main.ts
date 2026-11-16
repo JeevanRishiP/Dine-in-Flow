@@ -103,6 +103,7 @@ async function bootstrap(): Promise<void> {
     async (req: any, reply: any) => {
       const url = typeof req.url === 'string' ? req.url : '';
       if (url === '/healthz' || url === '/readyz') return;
+      if (config.NODE_ENV !== 'production' && (config.DISABLE_RATE_LIMIT === 'true' || process.env['DISABLE_RATE_LIMIT'] === 'true')) return;
 
       const isAuthOrSession =
         url.startsWith('/v1/auth/') || url.startsWith('/v1/public/sessions/open');
@@ -153,7 +154,7 @@ async function bootstrap(): Promise<void> {
     'preParsing',
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- raw Fastify hook signature
     (req: any, _reply: any, payload: any, done: any) => {
-      if (typeof req.url === 'string' && req.url.includes('/webhooks/')) {
+      if (typeof req.url === 'string' && (req.url.includes('/webhooks') || req.url.includes('/webhook'))) {
         const chunks: Buffer[] = [];
         let totalBytes = 0;
         payload.on('data', (chunk: Buffer) => {
