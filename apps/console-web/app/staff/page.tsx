@@ -3,6 +3,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
+import { io, type Socket } from 'socket.io-client';
 import {
   OUTLETS,
   ALL_STAFF_MEMBERS,
@@ -387,36 +388,6 @@ export default function StaffWebApp() {
     }
   };
 
-  // Sync state whenever outlet switches & poll live orders feed every 3 seconds
-  useEffect(() => {
-    const data = getBranchData(selectedOutletId);
-    setTables(data.tables);
-    setSessions(data.sessions);
-    setStock(data.menuItems);
-    setCalls(data.serviceCalls);
-
-    fetchLiveOrders();
-    void fetchLiveFloor();
-    const interval = setInterval(() => {
-      fetchLiveOrders();
-      void fetchLiveFloor();
-    }, 3000);
-    return () => clearInterval(interval);
-  }, [selectedOutletId]);
-
-  // Filters & Views
-  const [selectedSection, setSelectedSection] = useState<string>('ALL');
-  const [stockSearch, setStockSearch] = useState('');
-  const [orderFilter, setOrderFilter] = useState<'ALL' | 'MY_TABLES'>('ALL');
-
-  // Modals & Drawers
-  const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
-  const [selectedTable, setSelectedTable] = useState<Table | null>(null);
-  const [collectPaymentOrder, setCollectPaymentOrder] = useState<Order | null>(null);
-  const [paymentMethod, setPaymentMethod] = useState<'UPI' | 'DIRECT_UPI' | 'CASH' | 'CARD'>('DIRECT_UPI');
-  const [cashGiven, setCashGiven] = useState('');
-  const [directUpiRef, setDirectUpiRef] = useState('');
-
   // Audio state - Muted by default so NO ping/chime sound on login
   const [isSoundMuted, setIsSoundMuted] = useState(true);
   const isInitialMount = useRef(true);
@@ -444,6 +415,115 @@ export default function StaffWebApp() {
       // Audio autoplay policy fallback
     }
   };
+
+  // Realtime WebSocket Connection & State Sync via Socket.IO /kds Gateway
+  const socketRef = useRef<Socket | null>(null);
+
+  useEffect(() => {
+    const data = getBranchData(selectedOutletId);
+    setTables(data.tables);
+    setSessions(data.sessions);
+    setStock(data.menuItems);
+    setCalls(data.serviceCalls);
+
+    // Initial baseline fetch on mount or outlet switch
+    void fetchLiveOrders();
+    void fetchLiveFloor();
+
+    const authState = getConsoleAuthState();
+    const token = authState?.accessToken;
+
+    if (!token) {
+      setConnectionStatus('offline');
+      return;
+    }
+
+    // Connect directly to NestJS KdsGateway (/kds namespace, transports: ['websocket'])
+    const getKdsSocketUrl = (): string => {
+      if (typeof window === 'undefined') return 'http://localhost:3000';
+      if (process.env['NEXT_PUBLIC_WS_URL']) return process.env['NEXT_PUBLIC_WS_URL'];
+      if (process.env['NEXT_PUBLIC_API_URL']) return process.env['NEXT_PUBLIC_API_URL'];
+      const port = window.location.port === '3004' ? '3000' : window.location.port;
+      return `${window.location.protocol}//${window.location.hostname}:${port || '3000'}`;
+    };
+
+    const wsBase = getKdsSocketUrl();
+    const socket: Socket = io(`${wsBase}/kds`, {
+      transports: ['websocket'],
+      auth: { token },
+      reconnection: true,
+      reconnectionAttempts: Infinity,
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: 5000,
+    });
+    socketRef.current = socket;
+
+    socket.on('connect', () => {
+      setConnectionStatus('live');
+    });
+
+    socket.on('connected', () => {
+      setConnectionStatus('live');
+    });
+
+    socket.on('order:event', (msg: { id: string; org_id: string; outlet_id?: string; aggregate: string; eventType: string; payload: unknown }) => {
+      // Acknowledge receipt to gateway
+      if (msg?.id) {
+        socket.emit('order:ack', { eventId: msg.id });
+      }
+
+      // Filter by outlet if specified on event
+      if (msg?.outlet_id && msg.outlet_id !== selectedOutletId) {
+        return;
+      }
+
+      // Live push update from database outbox without polling
+      void fetchLiveOrders();
+      void fetchLiveFloor();
+
+      // Auditory alert for newly arrived orders
+      if (msg?.eventType === 'ORDER_PLACED') {
+        playAlertChime();
+      }
+    });
+
+    socket.on('disconnect', (reason) => {
+      if (reason !== 'io client disconnect') {
+        setConnectionStatus('degraded');
+      }
+    });
+
+    socket.on('connect_error', () => {
+      setConnectionStatus('degraded');
+    });
+
+    // Fallback sync ONLY when socket is disconnected/degraded (30s safety net, NEVER 3s hammering)
+    const fallbackInterval = setInterval(() => {
+      if (socket.disconnected) {
+        void fetchLiveOrders();
+        void fetchLiveFloor();
+      }
+    }, 30000);
+
+    return () => {
+      clearInterval(fallbackInterval);
+      socket.disconnect();
+      socketRef.current = null;
+    };
+  }, [selectedOutletId]);
+
+  // Filters & Views
+  const [selectedSection, setSelectedSection] = useState<string>('ALL');
+  const [stockSearch, setStockSearch] = useState('');
+  const [orderFilter, setOrderFilter] = useState<'ALL' | 'MY_TABLES'>('ALL');
+
+  // Modals & Drawers
+  const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
+  const [selectedTable, setSelectedTable] = useState<Table | null>(null);
+  const [collectPaymentOrder, setCollectPaymentOrder] = useState<Order | null>(null);
+  const [paymentMethod, setPaymentMethod] = useState<'UPI' | 'DIRECT_UPI' | 'CASH' | 'CARD'>('DIRECT_UPI');
+  const [cashGiven, setCashGiven] = useState('');
+  const [directUpiRef, setDirectUpiRef] = useState('');
 
   // Sound repeat alert loop for unacknowledged orders or bells (NEVER fires on login/mount)
   useEffect(() => {
