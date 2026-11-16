@@ -372,20 +372,35 @@ export class OrdersService {
       );
       const orderId = orderRows[0]!.id;
 
-      for (let idx = 0; idx < quote.lines.length; idx++) {
-        const line = quote.lines[idx]!;
-        const targetTableId = dto.items[idx]?.target_table_id ?? session.table_id;
-        await db.query(
-          `INSERT INTO order_items (org_id, order_id, menu_item_id, name_snapshot,
-                                    unit_price_paise, quantity, line_total_paise, modifiers, notes, target_table_id)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-          [
-            targetOrgId, orderId, line.menu_item_id, line.name_snapshot,
-            line.unit_price_paise, line.quantity, line.line_total_paise,
+      if (quote.lines.length > 0) {
+        const valuePlaceholders: string[] = [];
+        const itemParams: unknown[] = [];
+        for (let idx = 0; idx < quote.lines.length; idx++) {
+          const line = quote.lines[idx]!;
+          const targetTableId = dto.items[idx]?.target_table_id ?? session.table_id;
+          const offset = itemParams.length;
+          valuePlaceholders.push(
+            `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, $${offset + 10})`,
+          );
+          itemParams.push(
+            targetOrgId,
+            orderId,
+            line.menu_item_id,
+            line.name_snapshot,
+            line.unit_price_paise,
+            line.quantity,
+            line.line_total_paise,
             JSON.stringify(line.modifiers),
             dto.items[idx]?.notes ?? null,
             targetTableId,
-          ],
+          );
+        }
+
+        await db.query(
+          `INSERT INTO order_items (org_id, order_id, menu_item_id, name_snapshot,
+                                    unit_price_paise, quantity, line_total_paise, modifiers, notes, target_table_id)
+           VALUES ${valuePlaceholders.join(', ')}`,
+          itemParams,
         );
       }
 
