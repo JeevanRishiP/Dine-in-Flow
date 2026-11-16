@@ -44,10 +44,11 @@ AS $$
   LIMIT 1;
 $$;
 
--- 3. Payment lookup for signature-verified gateway webhooks
+-- 3. Payment lookup for signature-verified gateway webhooks (secured with inbox_id guard)
 CREATE OR REPLACE FUNCTION resolve_payment_by_provider_order(
   p_provider text,
-  p_provider_order_id text
+  p_provider_order_id text,
+  p_inbox_id uuid DEFAULT NULL
 )
 RETURNS TABLE (
   id            uuid,
@@ -56,16 +57,33 @@ RETURNS TABLE (
   amount_paise  bigint,
   status        text
 )
-LANGUAGE sql
+LANGUAGE plpgsql
 STABLE
 SECURITY DEFINER
 SET search_path = public, pg_temp
 AS $$
+BEGIN
+  -- Strict guard: Must have a signature-verified entry in webhook_inbox
+  IF p_inbox_id IS NULL THEN
+    RETURN; -- Refuse unanchored lookups to prevent enumeration attacks
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM webhook_inbox wi
+    WHERE wi.id = p_inbox_id
+      AND wi.provider = p_provider
+      AND wi.signature_valid = true
+  ) THEN
+    RETURN; -- Refuse cross-tenant lookup for unverified or forged webhooks
+  END IF;
+
+  RETURN QUERY
   SELECT p.id, p.org_id, p.order_id, p.amount_paise, p.status::text
   FROM payments p
   WHERE p.provider = p_provider
     AND p.provider_order_id = p_provider_order_id
   LIMIT 1;
+END;
 $$;
 
 -- 4. Bounded reconciliation scan for pending online payments (>5 min old)
@@ -163,14 +181,14 @@ END $$;
 
 REVOKE ALL ON FUNCTION resolve_table_for_qr(uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION resolve_outlet_org(uuid) FROM PUBLIC;
-REVOKE ALL ON FUNCTION resolve_payment_by_provider_order(text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION resolve_payment_by_provider_order(text, text, uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION list_pending_payments_for_reconcile(int) FROM PUBLIC;
 REVOKE ALL ON FUNCTION fetch_and_claim_outbox_events(int) FROM PUBLIC;
 REVOKE ALL ON FUNCTION resolve_org_by_whatsapp_phone_id(text) FROM PUBLIC;
 
 GRANT EXECUTE ON FUNCTION resolve_table_for_qr(uuid) TO dineflow_app;
 GRANT EXECUTE ON FUNCTION resolve_outlet_org(uuid) TO dineflow_app;
-GRANT EXECUTE ON FUNCTION resolve_payment_by_provider_order(text, text) TO dineflow_app;
+GRANT EXECUTE ON FUNCTION resolve_payment_by_provider_order(text, text, uuid) TO dineflow_app;
 GRANT EXECUTE ON FUNCTION list_pending_payments_for_reconcile(int) TO dineflow_app;
 GRANT EXECUTE ON FUNCTION fetch_and_claim_outbox_events(int) TO dineflow_app;
 GRANT EXECUTE ON FUNCTION resolve_org_by_whatsapp_phone_id(text) TO dineflow_app;
