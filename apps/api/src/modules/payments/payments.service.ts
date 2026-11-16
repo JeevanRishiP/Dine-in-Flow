@@ -26,7 +26,7 @@ import { domainError } from '../../common/errors/domain-error.js';
 import { ErrorCode } from '@dineflow/contracts';
 import { PhonePeAdapter } from './phonepe.adapter.js';
 import { RazorpayAdapter } from './razorpay.adapter.js';
-import type { PaymentProvider, PaymentMethod } from './payment-provider.interface.js';
+import type { PaymentProvider, PaymentMethod, TenantPaymentCredentials } from './payment-provider.interface.js';
 import type { CreatePaymentDto } from './payments.dto.js';
 import {
   assertCustomerAccessScope,
@@ -137,6 +137,7 @@ export class PaymentsService {
 
       // 5. Gateway payment
       const provider = this.resolveProvider(dto.method as PaymentMethod);
+      const tenantCredentials = await this.getTenantPaymentCredentials(targetOrgId, db);
       const result = await provider.createPayment({
         orderId:        order.id,
         idempotencyKey: dto.idempotency_key,
@@ -146,6 +147,7 @@ export class PaymentsService {
         returnUrl:      dto.return_url ?? ``,
         customerPhone:  dto.customer_phone,
         customerName:   dto.customer_name,
+        tenantCredentials,
       });
 
       // 6. Persist payment row + audit event (same TX — AGENTS §2 rule 6)
@@ -216,6 +218,9 @@ export class PaymentsService {
        JSON.stringify({ payment_id: paymentId, method: dto.method, amount_paise: amountPaise })],
     );
 
+    // Gapless GST invoice generation on staff payment confirmation
+    await this.generateGstInvoiceInTx(db, orgId, orderId, paymentId);
+
     this.logger.log(`Staff-confirmed payment: id=${paymentId} method=${dto.method}`);
     return { id: paymentId, status: 'PAID', method: dto.method };
   }
@@ -261,6 +266,76 @@ export class PaymentsService {
     return { id: paymentId, status: 'PENDING', method: dto.method };
   }
 
+  // ─── Tenant Credentials Helpers ───────────────────────────────────────────
+
+  /**
+   * Resolve custom tenant-scoped payment gateway credentials stored on the organization.
+   * Falls back to undefined (which causes adapters to use environment defaults).
+   */
+  async getTenantPaymentCredentials(
+    orgId: string,
+    client?: PoolClient,
+  ): Promise<TenantPaymentCredentials | undefined> {
+    const runner = client ?? getPool();
+    try {
+      const res = await runner.query<{ settings: Record<string, unknown> | null }>(
+        `SELECT settings FROM organizations WHERE id = $1`,
+        [orgId],
+      );
+      const rows = res?.rows ?? [];
+      const settings = (rows[0]?.settings ?? {}) as Record<string, unknown>;
+      const paymentCreds = (settings['payment_credentials'] ?? settings['phonepe']) as
+        | Record<string, unknown>
+        | undefined;
+      if (paymentCreds && typeof paymentCreds === 'object') {
+        const merchantId = typeof paymentCreds['merchantId'] === 'string' ? paymentCreds['merchantId'] : undefined;
+        const saltKey = typeof paymentCreds['saltKey'] === 'string' ? paymentCreds['saltKey'] : undefined;
+        const saltIndex = typeof paymentCreds['saltIndex'] === 'number' ? paymentCreds['saltIndex'] : undefined;
+        if (merchantId || saltKey || saltIndex !== undefined) {
+          return { merchantId, saltKey, saltIndex };
+        }
+      }
+    } catch (err) {
+      this.logger.debug(`Could not load tenant payment credentials for org=${orgId}:`, err);
+    }
+    return undefined;
+  }
+
+  /**
+   * Inbound webhook resolver: finds tenant credentials matching a custom merchantId.
+   */
+  async findTenantCredentialsByMerchantId(merchantId: string): Promise<TenantPaymentCredentials | undefined> {
+    const pool = getPool();
+    try {
+      const res = await pool.query<{ settings: Record<string, unknown> | null }>(
+        `SELECT settings FROM organizations
+         WHERE is_active = true
+           AND (
+             settings->'payment_credentials'->>'merchantId' = $1
+             OR settings->'phonepe'->>'merchantId' = $1
+           )
+         LIMIT 1`,
+        [merchantId],
+      );
+      const rows = res?.rows ?? [];
+      if (rows[0]?.settings) {
+        const paymentCreds = (rows[0].settings['payment_credentials'] ?? rows[0].settings['phonepe']) as
+          | Record<string, unknown>
+          | undefined;
+        if (paymentCreds && typeof paymentCreds === 'object') {
+          return {
+            merchantId: typeof paymentCreds['merchantId'] === 'string' ? paymentCreds['merchantId'] : undefined,
+            saltKey: typeof paymentCreds['saltKey'] === 'string' ? paymentCreds['saltKey'] : undefined,
+            saltIndex: typeof paymentCreds['saltIndex'] === 'number' ? paymentCreds['saltIndex'] : undefined,
+          };
+        }
+      }
+    } catch (err) {
+      this.logger.debug(`Could not resolve credentials for merchantId=${merchantId}:`, err);
+    }
+    return undefined;
+  }
+
   // ─── Handle Webhook ─────────────────────────────────────────────────────────
   // Raw body + provider name → verify → insert webhook_inbox → process async.
   // NEVER trust redirect for success (AGENTS §2 rule 9, ARCH §11).
@@ -271,7 +346,25 @@ export class PaymentsService {
     headers: Record<string, string | string[] | undefined>,
   ): Promise<{ received: boolean }> {
     const adapter = provider === 'phonepe' ? PhonePeAdapter : RazorpayAdapter;
-    const { valid, eventId, event } = adapter.verifyWebhook(rawBody, headers);
+
+    // Resolve tenant credentials if custom merchantId is present in PhonePe payload
+    let tenantCredentials: TenantPaymentCredentials | undefined;
+    if (provider === 'phonepe') {
+      try {
+        const parsed = JSON.parse(rawBody.toString('utf8'));
+        if (parsed.response) {
+          const decoded = JSON.parse(Buffer.from(parsed.response, 'base64').toString('utf8'));
+          const merchantId = decoded.data?.merchantId;
+          if (merchantId) {
+            tenantCredentials = await this.findTenantCredentialsByMerchantId(merchantId);
+          }
+        }
+      } catch {
+        // Fall back to default verification
+      }
+    }
+
+    const { valid, eventId, event } = adapter.verifyWebhook(rawBody, headers, tenantCredentials);
 
     const pool = getPool();
     const client = await pool.connect();
@@ -301,7 +394,7 @@ export class PaymentsService {
         return { received: true };
       }
 
-      // Process: find the payment and update status
+      // Process: find the payment and update status inside locked transaction
       await this.processWebhookEvent(client, inboxId, provider, event);
       return { received: true };
     } finally {
@@ -315,13 +408,13 @@ export class PaymentsService {
     provider: string,
     event: ReturnType<PaymentProvider['verifyWebhook']>['event'],
   ) {
-    // 1. Resolve payment across tenants via SECURITY DEFINER helper (works under dineflow_app RLS)
+    // 1. Resolve payment across tenants via SECURITY DEFINER helper requiring verified inboxId
     const { rows } = await inboxClient.query<{
       id: string; org_id: string; order_id: string; amount_paise: string | number; status: string;
     }>(
       `SELECT id, org_id, order_id, amount_paise, status
-       FROM resolve_payment_by_provider_order($1, $2)`,
-      [provider, event.providerOrderId],
+       FROM resolve_payment_by_provider_order($1, $2, $3)`,
+      [provider, event.providerOrderId, inboxId],
     );
     const payment = rows[0];
 
@@ -336,29 +429,58 @@ export class PaymentsService {
 
     // 2. Process payment/order state changes inside forced RLS tenant context
     await withTenantContextRaw(payment.org_id, async (db) => {
-      // AMOUNT MISMATCH check — compare via BigInt so bigint string vs number cannot false-fail
-      if (BigInt(event.amountPaise) !== BigInt(payment.amount_paise)) {
+      // 2a. Acquire row lock on payment record to prevent race conditions from concurrent webhook retries
+      const { rows: lockedRows } = await db.query<{
+        id: string;
+        org_id: string;
+        order_id: string;
+        amount_paise: string | number;
+        status: string;
+        provider_payment_id: string | null;
+      }>(
+        `SELECT id, org_id, order_id, amount_paise, status, provider_payment_id
+         FROM payments
+         WHERE id = $1 AND org_id = $2
+         FOR UPDATE`,
+        [payment.id, payment.org_id],
+      );
+      const lockedPayment = lockedRows[0];
+      if (!lockedPayment) {
+        this.logger.warn(`Payment record not found under lock: id=${payment.id}`);
+        return;
+      }
+
+      // 2b. Strict idempotency guard: if already settled as PAID, early-return to prevent duplicate outbox capture
+      if (lockedPayment.status === 'PAID') {
+        this.logger.log(
+          `Payment ${lockedPayment.id} already settled (PAID). Skipping duplicate state transition and outbox capture.`,
+        );
+        return;
+      }
+
+      // 2c. AMOUNT MISMATCH check — compare via BigInt so bigint string vs number cannot false-fail
+      if (BigInt(event.amountPaise) !== BigInt(lockedPayment.amount_paise)) {
         await db.query(
           `UPDATE payments SET status = 'MISMATCH', raw_response = $1, updated_at = now()
            WHERE id = $2 AND org_id = $3`,
-          [JSON.stringify(event.raw), payment.id, payment.org_id],
+          [JSON.stringify(event.raw), lockedPayment.id, lockedPayment.org_id],
         );
         this.logger.warn(
-          `AMOUNT MISMATCH: payment=${payment.id} expected=${payment.amount_paise} got=${event.amountPaise}`,
+          `AMOUNT MISMATCH: payment=${lockedPayment.id} expected=${lockedPayment.amount_paise} got=${event.amountPaise}`,
         );
         return;
       }
 
       const newStatus = event.status === 'PAID' ? 'PAID'
                       : event.status === 'FAILED' ? 'FAILED'
-                      : payment.status;
+                      : lockedPayment.status;
 
       await db.query(
         `UPDATE payments SET
-           status = $1,
+           status = $1::payment_status,
            provider_payment_id = COALESCE($2, provider_payment_id),
            fee_paise = COALESCE($3, fee_paise),
-           settled_at = CASE WHEN $1 = 'PAID' THEN now() ELSE settled_at END,
+           settled_at = CASE WHEN $1::text = 'PAID' THEN now() ELSE settled_at END,
            raw_response = $4,
            updated_at = now()
          WHERE id = $5 AND org_id = $6`,
@@ -367,8 +489,8 @@ export class PaymentsService {
           event.providerPaymentId ?? null,
           event.feePaise ?? null,
           JSON.stringify(event.raw),
-          payment.id,
-          payment.org_id,
+          lockedPayment.id,
+          lockedPayment.org_id,
         ],
       );
 
@@ -376,26 +498,174 @@ export class PaymentsService {
         await db.query(
           `UPDATE orders SET status = 'CONFIRMED', updated_at = now()
            WHERE id = $1 AND org_id = $2 AND status NOT IN ('CANCELLED', 'SERVED', 'BILLED')`,
-          [payment.order_id, payment.org_id],
+          [lockedPayment.order_id, lockedPayment.org_id],
         );
         await db.query(
           `INSERT INTO outbox_events (org_id, aggregate, aggregate_id, event_type, payload)
            VALUES ($1, 'payment', $2, 'PAYMENT_CAPTURED', $3)`,
           [
-            payment.org_id,
-            payment.id,
-            JSON.stringify({ order_id: payment.order_id, amount_paise: event.amountPaise }),
+            lockedPayment.org_id,
+            lockedPayment.id,
+            JSON.stringify({ order_id: lockedPayment.order_id, amount_paise: event.amountPaise }),
           ],
+        );
+
+        // 2d. Gapless Legal GST Invoice Generation inside transaction
+        await this.generateGstInvoiceInTx(
+          db,
+          lockedPayment.org_id,
+          lockedPayment.order_id,
+          lockedPayment.id,
         );
       }
 
-      this.logger.log(`Webhook processed: payment=${payment.id} status=${newStatus}`);
+      this.logger.log(`Webhook processed: payment=${lockedPayment.id} status=${newStatus}`);
     });
 
     await inboxClient.query(
       `UPDATE webhook_inbox SET status = 'PROCESSED', processed_at = now() WHERE id = $1`,
       [inboxId],
     );
+  }
+
+  /**
+   * Generates a gapless legal GST invoice inside an active transaction.
+   * Locks and increments invoice_counters atomically per outlet per fiscal year.
+   * Emits an INVOICE_GENERATED outbox event.
+   */
+  private async generateGstInvoiceInTx(
+    db: PoolClient,
+    orgId: string,
+    orderId: string,
+    paymentId: string,
+  ): Promise<void> {
+    // 1. Idempotency check: see if invoice already exists for this order
+    const { rows: existingInvoices } = await db.query<{ id: string; invoice_ref: string }>(
+      `SELECT id, invoice_ref FROM invoices WHERE order_id = $1 AND org_id = $2`,
+      [orderId, orgId],
+    );
+    if (existingInvoices[0]) {
+      this.logger.log(`Invoice already exists for order=${orderId}: ${existingInvoices[0].invoice_ref}`);
+      return;
+    }
+
+    // 2. Load order and outlet metadata
+    const { rows: orderRows } = await db.query<{
+      id: string;
+      outlet_id: string;
+      subtotal_paise: number;
+      tax_paise: number;
+      discount_paise: number;
+      total_paise: number;
+      customer_id: string | null;
+      buyer_name: string | null;
+      outlet_settings: Record<string, unknown> | null;
+      org_settings: Record<string, unknown> | null;
+    }>(
+      `SELECT o.id, o.outlet_id, o.subtotal_paise, o.tax_paise, o.discount_paise, o.total_paise,
+              o.customer_id,
+              c.display_name AS buyer_name,
+              ou.settings AS outlet_settings,
+              org.settings AS org_settings
+       FROM orders o
+       JOIN outlets ou ON ou.id = o.outlet_id AND ou.org_id = o.org_id
+       JOIN organizations org ON org.id = o.org_id
+       LEFT JOIN customers c ON c.id = o.customer_id AND c.org_id = o.org_id
+       WHERE o.id = $1 AND o.org_id = $2`,
+      [orderId, orgId],
+    );
+
+    const order = orderRows[0];
+    if (!order) {
+      this.logger.warn(`Cannot generate invoice: order not found id=${orderId}`);
+      return;
+    }
+
+    // 3. Indian Fiscal Year calculation (April 1 to March 31)
+    const now = new Date();
+    const currentYear = now.getUTCFullYear();
+    const currentMonth = now.getUTCMonth(); // 0 = Jan, 3 = Apr
+    const fiscalYear = currentMonth >= 3 ? currentYear : currentYear - 1;
+
+    // 4. Lock & increment invoice_counters atomically (Gapless per outlet per fiscal year)
+    const counterRes = await db.query<{ last_no: number }>(
+      `INSERT INTO invoice_counters (outlet_id, fiscal_year, last_no)
+       VALUES ($1, $2, 1)
+       ON CONFLICT (outlet_id, fiscal_year)
+       DO UPDATE SET last_no = invoice_counters.last_no + 1
+       RETURNING last_no`,
+      [order.outlet_id, fiscalYear],
+    );
+    const counterRows = counterRes?.rows ?? [];
+    const invoiceNo = counterRows[0]?.last_no ?? 1;
+
+    // Extract seller GSTIN from outlet settings or organization settings
+    const outletSettings = (order.outlet_settings ?? {}) as Record<string, unknown>;
+    const orgSettings = (order.org_settings ?? {}) as Record<string, unknown>;
+    const sellerGstin =
+      typeof outletSettings['gstin'] === 'string'
+        ? (outletSettings['gstin'] as string)
+        : typeof orgSettings['gstin'] === 'string'
+          ? (orgSettings['gstin'] as string)
+          : 'URP'; // Unregistered Person / URP fallback
+
+    // 5% default restaurant GST breakup (2.5% CGST + 2.5% SGST)
+    const cgstPaise = Math.round(Number(order.tax_paise) / 2);
+    const sgstPaise = Number(order.tax_paise) - cgstPaise;
+    const taxBreakup = {
+      cgst_rate: 0.025,
+      cgst_paise: cgstPaise,
+      sgst_rate: 0.025,
+      sgst_paise: sgstPaise,
+    };
+
+    // 5. Insert invoice record
+    const invRes = await db.query<{ id: string; invoice_ref: string }>(
+      `INSERT INTO invoices (
+         org_id, outlet_id, order_id, payment_id,
+         invoice_no, fiscal_year, buyer_name, seller_gstin,
+         tax_breakup, subtotal_paise, tax_paise, discount_paise, total_paise, currency
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'INR')
+       RETURNING id, invoice_ref`,
+      [
+        orgId,
+        order.outlet_id,
+        order.id,
+        paymentId,
+        invoiceNo,
+        fiscalYear,
+        order.buyer_name ?? 'Guest Diner',
+        sellerGstin,
+        JSON.stringify(taxBreakup),
+        order.subtotal_paise,
+        order.tax_paise,
+        order.discount_paise,
+        order.total_paise,
+      ],
+    );
+    const invRows = invRes?.rows ?? [];
+    const invoiceId = invRows[0]?.id;
+    const invoiceRef = invRows[0]?.invoice_ref ?? `INV-${order.outlet_id}-${fiscalYear}-${invoiceNo}`;
+
+    // 6. Record outbox event for invoice generation
+    if (invoiceId) {
+      await db.query(
+        `INSERT INTO outbox_events (org_id, aggregate, aggregate_id, event_type, payload)
+         VALUES ($1, 'invoice', $2, 'INVOICE_GENERATED', $3)`,
+        [
+          orgId,
+          invoiceId,
+          JSON.stringify({
+            order_id: order.id,
+            invoice_ref: invoiceRef,
+            total_paise: order.total_paise,
+          }),
+        ],
+      );
+    }
+
+    this.logger.log(`Generated GST invoice ${invoiceRef} (id=${invoiceId}) for order=${order.id}`);
   }
 
   // ─── Refund ────────────────────────────────────────────────────────────────
@@ -552,7 +822,10 @@ export class PaymentsService {
     for (const row of rows) {
       try {
         const adapter = row.provider === 'phonepe' ? PhonePeAdapter : RazorpayAdapter;
-        const payment = await adapter.fetchPayment(row.provider_order_id);
+        const tenantCredentials = await this.getTenantPaymentCredentials(row.org_id);
+        const payment = tenantCredentials
+          ? await adapter.fetchPayment(row.provider_order_id, tenantCredentials)
+          : await adapter.fetchPayment(row.provider_order_id);
 
         if (payment.status !== 'PENDING') {
           await withTenantContextRaw(row.org_id, async (db) => {
@@ -606,6 +879,7 @@ export class PaymentsService {
          VALUES ($1, $2, 'PAYMENT_CAPTURED', 'CUSTOMER', null, $3)`,
         [org_id, order_id, JSON.stringify({ payment_id: paymentId, simulated: true })],
       );
+      await this.generateGstInvoiceInTx(db, org_id, order_id, paymentId);
       return { success: true, paymentId, status: 'PAID' };
     });
   }
@@ -651,9 +925,20 @@ export class PaymentsService {
     if (payment.provider === 'phonepe' || payment.provider === 'razorpay') {
       const adapter = payment.provider === 'phonepe' ? PhonePeAdapter : RazorpayAdapter;
       try {
-        const fetched = await adapter.fetchPayment(payment.provider_order_id);
+        const tenantCredentials = await this.getTenantPaymentCredentials(payment.org_id);
+        const fetched = tenantCredentials
+          ? await adapter.fetchPayment(payment.provider_order_id, tenantCredentials)
+          : await adapter.fetchPayment(payment.provider_order_id);
         if (fetched.status === 'PAID') {
           return withTenantContextRaw(payment.org_id, async (db) => {
+            const { rows: lockedRows } = await db.query<{ id: string; status: string }>(
+              `SELECT id, status FROM payments WHERE id = $1 AND org_id = $2 FOR UPDATE`,
+              [payment.id, payment.org_id],
+            );
+            if (lockedRows[0]?.status === 'PAID') {
+              return { success: true, paymentId: payment.id, status: 'PAID', settled: true };
+            }
+
             await db.query(
               `UPDATE payments SET status = 'PAID', settled_at = now(), updated_at = now() WHERE id = $1 AND org_id = $2`,
               [payment.id, payment.org_id],
@@ -667,6 +952,7 @@ export class PaymentsService {
                VALUES ($1, $2, 'PAYMENT_CAPTURED', 'CUSTOMER', null, $3)`,
               [payment.org_id, payment.order_id, JSON.stringify({ payment_id: payment.id, verified: true })],
             );
+            await this.generateGstInvoiceInTx(db, payment.org_id, payment.order_id, payment.id);
             return { success: true, paymentId: payment.id, status: 'PAID', settled: true };
           });
         }
