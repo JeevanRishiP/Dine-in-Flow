@@ -31,7 +31,7 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      - "6432:6432"
+      - "${PGBOUNCER_PORT:-6435}:6432"
     environment:
       DB_HOST: postgres
       DB_PORT: 5432
