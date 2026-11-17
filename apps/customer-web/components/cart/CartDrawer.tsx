@@ -10,6 +10,7 @@ import {
   resolveTenantIds,
   type OutletTableInfo,
 } from '../../app/lib/guest-session';
+import { getLiveTableValidation as validateLiveTable } from '../modals/TableModal';
 
 export interface CartDrawerProps {
   onPlaceOrder?: () => Promise<void> | void;
@@ -66,21 +67,14 @@ export function CartDrawer({
   // ── Live Table Matching Validations ──
   const getLiveTableValidation = useCallback(
     (digits: string): { matched: OutletTableInfo | null; error: string } => {
-      if (!digits) return { matched: null, error: '' };
-      const matched = matchHotelTable(digits, outletTables);
-      if (!outletTablesLoaded) return { matched, error: '' };
-      if (outletTables.length === 0) {
-        return { matched: null, error: 'Table directory unavailable for this hotel outlet.' };
-      }
-      if (!matched) {
-        return {
-          matched: null,
-          error: `Table ${digits} is wrong — please enter a valid table number at this hotel.`,
-        };
-      }
-      return { matched, error: '' };
+      return validateLiveTable(
+        digits,
+        outletTables,
+        outletTablesLoaded,
+        activeOutletId,
+      );
     },
-    [outletTables, outletTablesLoaded],
+    [activeOutletId, outletTables, outletTablesLoaded],
   );
 
   const cartPlateValidation = useMemo(

@@ -22,6 +22,9 @@ export interface OutletTableInfo {
   capacity?: number;
 }
 
+export const DEFAULT_DEV_OUTLET_ID = 'b0000000-0000-0000-0000-000000000001';
+export const DEFAULT_DEV_ORG_ID = 'a0000000-0000-0000-0000-000000000001';
+
 const GUEST_SESSION_STORAGE_KEY = 'dineflow_guest_session_v2';
 const CUSTOMER_AUTH_STORAGE_KEY = 'dineflow_customer_auth_v2';
 
@@ -201,20 +204,29 @@ export function clearCustomerAuth(): void {
   storage.removeItem(CUSTOMER_AUTH_STORAGE_KEY);
 }
 
-export function resolveTenantIds(session?: GuestSessionState | null): {
+export function resolveTenantIds(
+  session?: GuestSessionState | null,
+  options?: { fallbackToDev?: boolean },
+): {
   orgId: string;
   outletId: string;
 } {
   const active = session ?? loadGuestSession();
+  const envOrg = process.env['NEXT_PUBLIC_DEFAULT_ORG_ID'] || '';
+  const envOutlet = process.env['NEXT_PUBLIC_DEFAULT_OUTLET_ID'] || '';
+  const isDev = process.env.NODE_ENV === 'development';
+  const shouldFallbackDev = options?.fallbackToDev ?? isDev;
+
   return {
-    orgId: active?.orgId || process.env['NEXT_PUBLIC_DEFAULT_ORG_ID'] || '',
-    outletId: active?.outletId || process.env['NEXT_PUBLIC_DEFAULT_OUTLET_ID'] || '',
+    orgId: active?.orgId || envOrg || (shouldFallbackDev ? DEFAULT_DEV_ORG_ID : ''),
+    outletId: active?.outletId || envOutlet || (shouldFallbackDev ? DEFAULT_DEV_OUTLET_ID : ''),
   };
 }
 
 export async function fetchOutletTableDirectory(
   outletId?: string,
   slug?: string,
+  options?: { fallbackToDev?: boolean },
 ): Promise<{
   orgId: string;
   outletId: string;
@@ -222,7 +234,10 @@ export async function fetchOutletTableDirectory(
 } | null> {
   try {
     const qs = new URLSearchParams();
-    if (outletId && UUID_REGEX.test(outletId)) qs.set('outlet_id', outletId);
+    const isDev = process.env.NODE_ENV === 'development';
+    const shouldFallbackDev = options?.fallbackToDev ?? isDev;
+    const effectiveOutletId = outletId || (shouldFallbackDev ? DEFAULT_DEV_OUTLET_ID : undefined);
+    if (effectiveOutletId && UUID_REGEX.test(effectiveOutletId)) qs.set('outlet_id', effectiveOutletId);
     if (slug && slug.trim()) qs.set('slug', slug.trim());
     const queryStr = qs.toString();
     const url = queryStr ? `/api/v1/public/tables/directory?${queryStr}` : '/api/v1/public/tables/directory';
@@ -236,7 +251,7 @@ export async function fetchOutletTableDirectory(
     if (!data?.org_id || !Array.isArray(data.tables)) return null;
     return {
       orgId: data.org_id,
-      outletId: data.outlet_id || outletId || '',
+      outletId: data.outlet_id || effectiveOutletId || '',
       tables: data.tables,
     };
   } catch {
@@ -323,7 +338,9 @@ export async function openManualTableSession(
     outlet_id?: string;
     slug?: string;
   } = { table_number: tableNumber, pax };
-  if (outletId && UUID_REGEX.test(outletId)) payload.outlet_id = outletId;
+  const isDev = process.env.NODE_ENV === 'development' || process.env.NODE_ENV !== 'production';
+  const effectiveOutletId = outletId || (isDev ? DEFAULT_DEV_OUTLET_ID : undefined);
+  if (effectiveOutletId && UUID_REGEX.test(effectiveOutletId)) payload.outlet_id = effectiveOutletId;
   if (slug && slug.trim()) payload.slug = slug.trim();
   return openPublicSessionPost(
     '/api/v1/public/sessions/open-manual',

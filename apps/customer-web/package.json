@@ -8,7 +8,7 @@
     "start": "next start -p 3003",
     "typecheck": "tsc --noEmit",
     "lint": "node ../../packages/config/scripts/lint-workspace.mjs --package .",
-    "test": "node --test app/lib/guest-session.test.ts store/useOrderStore.test.ts components/modals/ItemCustomizerModal.test.ts components/menu/MenuGrid.test.ts components/orders/orders-utils.test.ts components/modals/CustomerAuthModal.test.ts components/layout/layout.test.ts"
+    "test": "node --test app/lib/guest-session.test.ts store/useOrderStore.test.ts components/modals/ItemCustomizerModal.test.ts components/modals/TableModal.test.ts components/menu/MenuGrid.test.ts components/orders/orders-utils.test.ts components/modals/CustomerAuthModal.test.ts components/layout/layout.test.ts"
   },
   "dependencies": {
     "@dineflow/contracts": "workspace:*",

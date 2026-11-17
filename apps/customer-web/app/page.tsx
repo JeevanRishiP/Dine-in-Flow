@@ -10,9 +10,12 @@ import { MenuGrid } from '../components/menu/MenuGrid';
 import { DEFAULT_CATEGORIES } from '../components/menu/menu-constants';
 import { OrdersHistoryView } from '../components/orders/OrdersHistoryView';
 import { CustomerAuthModal } from '../components/modals/CustomerAuthModal';
+import { TableModal, getLiveTableValidation as validateLiveTable } from '../components/modals/TableModal';
 import { TopNavBar } from '../components/layout/TopNavBar';
 import { OrderTrackerBanner } from '../components/layout/OrderTrackerBanner';
 import {
+  DEFAULT_DEV_OUTLET_ID,
+  DEFAULT_DEV_ORG_ID,
   buildSignedQrTokenFromSearch,
   extractUrlTableAndOutlet,
   fetchOutletTableDirectory,
@@ -1825,7 +1828,9 @@ export default function CustomerDineInPage() {
     setTableNumberInput((prev) => prev || (selectedTable !== '--' ? sanitizeTableDigits(selectedTable) : ''));
     setIsTableModalOpen(true);
     const tenant = resolveTenantIds(loadGuestSession());
-    const targetOutlet = activeOutletId || tenant.outletId || undefined;
+    const isDev = process.env.NODE_ENV === 'development' || process.env.NODE_ENV !== 'production';
+    const devFallbackOutlet = isDev ? DEFAULT_DEV_OUTLET_ID : undefined;
+    const targetOutlet = activeOutletId || tenant.outletId || devFallbackOutlet || undefined;
     if (!outletTablesLoaded || outletTables.length === 0) {
       void loadOutletTablesForTenant(targetOutlet, activeSlug);
     }
@@ -1846,7 +1851,9 @@ export default function CustomerDineInPage() {
       setIsTopTableClosing(false);
       setTableNumberInput((prev) => prev || (selectedTable !== '--' ? sanitizeTableDigits(selectedTable) : ''));
       const tenant = resolveTenantIds(loadGuestSession());
-      const targetOutlet = activeOutletId || tenant.outletId || undefined;
+      const isDev = process.env.NODE_ENV === 'development' || process.env.NODE_ENV !== 'production';
+      const devFallbackOutlet = isDev ? DEFAULT_DEV_OUTLET_ID : undefined;
+      const targetOutlet = activeOutletId || tenant.outletId || devFallbackOutlet || undefined;
       if (!outletTablesLoaded || outletTables.length === 0) {
         void loadOutletTablesForTenant(targetOutlet, activeSlug);
       }
@@ -1866,21 +1873,17 @@ export default function CustomerDineInPage() {
 
   const getLiveTableValidation = useCallback(
     (digits: string): { matched: OutletTableInfo | null; error: string } => {
-      if (!digits) return { matched: null, error: '' };
-      const matched = matchHotelTable(digits, outletTables);
-      if (!outletTablesLoaded) return { matched, error: '' };
-      if (outletTables.length === 0) {
-        return { matched: null, error: 'Table directory unavailable for this hotel outlet.' };
-      }
-      if (!matched) {
-        return {
-          matched: null,
-          error: `Table ${digits} is wrong — please enter a valid table number at this hotel.`,
-        };
-      }
-      return { matched, error: '' };
+      return validateLiveTable(
+        digits,
+        outletTables,
+        outletTablesLoaded,
+        activeOutletId,
+        (devOutletId) => {
+          void loadOutletTablesForTenant(devOutletId, activeSlug);
+        },
+      );
     },
-    [outletTables, outletTablesLoaded],
+    [activeOutletId, activeSlug, loadOutletTablesForTenant, outletTables, outletTablesLoaded],
   );
 
   const topTableValidation = useMemo(
@@ -1974,7 +1977,9 @@ export default function CustomerDineInPage() {
       const urlParams = new URLSearchParams(window.location.search);
       const { signedQrToken, tableNumberParam, outletIdParam, slugParam } = extractUrlTableAndOutlet(urlParams);
       const tenant = resolveTenantIds(loadGuestSession());
-      const targetOutletId = outletIdParam || tenant.outletId || undefined;
+      const isDev = process.env.NODE_ENV === 'development' || process.env.NODE_ENV !== 'production';
+      const devFallbackOutlet = isDev ? DEFAULT_DEV_OUTLET_ID : undefined;
+      const targetOutletId = outletIdParam || tenant.outletId || devFallbackOutlet || undefined;
       if (slugParam) setActiveSlug(slugParam);
 
       // 1. Sync Table Selection immediately when URL params are parsed
@@ -1985,8 +1990,9 @@ export default function CustomerDineInPage() {
       if (targetOutletId) {
         useOrderStore.getState().setSessionDetails({
           outletId: targetOutletId,
-          orgId: tenant.orgId,
+          orgId: tenant.orgId || (isDev ? DEFAULT_DEV_ORG_ID : ''),
         });
+        setActiveOutletId(targetOutletId);
       }
       void loadOutletTablesForTenant(targetOutletId, slugParam || undefined);
 
@@ -6118,207 +6124,19 @@ export default function CustomerDineInPage() {
 
 
       {/* Top-Quarter Table Number Slide-Down Drawer */}
-      {isTableModalOpen && (
-        <div
-          className={`top-table-overlay ${isTopTableClosing ? 'closing' : ''}`}
-          onClick={closeTopTableDrawer}
-        >
-          <div
-            className={`top-table-sheet ${isTopTableClosing ? 'closing-to-badge' : ''}`}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
-              <div>
-                <h3 style={{ fontSize: '1.05rem', fontWeight: 800, color: '#fff', margin: 0 }}>
-                  🪑 Select Your Table Number
-                </h3>
-                <p style={{ fontSize: '0.78rem', color: '#94a3b8', margin: '3px 0 0' }}>
-                  {isTableVerified
-                    ? `Currently seated at Table ${selectedTable}. Type a new table number below or tap outside to close.`
-                    : 'Enter the numeric table number printed on your table (digits only).'}
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={closeTopTableDrawer}
-                style={{ color: '#94a3b8', fontSize: '1.1rem', padding: '4px 8px', cursor: 'pointer' }}
-                aria-label="Close table drawer"
-              >
-                ✕
-              </button>
-            </div>
-
-            <form
-              onSubmit={async (e) => {
-                e.preventDefault();
-                if (!topTableValidation.matched || tableSubmitLoading) return;
-                const targetOutlet = activeOutletId || resolveTenantIds(loadGuestSession()).outletId || undefined;
-                setTableSubmitLoading(true);
-                try {
-                  const session = await establishManualTableSession(
-                    targetOutlet,
-                    topTableValidation.matched.table_number,
-                    tablePax,
-                  );
-                  if (session) {
-                    setTableNumberInput('');
-                    closeTopTableDrawer();
-                    showToast(`Table ${session.tableNumber} confirmed!`);
-                  }
-                } finally {
-                  setTableSubmitLoading(false);
-                }
-              }}
-              style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}
-            >
-              <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
-                <input
-                  type="text"
-                  inputMode="numeric"
-                  pattern="[0-9]*"
-                  autoFocus
-                  placeholder="Enter table digits (e.g. 4)"
-                  value={tableNumberInput}
-                  onChange={(e) => setTableNumberInput(sanitizeTableDigits(e.target.value))}
-                  style={{
-                    flex: 1,
-                    padding: '11px 14px',
-                    borderRadius: '10px',
-                    background: 'rgba(255, 255, 255, 0.07)',
-                    border: topTableValidation.error
-                      ? '1.5px solid #ef4444'
-                      : topTableValidation.matched
-                      ? '1.5px solid #10b981'
-                      : '1px solid rgba(255, 255, 255, 0.16)',
-                    color: '#fff',
-                    fontSize: '1rem',
-                    fontWeight: 700,
-                    letterSpacing: '0.04em',
-                  }}
-                />
-                <button
-                  type="submit"
-                  className="accordion-add-action-btn"
-                  disabled={!topTableValidation.matched || tableSubmitLoading}
-                  style={{
-                    width: 'auto',
-                    minWidth: '116px',
-                    margin: 0,
-                    padding: '11px 16px',
-                    opacity: !topTableValidation.matched || tableSubmitLoading ? 0.45 : 1,
-                    cursor: !topTableValidation.matched || tableSubmitLoading ? 'not-allowed' : 'pointer',
-                  }}
-                >
-                  {tableSubmitLoading ? 'Saving...' : 'Confirm ✓'}
-                </button>
-              </div>
-
-              {topTableValidation.error && (
-                <div style={{ color: '#f87171', fontSize: '0.79rem', fontWeight: 600 }}>
-                  ⚠️ {topTableValidation.error}
-                </div>
-              )}
-
-              {topTableValidation.matched && (
-                <div style={{ color: '#34d399', fontSize: '0.79rem', fontWeight: 600 }}>
-                  ✓ Verified hotel table: Table {topTableValidation.matched.table_number}
-                  {topTableValidation.matched.section ? ` (${topTableValidation.matched.section})` : ''}
-                </div>
-              )}
-
-              {!outletTablesLoaded && (
-                <div style={{ color: '#94a3b8', fontSize: '0.75rem' }}>
-                  Loading hotel tables...
-                </div>
-              )}
-
-              {outletTablesLoaded && outletTables.length === 0 && (
-                <div style={{ color: '#fbbf24', fontSize: '0.75rem' }}>
-                  Tap your table&apos;s NFC tag / QR code, or open with <code>?outlet=&lt;id&gt;</code>, to load hotel tables.
-                </div>
-              )}
-            </form>
-
-            <details style={{ marginTop: '10px', fontSize: '0.75rem', color: '#94a3b8' }}>
-              <summary style={{ cursor: 'pointer', userSelect: 'none' }}>Or paste a signed QR token / link</summary>
-              <form
-                onSubmit={async (e) => {
-                  e.preventDefault();
-                  const raw = manualQrInput.trim();
-                  if (!raw) return;
-                  let parsedToken = raw;
-                  if (raw.includes('?')) {
-                    try {
-                      const url = raw.startsWith('http') ? new URL(raw) : new URL(raw, window.location.origin);
-                      const extracted = buildSignedQrTokenFromSearch(url.searchParams);
-                      if (extracted) parsedToken = extracted;
-                    } catch {
-                      // keep raw
-                    }
-                  }
-                  const session = await establishSignedTableSession(parsedToken, tablePax);
-                  if (session) {
-                    setManualQrInput('');
-                    closeTopTableDrawer();
-                    showToast(`Verified Table ${session.tableNumber || 'session'}!`);
-                  }
-                }}
-                style={{ display: 'flex', gap: '8px', marginTop: '8px' }}
-              >
-                <input
-                  type="text"
-                  placeholder="Paste signed QR link or token"
-                  value={manualQrInput}
-                  onChange={(e) => setManualQrInput(e.target.value)}
-                  style={{
-                    flex: 1,
-                    padding: '7px 10px',
-                    borderRadius: '8px',
-                    background: 'rgba(255,255,255,0.06)',
-                    border: '1px solid rgba(255,255,255,0.14)',
-                    color: '#fff',
-                    fontSize: '0.78rem',
-                  }}
-                />
-                <button
-                  type="submit"
-                  className="filter-clear-btn"
-                  style={{ padding: '7px 12px', fontSize: '0.76rem' }}
-                >
-                  Verify QR
-                </button>
-              </form>
-            </details>
-
-            {isTableVerified && (
-              <div style={{ marginTop: '10px', display: 'flex', justifyContent: 'flex-end' }}>
-                <button
-                  type="button"
-                  onClick={() => {
-                    clearGuestSession();
-                    setIsTableVerified(false);
-                    setActiveSessionId('');
-                    setActiveTableId('');
-                    setSelectedTable('--');
-                    setTableNumberInput('');
-                    closeTopTableDrawer();
-                  }}
-                  style={{
-                    background: 'transparent',
-                    border: 'none',
-                    color: '#f87171',
-                    fontSize: '0.75rem',
-                    fontWeight: 600,
-                    cursor: 'pointer',
-                  }}
-                >
-                  Clear Current Table Session
-                </button>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
+      <TableModal
+        isOpen={isTableModalOpen}
+        onClose={closeTopTableDrawer}
+        outletTables={outletTables}
+        outletTablesLoaded={outletTablesLoaded}
+        activeOutletId={activeOutletId}
+        onLoadTables={loadOutletTablesForTenant}
+        showToast={showToast}
+        activeSlug={activeSlug}
+        onTableConfirmed={(session) => {
+          void fetchSessionOrders(session.sessionId);
+        }}
+      />
 
 
       {/* Customer Profile Drawer */}
