@@ -32,10 +32,12 @@ import {
   assertCustomerAccessScope,
   type CustomerAccessScope,
 } from '../../common/utils/ownership.utils.js';
+import { KitchenSchedulerService } from '../orders/kitchen-scheduler.service.js';
 
 @Injectable()
 export class PaymentsService {
   private readonly logger = new Logger(PaymentsService.name);
+  private readonly kitchenScheduler: KitchenSchedulerService = new KitchenSchedulerService();
 
   // ─── Provider routing ──────────────────────────────────────────────────────
   private resolveProvider(method: PaymentMethod): PaymentProvider {
@@ -192,37 +194,85 @@ export class PaymentsService {
     actorType: 'STAFF' | 'CUSTOMER',
     db: PoolClient,
   ) {
+    if (
+      actorType !== 'STAFF' ||
+      !actorId ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(actorId)
+    ) {
+      throw domainError(
+        ErrorCode.FORBIDDEN,
+        'Authenticated staff session required for cash payment approval.',
+        403,
+      );
+    }
+
+    const { rows: ordRows } = await db.query<{ outlet_id: string }>(
+      `SELECT outlet_id FROM orders WHERE id = $1 AND org_id = $2`,
+      [orderId, orgId],
+    );
+    const outletId = ordRows[0]?.outlet_id;
+
+    const paymentMethodRecord = dto.method === 'CASH' ? 'CASH' : dto.method;
     const { rows } = await db.query<{ id: string }>(
       `INSERT INTO payments (org_id, order_id, idempotency_key, provider, method,
                              amount_paise, currency, status, settled_at, raw_response)
-       VALUES ($1, $2, $3, $4, $5, $6, 'INR', 'PAID', now(), '{}')
+       VALUES ($1, $2, $3, 'staff', $4, $5, 'INR', 'PAID', now(), '{}')
        RETURNING id`,
-      [orgId, orderId, dto.idempotency_key, 'staff', dto.method, amountPaise],
+      [orgId, orderId, dto.idempotency_key, paymentMethodRecord, amountPaise],
     );
     const paymentId = rows[0]!.id;
 
     await db.query(
-      `UPDATE orders SET status = 'CONFIRMED', updated_at = now() WHERE id = $1 AND org_id = $2`,
+      `UPDATE orders SET status = 'CONFIRMED', payment_status = 'PAID', paid_at = now(), payment_method = 'CASH_APPROVED', updated_at = now() WHERE id = $1 AND org_id = $2`,
       [orderId, orgId],
     );
 
-    const validActorUuid =
-      actorId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(actorId)
-        ? actorId
-        : null;
+    // ── Append-only cash approval audit trail (AGENTS §2 rule 6) ─────────────
+    await db.query(
+      `INSERT INTO audit_logs (org_id, actor_id, actor_type, action, resource, resource_id, metadata)
+       VALUES ($1, $2, 'staff', 'CASH_PAYMENT_APPROVED', 'order', $3, $4)`,
+      [
+        orgId,
+        actorId,
+        orderId,
+        JSON.stringify({
+          notes: dto.notes ?? null,
+          amount_paise: amountPaise,
+          outlet_id: outletId ?? null,
+          order_id: orderId,
+          staff_id: actorId,
+          payment_id: paymentId,
+        }),
+      ],
+    );
+
+    // Run Smart Kitchen Scheduler
+    await this.kitchenScheduler.scheduleOrderItemsInTx(db, orgId, orderId);
 
     await db.query(
       `INSERT INTO order_events (org_id, order_id, event_type, actor_type, actor_id, payload)
        VALUES ($1, $2, 'PAYMENT_CONFIRMED_STAFF', $3, $4, $5)`,
-      [orgId, orderId, actorType, validActorUuid,
-       JSON.stringify({ payment_id: paymentId, method: dto.method, amount_paise: amountPaise })],
+      [
+        orgId,
+        orderId,
+        actorType,
+        actorId,
+        JSON.stringify({ payment_id: paymentId, method: 'CASH_APPROVED', amount_paise: amountPaise, notes: dto.notes ?? null }),
+      ],
+    );
+
+    // Emit outbox event to notify KDS only after transaction commits
+    await db.query(
+      `INSERT INTO outbox_events (org_id, aggregate, aggregate_id, event_type, payload)
+       VALUES ($1, 'order', $2, 'ORDER_PAID', $3)`,
+      [orgId, orderId, JSON.stringify({ payment_id: paymentId, method: 'CASH_APPROVED', amount_paise: amountPaise })],
     );
 
     // Gapless GST invoice generation on staff payment confirmation
     await this.generateGstInvoiceInTx(db, orgId, orderId, paymentId);
 
-    this.logger.log(`Staff-confirmed payment: id=${paymentId} method=${dto.method}`);
-    return { id: paymentId, status: 'PAID', method: dto.method };
+    this.logger.log(`Staff-confirmed cash payment: id=${paymentId} staff=${actorId}`);
+    return { id: paymentId, status: 'PAID', method: 'CASH_APPROVED' };
   }
 
   /**
@@ -495,28 +545,86 @@ export class PaymentsService {
       );
 
       if (event.status === 'PAID') {
-        await db.query(
-          `UPDATE orders SET status = 'CONFIRMED', updated_at = now()
-           WHERE id = $1 AND org_id = $2 AND status NOT IN ('CANCELLED', 'SERVED', 'BILLED')`,
+        // ── 2c. Lock order row with FOR UPDATE to prevent race against expiry job ──
+        const { rows: orderRows } = await db.query<{
+          id: string;
+          org_id: string;
+          outlet_id: string;
+          status: string;
+          payment_status: string;
+        }>(
+          `SELECT id, org_id, outlet_id, status, payment_status
+           FROM orders
+           WHERE id = $1 AND org_id = $2
+           FOR UPDATE`,
           [lockedPayment.order_id, lockedPayment.org_id],
         );
-        await db.query(
-          `INSERT INTO outbox_events (org_id, aggregate, aggregate_id, event_type, payload)
-           VALUES ($1, 'payment', $2, 'PAYMENT_CAPTURED', $3)`,
-          [
-            lockedPayment.org_id,
-            lockedPayment.id,
-            JSON.stringify({ order_id: lockedPayment.order_id, amount_paise: event.amountPaise }),
-          ],
-        );
+        const order = orderRows[0];
 
-        // 2d. Gapless Legal GST Invoice Generation inside transaction
-        await this.generateGstInvoiceInTx(
-          db,
-          lockedPayment.org_id,
-          lockedPayment.order_id,
-          lockedPayment.id,
-        );
+        if (order && ['PAYMENT_EXPIRED', 'PAYMENT_CANCELLED', 'CANCELLED'].includes(order.status)) {
+          // Late Webhook vs. Order Expiry Race:
+          // Money was genuinely received, so payments.status remains PAID.
+          // BUT: DO NOT promote order to CONFIRMED, and DO NOT fire kitchen items.
+          await db.query(
+            `INSERT INTO payment_reconciliation_flags
+               (org_id, outlet_id, order_id, payment_id, reason, amount_paise, status)
+             VALUES ($1, $2, $3, $4, 'LATE_WEBHOOK_AFTER_EXPIRY', $5, 'NEEDS_REFUND')`,
+            [
+              lockedPayment.org_id,
+              order.outlet_id,
+              order.id,
+              lockedPayment.id,
+              event.amountPaise,
+            ],
+          );
+
+          await db.query(
+            `INSERT INTO outbox_events (org_id, aggregate, aggregate_id, event_type, payload)
+             VALUES ($1, 'payment', $2, 'payment.needs_manual_refund', $3)`,
+            [
+              lockedPayment.org_id,
+              lockedPayment.id,
+              JSON.stringify({
+                order_id: order.id,
+                payment_id: lockedPayment.id,
+                amount_paise: event.amountPaise,
+                reason: 'LATE_WEBHOOK_AFTER_EXPIRY',
+                order_status: order.status,
+              }),
+            ],
+          );
+
+          this.logger.warn(
+            `[LATE WEBHOOK] Order ${order.id} is ${order.status}. Flagged for manual refund (flag=NEEDS_REFUND)`,
+          );
+        } else {
+          await db.query(
+            `UPDATE orders SET status = 'CONFIRMED', payment_status = 'PAID', paid_at = now(), payment_method = 'UPI', updated_at = now()
+             WHERE id = $1 AND org_id = $2 AND status NOT IN ('CANCELLED', 'SERVED', 'BILLED')`,
+            [lockedPayment.order_id, lockedPayment.org_id],
+          );
+
+          // Run Smart Kitchen Scheduler
+          await this.kitchenScheduler.scheduleOrderItemsInTx(db, lockedPayment.org_id, lockedPayment.order_id);
+
+          await db.query(
+            `INSERT INTO outbox_events (org_id, aggregate, aggregate_id, event_type, payload)
+             VALUES ($1, 'payment', $2, 'PAYMENT_CAPTURED', $3)`,
+            [
+              lockedPayment.org_id,
+              lockedPayment.id,
+              JSON.stringify({ order_id: lockedPayment.order_id, amount_paise: event.amountPaise }),
+            ],
+          );
+
+          // 2d. Gapless Legal GST Invoice Generation inside transaction
+          await this.generateGstInvoiceInTx(
+            db,
+            lockedPayment.org_id,
+            lockedPayment.order_id,
+            lockedPayment.id,
+          );
+        }
       }
 
       this.logger.log(`Webhook processed: payment=${lockedPayment.id} status=${newStatus}`);
@@ -835,9 +943,15 @@ export class PaymentsService {
             );
             if (payment.status === 'PAID') {
               await db.query(
-                `UPDATE orders SET status = 'CONFIRMED', updated_at = now()
+                `UPDATE orders SET status = 'CONFIRMED', payment_status = 'PAID', paid_at = now(), payment_method = 'UPI', updated_at = now()
                  WHERE id = $1 AND org_id = $2 AND status NOT IN ('CANCELLED', 'SERVED', 'BILLED')`,
                 [row.order_id, row.org_id],
+              );
+              await this.kitchenScheduler.scheduleOrderItemsInTx(db, row.org_id, row.order_id);
+              await db.query(
+                `INSERT INTO outbox_events (org_id, aggregate, aggregate_id, event_type, payload)
+                 VALUES ($1, 'order', $2, 'ORDER_PAID', $3)`,
+                [row.org_id, row.order_id, JSON.stringify({ order_id: row.order_id, payment_id: row.id })],
               );
             }
           });
@@ -871,8 +985,14 @@ export class PaymentsService {
         [paymentId, org_id],
       );
       await db.query(
-        `UPDATE orders SET status = 'CONFIRMED', updated_at = now() WHERE id = $1 AND org_id = $2`,
+        `UPDATE orders SET status = 'CONFIRMED', payment_status = 'PAID', paid_at = now(), payment_method = 'UPI', updated_at = now() WHERE id = $1 AND org_id = $2`,
         [order_id, org_id],
+      );
+      await this.kitchenScheduler.scheduleOrderItemsInTx(db, org_id, order_id);
+      await db.query(
+        `INSERT INTO outbox_events (org_id, aggregate, aggregate_id, event_type, payload)
+         VALUES ($1, 'order', $2, 'ORDER_PAID', $3)`,
+        [org_id, order_id, JSON.stringify({ order_id, payment_id: paymentId, simulated: true })],
       );
       await db.query(
         `INSERT INTO order_events (org_id, order_id, event_type, actor_type, actor_id, payload)
@@ -943,14 +1063,68 @@ export class PaymentsService {
               `UPDATE payments SET status = 'PAID', settled_at = now(), updated_at = now() WHERE id = $1 AND org_id = $2`,
               [payment.id, payment.org_id],
             );
-            await db.query(
-              `UPDATE orders SET status = 'CONFIRMED', updated_at = now() WHERE id = $1 AND org_id = $2 AND status NOT IN ('CANCELLED', 'SERVED', 'BILLED')`,
+            // Lock the order row with FOR UPDATE
+            const { rows: orderRows } = await db.query<{
+              id: string;
+              org_id: string;
+              outlet_id: string;
+              status: string;
+              payment_status: string;
+            }>(
+              `SELECT id, org_id, outlet_id, status, payment_status
+               FROM orders
+               WHERE id = $1 AND org_id = $2
+               FOR UPDATE`,
               [payment.order_id, payment.org_id],
             );
+            const order = orderRows[0];
+
+            if (order && ['PAYMENT_EXPIRED', 'PAYMENT_CANCELLED', 'CANCELLED'].includes(order.status)) {
+              await db.query(
+                `INSERT INTO payment_reconciliation_flags
+                   (org_id, outlet_id, order_id, payment_id, reason, amount_paise, status)
+                 VALUES ($1, $2, $3, $4, 'LATE_WEBHOOK_AFTER_EXPIRY', $5, 'NEEDS_REFUND')`,
+                [
+                  payment.org_id,
+                  order.outlet_id,
+                  order.id,
+                  payment.id,
+                  payment.amount_paise,
+                ],
+              );
+
+              await db.query(
+                `INSERT INTO outbox_events (org_id, aggregate, aggregate_id, event_type, payload)
+                 VALUES ($1, 'payment', $2, 'payment.needs_manual_refund', $3)`,
+                [
+                  payment.org_id,
+                  payment.id,
+                  JSON.stringify({
+                    order_id: order.id,
+                    payment_id: payment.id,
+                    amount_paise: payment.amount_paise,
+                    reason: 'LATE_WEBHOOK_AFTER_EXPIRY',
+                    order_status: order.status,
+                  }),
+                ],
+              );
+              return { success: true, paymentId: payment.id, status: 'PAID', settled: true, needsRefund: true };
+            }
+
+            await db.query(
+              `UPDATE orders SET status = 'CONFIRMED', payment_status = 'PAID', paid_at = now(), payment_method = 'UPI', updated_at = now() WHERE id = $1 AND org_id = $2 AND status NOT IN ('CANCELLED', 'SERVED', 'BILLED')`,
+              [payment.order_id, payment.org_id],
+            );
+            await this.kitchenScheduler.scheduleOrderItemsInTx(db, payment.org_id, payment.order_id);
             await db.query(
               `INSERT INTO order_events (org_id, order_id, event_type, actor_type, actor_id, payload)
                VALUES ($1, $2, 'PAYMENT_CAPTURED', 'CUSTOMER', null, $3)`,
               [payment.org_id, payment.order_id, JSON.stringify({ payment_id: payment.id, verified: true })],
+            );
+            await db.query(
+              `INSERT INTO outbox_events (org_id, aggregate, aggregate_id, event_type, payload)
+               VALUES ($1, 'order', $2, 'ORDER_PAID', $3)`,
+              [payment.org_id, payment.order_id, JSON.stringify({ order_id: payment.order_id, payment_id: payment.id })],
             );
             await this.generateGstInvoiceInTx(db, payment.org_id, payment.order_id, payment.id);
             return { success: true, paymentId: payment.id, status: 'PAID', settled: true };
@@ -1036,6 +1210,204 @@ export class PaymentsService {
     );
     if (!rows[0]) throw domainError(ErrorCode.NOT_FOUND, 'No payment found for this order.', 404);
     return this.simulatePaymentSuccess(rows[0].id);
+  }
+
+  // ─── Reconciliation Flags (Late Webhooks) ─────────────────────────────────
+
+  async listReconciliationFlags(orgId: string, outletId?: string, status?: string) {
+    if (!orgId) throw domainError(ErrorCode.UNAUTHORIZED, 'Tenant context required.', 401);
+    return withTenantContextRaw(orgId, async (db) => {
+      const conditions: string[] = ['prf.org_id = $1'];
+      const params: unknown[] = [orgId];
+      if (outletId) {
+        params.push(outletId);
+        conditions.push(`prf.outlet_id = $${params.length}`);
+      }
+      if (status) {
+        params.push(status);
+        conditions.push(`prf.status = $${params.length}`);
+      }
+      const { rows } = await db.query(
+        `SELECT prf.id, prf.org_id, prf.outlet_id, prf.order_id, prf.payment_id,
+                prf.reason, prf.amount_paise, prf.status, prf.created_at,
+                prf.resolved_at, prf.resolved_by_staff_id,
+                o.order_number, o.status AS order_status, o.idempotency_key,
+                p.provider, p.method AS payment_method,
+                su.display_name AS resolved_by_name
+         FROM payment_reconciliation_flags prf
+         JOIN orders o ON o.id = prf.order_id AND o.org_id = prf.org_id
+         JOIN payments p ON p.id = prf.payment_id AND p.org_id = prf.org_id
+         LEFT JOIN staff_users su ON su.id = prf.resolved_by_staff_id AND su.org_id = prf.org_id
+         WHERE ${conditions.join(' AND ')}
+         ORDER BY prf.created_at DESC`,
+        params,
+      );
+      return rows;
+    });
+  }
+
+  async resolveReconciliationFlag(orgId: string, flagId: string, staffId: string) {
+    if (!orgId) throw domainError(ErrorCode.UNAUTHORIZED, 'Tenant context required.', 401);
+    return withTenantContextRaw(orgId, async (db) => {
+      const { rows } = await db.query(
+        `UPDATE payment_reconciliation_flags
+         SET status = 'RESOLVED',
+             resolved_at = now(),
+             resolved_by_staff_id = $1
+         WHERE id = $2 AND org_id = $3
+         RETURNING *`,
+        [staffId, flagId, orgId],
+      );
+      if (!rows[0]) throw domainError(ErrorCode.NOT_FOUND, 'Reconciliation flag not found.', 404);
+      return rows[0];
+    });
+  }
+
+  // ─── Shift Drawer Cash Reconciliation Report ───────────────────────────────
+
+  async getCashReconciliation(orgId: string, outletId?: string, dateStr?: string) {
+    if (!orgId) throw domainError(ErrorCode.UNAUTHORIZED, 'Tenant context required.', 401);
+    return withTenantContextRaw(orgId, async (db) => {
+      const targetDate = dateStr ? new Date(dateStr) : new Date();
+      const startOfDay = new Date(Date.UTC(targetDate.getUTCFullYear(), targetDate.getUTCMonth(), targetDate.getUTCDate(), 0, 0, 0, 0));
+      const endOfDay = new Date(Date.UTC(targetDate.getUTCFullYear(), targetDate.getUTCMonth(), targetDate.getUTCDate(), 23, 59, 59, 999));
+
+      const conditions = [
+        `al.org_id = $1`,
+        `al.action = 'CASH_PAYMENT_APPROVED'`,
+        `al.created_at >= $2`,
+        `al.created_at <= $3`,
+      ];
+      const params: unknown[] = [orgId, startOfDay, endOfDay];
+
+      if (outletId) {
+        params.push(outletId);
+        conditions.push(`al.metadata->>'outlet_id' = $${params.length}`);
+      }
+
+      const { rows } = await db.query<{
+        staff_id: string;
+        staff_name: string | null;
+        total_cash_paise: string;
+        approval_count: string;
+      }>(
+        `SELECT al.actor_id AS staff_id,
+                su.display_name AS staff_name,
+                COALESCE(SUM((al.metadata->>'amount_paise')::bigint), 0)::text AS total_cash_paise,
+                COUNT(al.id)::text AS approval_count
+         FROM audit_logs al
+         LEFT JOIN staff_users su ON su.id = al.actor_id AND su.org_id = al.org_id
+         WHERE ${conditions.join(' AND ')}
+         GROUP BY al.actor_id, su.display_name
+         ORDER BY total_cash_paise DESC`,
+        params,
+      );
+
+      let grandTotalPaise = 0n;
+      const entries = rows.map((r) => {
+        const paise = BigInt(r.total_cash_paise);
+        grandTotalPaise += paise;
+        return {
+          staffId: r.staff_id,
+          staffName: r.staff_name || 'Staff User',
+          totalCashPaise: Number(paise),
+          count: parseInt(r.approval_count, 10),
+        };
+      });
+
+      return {
+        date: targetDate.toISOString().slice(0, 10),
+        outletId: outletId ?? null,
+        entries,
+        grandTotalCashPaise: Number(grandTotalPaise),
+      };
+    });
+  }
+
+  async listPayments(orgId: string, outletId?: string, status?: string, limit = 50) {
+    if (!orgId) throw domainError(ErrorCode.UNAUTHORIZED, 'Tenant context required.', 401);
+    return withTenantContextRaw(orgId, async (db) => {
+      const conditions: string[] = ['p.org_id = $1'];
+      const params: unknown[] = [orgId];
+      if (outletId) {
+        params.push(outletId);
+        conditions.push(`o.outlet_id = $${params.length}`);
+      }
+      if (status) {
+        params.push(status);
+        conditions.push(`p.status = $${params.length}`);
+      }
+      params.push(limit);
+      const { rows } = await db.query(
+        `SELECT p.id, p.org_id, p.order_id, p.provider, p.provider_order_id,
+                p.provider_payment_id, p.method, p.amount_paise, p.currency,
+                p.status, p.fee_paise, p.settled_at, p.notes, p.created_at, p.updated_at,
+                o.order_number, o.status AS order_status, o.outlet_id,
+                t.table_number,
+                c.phone_e164 AS customer_phone, c.name AS customer_name
+         FROM payments p
+         JOIN orders o ON o.id = p.order_id AND o.org_id = p.org_id
+         LEFT JOIN tables t ON t.id = o.table_id AND t.org_id = o.org_id
+         LEFT JOIN customers c ON c.id = o.customer_id AND c.org_id = o.org_id
+         WHERE ${conditions.join(' AND ')}
+         ORDER BY p.created_at DESC
+         LIMIT $${params.length}`,
+        params,
+      );
+      return rows;
+    });
+  }
+
+  async listInvoices(orgId: string, outletId?: string, limit = 50) {
+    if (!orgId) throw domainError(ErrorCode.UNAUTHORIZED, 'Tenant context required.', 401);
+    return withTenantContextRaw(orgId, async (db) => {
+      const conditions: string[] = ['i.org_id = $1'];
+      const params: unknown[] = [orgId];
+      if (outletId) {
+        params.push(outletId);
+        conditions.push(`i.outlet_id = $${params.length}`);
+      }
+      params.push(limit);
+      const { rows } = await db.query(
+        `SELECT i.id, i.org_id, i.outlet_id, i.order_id, i.payment_id,
+                i.invoice_no, i.fiscal_year, i.invoice_ref, i.issued_at,
+                i.buyer_name, i.buyer_gstin, i.seller_gstin, i.tax_breakup,
+                i.subtotal_paise, i.tax_paise, i.discount_paise, i.total_paise,
+                i.currency, i.created_at,
+                o.order_number, t.table_number, p.method AS payment_method
+         FROM invoices i
+         JOIN orders o ON o.id = i.order_id AND o.org_id = i.org_id
+         LEFT JOIN tables t ON t.id = o.table_id AND t.org_id = o.org_id
+         LEFT JOIN payments p ON p.id = i.payment_id AND p.org_id = i.org_id
+         WHERE ${conditions.join(' AND ')}
+         ORDER BY i.issued_at DESC
+         LIMIT $${params.length}`,
+        params,
+      );
+      return rows;
+    });
+  }
+
+  async getInvoice(orgId: string, invoiceId: string) {
+    if (!orgId) throw domainError(ErrorCode.UNAUTHORIZED, 'Tenant context required.', 401);
+    return withTenantContextRaw(orgId, async (db) => {
+      const { rows } = await db.query(
+        `SELECT i.id, i.org_id, i.outlet_id, i.order_id, i.payment_id,
+                i.invoice_no, i.fiscal_year, i.invoice_ref, i.issued_at,
+                i.buyer_name, i.buyer_gstin, i.seller_gstin, i.tax_breakup,
+                i.subtotal_paise, i.tax_paise, i.discount_paise, i.total_paise,
+                i.currency, i.created_at,
+                o.order_number, t.table_number, p.method AS payment_method
+         FROM invoices i
+         JOIN orders o ON o.id = i.order_id AND o.org_id = i.org_id
+         LEFT JOIN tables t ON t.id = o.table_id AND t.org_id = o.org_id
+         LEFT JOIN payments p ON p.id = i.payment_id AND p.org_id = i.org_id
+         WHERE i.org_id = $1 AND i.id = $2`,
+        [orgId, invoiceId],
+      );
+      if (!rows[0]) throw domainError(ErrorCode.NOT_FOUND, 'Invoice not found.', 404);
+      return rows[0];
+    });
   }
 }
 
