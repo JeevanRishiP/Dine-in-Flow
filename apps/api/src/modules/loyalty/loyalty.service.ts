@@ -522,15 +522,16 @@ export class LoyaltyService {
       try {
         const res = await client.query<{ id: string }>(
           `INSERT INTO coupons (
-             org_id, code, type, value, max_discount_paise, min_order_paise,
+             org_id, code, type, value, discount_value, max_discount_paise, min_order_paise,
              audience, valid_from, valid_to, usage_limit_total, usage_limit_per_customer,
              stackable, outlets, is_active
-           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
            RETURNING id`,
           [
             orgId,
             dto.code,
             dto.type,
+            dto.value,
             dto.value,
             dto.maxDiscountPaise ?? null,
             dto.minOrderPaise,
@@ -554,18 +555,85 @@ export class LoyaltyService {
     });
   }
 
-  async listCoupons(orgId: string) {
+  async listCoupons(orgId: string, outletId?: string) {
     return withTenantContextRaw(orgId, async (client) => {
+      const conditions: string[] = ['c.org_id = $1'];
+      const params: unknown[] = [orgId];
+      if (outletId) {
+        params.push(outletId);
+        conditions.push(`(c.outlets = '{}' OR $${params.length} = ANY(c.outlets) OR c.outlet_id = $${params.length})`);
+      }
       const res = await client.query(
-        `SELECT id, code, type, value, max_discount_paise, min_order_paise, audience,
-                valid_from, valid_to, usage_limit_total, usage_limit_per_customer,
-                stackable, outlets, is_active, created_at
-         FROM coupons
-         WHERE org_id = $1
-         ORDER BY created_at DESC`,
-        [orgId],
+        `SELECT c.id, c.code, c.type, c.value,
+                COALESCE(c.discount_value, c.value) AS discount_value,
+                c.max_discount_paise, c.min_order_paise, c.audience,
+                c.valid_from, c.valid_to, c.usage_limit_total, c.usage_limit_per_customer,
+                c.stackable, c.outlets, c.is_active,
+                COALESCE(c.redemption_count, (SELECT COUNT(*)::int FROM coupon_redemptions cr WHERE cr.coupon_id = c.id), 0) AS redemption_count,
+                c.created_at, c.updated_at
+         FROM coupons c
+         WHERE ${conditions.join(' AND ')}
+         ORDER BY c.created_at DESC`,
+        params,
       );
       return res.rows;
+    });
+  }
+
+  async deleteCoupon(orgId: string, couponId: string) {
+    return withTenantContextRaw(orgId, async (client) => {
+      const res = await client.query<{ id: string }>(
+        `DELETE FROM coupons WHERE org_id = $1 AND id = $2 RETURNING id`,
+        [orgId, couponId],
+      );
+      if (!res.rows[0]) throw new NotFoundException(`Coupon ${couponId} not found`);
+      return { success: true, id: couponId };
+    });
+  }
+
+  async listPublicCoupons(orgId: string, outletId?: string) {
+    return withTenantContextRaw(orgId, async (client) => {
+      const res = await client.query(
+        `SELECT id, code, type, value, discount_value, max_discount_paise, min_order_paise, audience,
+                valid_from, valid_to, usage_limit_total, usage_limit_per_customer,
+                stackable, outlets, is_active
+         FROM coupons
+         WHERE org_id = $1
+           AND is_active = true
+           AND (valid_from IS NULL OR valid_from <= now())
+           AND (valid_to IS NULL OR valid_to >= now())
+         ORDER BY min_order_paise ASC, created_at DESC`,
+        [orgId],
+      );
+      return res.rows
+        .filter((r) => {
+          if (!outletId) return true;
+          const outletList = Array.isArray(r.outlets) ? r.outlets : [];
+          return outletList.length === 0 || outletList.includes(outletId) || r.outlet_id === outletId;
+        })
+        .map((r) => {
+          const valNum = Number(r.discount_value ?? r.value);
+          const type = r.type as 'PERCENT' | 'FLAT';
+          const isPercent = type === 'PERCENT';
+          const minPaise = Number(r.min_order_paise || 0);
+          return {
+            id: r.id,
+            code: r.code,
+            type,
+            value: valNum,
+            discountValue: valNum,
+            discount_value: valNum,
+            percent: isPercent ? Math.round(valNum / 100) : undefined,
+            fixedPaise: !isPercent ? valNum : undefined,
+            discountPaise: !isPercent ? valNum : 0,
+            maxDiscountPaise: r.max_discount_paise ? Number(r.max_discount_paise) : null,
+            minOrderPaise: minPaise,
+            audience: r.audience,
+            tag: isPercent ? `${Math.round(valNum / 100)}% OFF` : `₹${Math.round(valNum / 100)} OFF`,
+            title: isPercent ? `Flat ${Math.round(valNum / 100)}% Off Your Feast` : `₹${Math.round(valNum / 100)} Instant Savings`,
+            description: `Valid on dine-in orders above ₹${Math.ceil(minPaise / 100)}.`,
+          };
+        });
     });
   }
 
