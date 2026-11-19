@@ -15,19 +15,23 @@ const TEMP_CUST_MAX_AGE_SEC = 12 * 60 * 60;
 
 function setTempCustomerCookie(reply: FastifyReply | undefined, token?: string): void {
   if (!reply || typeof reply.header !== 'function' || !token) return;
-  const secureFlag = process.env['NODE_ENV'] === 'production' ? '; Secure' : '';
+  const isProd = process.env['NODE_ENV'] === 'production';
+  const sameSite = isProd ? 'SameSite=None' : 'SameSite=Lax';
+  const secureFlag = isProd ? '; Secure' : '';
   reply.header(
     'Set-Cookie',
-    `${TEMP_CUST_COOKIE_NAME}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${TEMP_CUST_MAX_AGE_SEC}${secureFlag}`,
+    `${TEMP_CUST_COOKIE_NAME}=${encodeURIComponent(token)}; Path=/; HttpOnly; ${sameSite}; Max-Age=${TEMP_CUST_MAX_AGE_SEC}${secureFlag}`,
   );
 }
 
 function clearTempCustomerCookie(reply: FastifyReply | undefined): void {
   if (!reply || typeof reply.header !== 'function') return;
-  const secureFlag = process.env['NODE_ENV'] === 'production' ? '; Secure' : '';
+  const isProd = process.env['NODE_ENV'] === 'production';
+  const sameSite = isProd ? 'SameSite=None' : 'SameSite=Lax';
+  const secureFlag = isProd ? '; Secure' : '';
   reply.header(
     'Set-Cookie',
-    `${TEMP_CUST_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secureFlag}`,
+    `${TEMP_CUST_COOKIE_NAME}=; Path=/; HttpOnly; ${sameSite}; Max-Age=0${secureFlag}`,
   );
 }
 
