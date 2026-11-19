@@ -1,12 +1,14 @@
 import { Controller, Get, HttpCode, HttpStatus } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Public } from '../decorators/auth.decorators.js';
+import { getPool } from '../../db/client.js';
 
 /**
  * Health check endpoints.
- * /healthz  — liveness  (is the process alive?)
- * /readyz   — readiness (is the app ready to serve traffic? checks DB + Redis)
- * Both are @Public() — no auth required by k8s/load balancer.
+ * /healthz        — liveness (is the process alive?)
+ * /readyz         — readiness (is the app ready to serve traffic?)
+ * /health         — public health & DB connectivity check (accessible as /api/v1/health or /v1/health)
+ * All are @Public() — no auth required by load balancers, orchestrators, or monitors.
  * Reference: ARCH §13
  */
 @ApiTags('health')
@@ -22,9 +24,35 @@ export class HealthController {
 
   @Get('readyz')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Readiness probe — checks DB + Redis connectivity' })
-  readiness(): { status: string } {
-    // TODO: add real DB + Redis ping in Phase 2 when pools are injectable
-    return { status: 'ok' };
+  @ApiOperation({ summary: 'Readiness probe' })
+  async readiness(): Promise<{ status: string; db: string }> {
+    try {
+      const pool = getPool();
+      await pool.query('SELECT 1');
+      return { status: 'ok', db: 'connected' };
+    } catch {
+      return { status: 'degraded', db: 'disconnected' };
+    }
+  }
+
+  @Get(['health', 'api/v1/health'])
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Public health probe with PostgreSQL connectivity verification' })
+  async health(): Promise<{ status: string; db: string; timestamp: string }> {
+    try {
+      const pool = getPool();
+      await pool.query('SELECT 1');
+      return {
+        status: 'ok',
+        db: 'connected',
+        timestamp: new Date().toISOString(),
+      };
+    } catch {
+      return {
+        status: 'degraded',
+        db: 'disconnected',
+        timestamp: new Date().toISOString(),
+      };
+    }
   }
 }
