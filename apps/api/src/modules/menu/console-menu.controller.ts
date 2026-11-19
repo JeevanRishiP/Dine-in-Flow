@@ -15,7 +15,10 @@ import {
   UploadMenuPhotoDto,
   StockUpdateDto,
   CreateModifierGroupDto,
+  UpdateModifierGroupDto,
   CreateModifierDto,
+  UpdateModifierDto,
+  ModifierGroupQueryDto,
   MenuQueryDto,
 } from './menu.dto.js';
 
@@ -115,6 +118,24 @@ export class ConsoleMenuController {
 
   // ─── Modifier Groups ─────────────────────────────────────────────────────────
 
+  @Get('modifier-groups')
+  @Require(Permission.MENU_READ)
+  listModifierGroups(
+    @CurrentUser() user: StaffJwtPayload,
+    @Query() query: ModifierGroupQueryDto,
+  ) {
+    return this.menuService.listModifierGroups(user.org, query.outlet_id);
+  }
+
+  @Get('modifier-groups/:id')
+  @Require(Permission.MENU_READ)
+  getModifierGroup(
+    @CurrentUser() user: StaffJwtPayload,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.menuService.getModifierGroup(user.org, id);
+  }
+
   @Post('modifier-groups')
   @Require(Permission.MENU_WRITE)
   @HttpCode(HttpStatus.CREATED)
@@ -125,6 +146,25 @@ export class ConsoleMenuController {
     return this.menuService.createModifierGroup(user.org, dto, user.sub);
   }
 
+  @Patch('modifier-groups/:id')
+  @Require(Permission.MENU_WRITE)
+  updateModifierGroup(
+    @CurrentUser() user: StaffJwtPayload,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdateModifierGroupDto,
+  ) {
+    return this.menuService.updateModifierGroup(user.org, id, dto, user.sub);
+  }
+
+  @Delete('modifier-groups/:id')
+  @Require(Permission.MENU_WRITE)
+  deleteModifierGroup(
+    @CurrentUser() user: StaffJwtPayload,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.menuService.deleteModifierGroup(user.org, id, user.sub);
+  }
+
   @Post('modifiers')
   @Require(Permission.MENU_WRITE)
   @HttpCode(HttpStatus.CREATED)
@@ -133,6 +173,25 @@ export class ConsoleMenuController {
     @Body() dto: CreateModifierDto,
   ) {
     return this.menuService.createModifier(user.org, dto, user.sub);
+  }
+
+  @Patch('modifiers/:id')
+  @Require(Permission.MENU_WRITE)
+  updateModifier(
+    @CurrentUser() user: StaffJwtPayload,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdateModifierDto,
+  ) {
+    return this.menuService.updateModifier(user.org, id, dto, user.sub);
+  }
+
+  @Delete('modifiers/:id')
+  @Require(Permission.MENU_WRITE)
+  deleteModifier(
+    @CurrentUser() user: StaffJwtPayload,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.menuService.deleteModifier(user.org, id, user.sub);
   }
 
   @Post('items/:itemId/modifier-groups/:groupId')
@@ -147,6 +206,16 @@ export class ConsoleMenuController {
     return this.menuService.attachModifierGroup(
       user.org, itemId, groupId, parseInt(sortOrder, 10), user.sub,
     );
+  }
+
+  @Delete('items/:itemId/modifier-groups/:groupId')
+  @Require(Permission.MENU_WRITE)
+  detachModifierGroup(
+    @CurrentUser() user: StaffJwtPayload,
+    @Param('itemId', ParseUUIDPipe) itemId: string,
+    @Param('groupId', ParseUUIDPipe) groupId: string,
+  ) {
+    return this.menuService.detachModifierGroup(user.org, itemId, groupId, user.sub);
   }
 
   // ─── Presigned upload ────────────────────────────────────────────────────────
