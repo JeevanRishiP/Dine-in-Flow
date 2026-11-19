@@ -28,9 +28,9 @@ export function getLiveTableValidation(
 
   if (outletTables.length === 0) {
     const isDev = process.env.NODE_ENV === 'development' || process.env.NODE_ENV !== 'production';
-    if (isDev && (!activeOutletId || activeOutletId === null)) {
+    if (isDev) {
       if (onDevFallbackTrigger) {
-        onDevFallbackTrigger(DEFAULT_DEV_OUTLET_ID);
+        onDevFallbackTrigger(activeOutletId || DEFAULT_DEV_OUTLET_ID);
       }
       return { matched: null, error: '' };
     }

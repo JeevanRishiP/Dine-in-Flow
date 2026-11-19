@@ -125,8 +125,8 @@ describe('TableModal & getLiveTableValidation domain tests', () => {
 
   describe('Session initialization dev fallback behavior', () => {
     it('provides correct default dev outlet and org constants', () => {
-      assert.equal(DEFAULT_DEV_OUTLET_ID, 'b0000000-0000-0000-0000-000000000001');
-      assert.equal(DEFAULT_DEV_ORG_ID, 'a0000000-0000-0000-0000-000000000001');
+      assert.equal(DEFAULT_DEV_OUTLET_ID, '71ad00a6-d79b-4035-b563-bf9543fcfa86');
+      assert.equal(DEFAULT_DEV_ORG_ID, '7762b6af-d052-4e74-b917-39e3c56e7914');
     });
 
     it('resolveTenantIds falls back to DEFAULT_DEV_OUTLET_ID when fallbackToDev is requested', () => {
