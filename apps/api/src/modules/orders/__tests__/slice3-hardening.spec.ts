@@ -218,7 +218,7 @@ describe('Slice 3 Hardening — QR Tokens, Orders Validation, Loyalty, Refunds, 
       );
       // Batched multi-row insert: exactly 1 SQL statement inserting all items in batch
       expect(insertItemCalls).toHaveLength(1);
-      expect(insertItemCalls[0]![0]).toContain('VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10), ($11, $12, $13, $14, $15, $16, $17, $18, $19, $20)');
+      expect(insertItemCalls[0]![0]).toContain('VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, \'ACTIVE\', $13, $14), ($15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, \'ACTIVE\', $27, $28)');
       expect(insertItemCalls[0]![1]).toContain('no onion');
       expect(insertItemCalls[0]![1]).toContain('extra spicy');
     });
