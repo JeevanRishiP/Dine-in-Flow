@@ -520,4 +520,155 @@ export class StaffManagementService {
       return { deactivated: true, id: targetStaffId };
     });
   }
+
+  // ─── Outlets & Organization Management ─────────────────────────────────────
+
+  async listOutlets(orgId: string) {
+    return withTenantContextRaw(orgId, async (client) => {
+      const res = await client.query(
+        `SELECT id, org_id, name, address, timezone, settings, is_active, created_at, updated_at
+         FROM outlets
+         WHERE org_id = $1
+         ORDER BY name ASC`,
+        [orgId],
+      );
+      return res.rows;
+    });
+  }
+
+  async getOutlet(orgId: string, outletId: string) {
+    return withTenantContextRaw(orgId, async (client) => {
+      const res = await client.query(
+        `SELECT id, org_id, name, address, timezone, settings, is_active, created_at, updated_at
+         FROM outlets
+         WHERE org_id = $1 AND id = $2`,
+        [orgId, outletId],
+      );
+      if (!res.rows[0]) throw domainError(ErrorCode.NOT_FOUND, 'Outlet not found.', 404);
+      return res.rows[0];
+    });
+  }
+
+  async createOutlet(
+    orgId: string,
+    actorId: string,
+    input: { name: string; address?: string; timezone?: string; settings?: Record<string, unknown> },
+  ) {
+    return withTenantContextRaw(orgId, async (client) => {
+      const res = await client.query(
+        `INSERT INTO outlets (org_id, name, address, timezone, settings, is_active)
+         VALUES ($1, $2, $3, $4, $5::jsonb, true)
+         RETURNING id, org_id, name, address, timezone, settings, is_active, created_at, updated_at`,
+        [
+          orgId,
+          input.name.trim(),
+          input.address?.trim() || null,
+          input.timezone || 'Asia/Kolkata',
+          JSON.stringify(input.settings || {}),
+        ],
+      );
+      await client.query(
+        `INSERT INTO audit_logs (org_id, actor_id, actor_type, action, resource, resource_id, metadata)
+         VALUES ($1, $2, 'staff', 'outlet.created', 'outlet', $3, $4::jsonb)`,
+        [orgId, actorId, res.rows[0]!.id, JSON.stringify(input)],
+      );
+      return res.rows[0];
+    });
+  }
+
+  async updateOutlet(
+    orgId: string,
+    actorId: string,
+    outletId: string,
+    input: { name?: string; address?: string; timezone?: string; settings?: Record<string, unknown>; isActive?: boolean },
+  ) {
+    return withTenantContextRaw(orgId, async (client) => {
+      await this.getOutlet(orgId, outletId);
+      const sets: string[] = [];
+      const params: unknown[] = [orgId, outletId];
+
+      if (input.name !== undefined) {
+        params.push(input.name.trim());
+        sets.push(`name = $${params.length}`);
+      }
+      if (input.address !== undefined) {
+        params.push(input.address ? input.address.trim() : null);
+        sets.push(`address = $${params.length}`);
+      }
+      if (input.timezone !== undefined) {
+        params.push(input.timezone);
+        sets.push(`timezone = $${params.length}`);
+      }
+      if (input.settings !== undefined) {
+        params.push(JSON.stringify(input.settings));
+        sets.push(`settings = $${params.length}::jsonb`);
+      }
+      if (input.isActive !== undefined) {
+        params.push(input.isActive);
+        sets.push(`is_active = $${params.length}`);
+      }
+
+      if (sets.length > 0) {
+        sets.push(`updated_at = now()`);
+        await client.query(
+          `UPDATE outlets SET ${sets.join(', ')} WHERE org_id = $1 AND id = $2`,
+          params,
+        );
+        await client.query(
+          `INSERT INTO audit_logs (org_id, actor_id, actor_type, action, resource, resource_id, metadata)
+           VALUES ($1, $2, 'staff', 'outlet.updated', 'outlet', $3, $4::jsonb)`,
+          [orgId, actorId, outletId, JSON.stringify(input)],
+        );
+      }
+      return this.getOutlet(orgId, outletId);
+    });
+  }
+
+  async getOrganization(orgId: string) {
+    return withTenantContextRaw(orgId, async (client) => {
+      const res = await client.query(
+        `SELECT id, name, slug, plan, currency, country_code, timezone, settings, is_active, created_at, updated_at
+         FROM organizations
+         WHERE id = $1`,
+        [orgId],
+      );
+      if (!res.rows[0]) throw domainError(ErrorCode.NOT_FOUND, 'Organization not found.', 404);
+      return res.rows[0];
+    });
+  }
+
+  async updateOrganization(
+    orgId: string,
+    actorId: string,
+    input: { name?: string; settings?: Record<string, unknown> },
+  ) {
+    return withTenantContextRaw(orgId, async (client) => {
+      await this.getOrganization(orgId);
+      const sets: string[] = [];
+      const params: unknown[] = [orgId];
+
+      if (input.name !== undefined) {
+        params.push(input.name.trim());
+        sets.push(`name = $${params.length}`);
+      }
+      if (input.settings !== undefined) {
+        params.push(JSON.stringify(input.settings));
+        sets.push(`settings = settings || $${params.length}::jsonb`);
+      }
+
+      if (sets.length > 0) {
+        sets.push(`updated_at = now()`);
+        await client.query(
+          `UPDATE organizations SET ${sets.join(', ')} WHERE id = $1`,
+          params,
+        );
+        await client.query(
+          `INSERT INTO audit_logs (org_id, actor_id, actor_type, action, resource, resource_id, metadata)
+           VALUES ($1, $2, 'staff', 'organization.updated', 'organization', $1, $3::jsonb)`,
+          [orgId, actorId, JSON.stringify(input)],
+        );
+      }
+      return this.getOrganization(orgId);
+    });
+  }
 }
