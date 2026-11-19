@@ -30,6 +30,7 @@ describe('Loyalty Controllers & RBAC Guard Validation', () => {
       listCoupons: vi.fn().mockResolvedValue([]),
       getCoupon: vi.fn().mockResolvedValue({ id: 'coupon-1', code: 'SAVE10' }),
       updateCoupon: vi.fn().mockResolvedValue({ id: 'coupon-1', code: 'SAVE10' }),
+      deleteCoupon: vi.fn().mockResolvedValue({ success: true, id: 'coupon-1' }),
       getSettings: vi.fn().mockResolvedValue({ is_loyalty_enabled: true }),
       updateSettings: vi.fn().mockResolvedValue({ is_loyalty_enabled: true }),
       resolveOrgIdByOutlet: vi.fn().mockResolvedValue('org-uuid-1'),
@@ -67,6 +68,12 @@ describe('Loyalty Controllers & RBAC Guard Validation', () => {
       expect(mockLoyaltyService.listCoupons).toHaveBeenCalledWith(mockStaffUser.org);
     });
 
+    it('dispatches deleteCoupon', async () => {
+      const res = await consoleController.deleteCoupon(mockStaffUser, 'coupon-1');
+      expect(mockLoyaltyService.deleteCoupon).toHaveBeenCalledWith(mockStaffUser.org, 'coupon-1');
+      expect(res.success).toBe(true);
+    });
+
     it('dispatches getSettings and updateSettings', async () => {
       await consoleController.getSettings(mockStaffUser);
       expect(mockLoyaltyService.getSettings).toHaveBeenCalledWith(mockStaffUser.org);
@@ -87,6 +94,31 @@ describe('Loyalty Controllers & RBAC Guard Validation', () => {
       expect(mockLoyaltyService.resolveOrgIdByOutlet).toHaveBeenCalledWith(dto.outletId);
       expect(mockLoyaltyService.validateCoupon).toHaveBeenCalledWith('org-uuid-1', dto);
       expect(res.valid).toBe(true);
+    });
+
+    it('dispatches applyCouponAuth with authenticated customer identity', async () => {
+      const dto = {
+        code: 'SAVE10',
+        subtotalPaise: 50000,
+        outletId: 'outlet-uuid-1',
+      };
+      const res = await customerController.applyCouponAuth(mockCustomerUser, dto);
+      expect(mockLoyaltyService.validateCoupon).toHaveBeenCalledWith('org-uuid-1', {
+        ...dto,
+        customerId: mockCustomerUser.sub,
+      });
+      expect(res.valid).toBe(true);
+    });
+
+    it('rejects applyCouponPublic when customerId is missing', async () => {
+      const dto = {
+        code: 'SAVE10',
+        subtotalPaise: 50000,
+        outletId: 'outlet-uuid-1',
+      };
+      await expect(customerController.applyCouponPublic(dto)).rejects.toThrow(
+        'Please log in or sign up to apply coupons',
+      );
     });
 
     it('dispatches getWallet for authenticated customer', async () => {
