@@ -7,6 +7,7 @@ import { StaffAuthService } from './staff-auth.service.js';
 import { StaffAuthController } from './staff-auth.controller.js';
 import { StaffManagementService } from './staff-management.service.js';
 import { ConsoleStaffController } from './staff-management.controller.js';
+import { ConsoleOrgController } from './console-org.controller.js';
 import { CustomerOtpService, REDIS_CLIENT } from './customer-otp.service.js';
 import { CustomerAuthController } from './customer-auth.controller.js';
 import { WhatsAppOtpProvider } from './whatsapp-otp.provider.js';
@@ -38,7 +39,7 @@ import { MESSAGING_PROVIDER } from './messaging.provider.js';
       },
     },
   ],
-  controllers: [StaffAuthController, ConsoleStaffController, CustomerAuthController],
+  controllers: [StaffAuthController, ConsoleStaffController, ConsoleOrgController, CustomerAuthController],
   exports: [TokenService],
 })
 export class AuthModule {}
