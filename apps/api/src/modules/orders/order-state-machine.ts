@@ -8,16 +8,22 @@
  */
 
 export type OrderStatus =
+  | 'AWAITING_PAYMENT'
   | 'PENDING'
   | 'CONFIRMED'
   | 'PREPARING'
   | 'READY'
   | 'SERVED'
   | 'BILLED'
-  | 'CANCELLED';
+  | 'COMPLETED'
+  | 'CANCELLED'
+  | 'PAYMENT_FAILED'
+  | 'PAYMENT_CANCELLED'
+  | 'PAYMENT_EXPIRED';
 
 export type ItemStatus =
   | 'PENDING'
+  | 'CONFIRMED'
   | 'PREPARING'
   | 'READY'
   | 'SERVED'
@@ -28,22 +34,28 @@ export type ItemStatus =
  * Keys are current states; values are allowed next states.
  */
 export const ORDER_TRANSITIONS: Readonly<Record<OrderStatus, readonly OrderStatus[]>> = {
-  PENDING:   ['CONFIRMED', 'PREPARING', 'CANCELLED'],
-  CONFIRMED: ['PREPARING', 'CANCELLED'],
-  PREPARING: ['READY'],
-  READY:     ['SERVED'],
-  SERVED:    ['BILLED'],
-  BILLED:    [],
-  CANCELLED: [],
+  AWAITING_PAYMENT:  ['CONFIRMED', 'CANCELLED', 'PAYMENT_FAILED', 'PAYMENT_CANCELLED', 'PAYMENT_EXPIRED'],
+  PENDING:           ['CONFIRMED', 'PREPARING', 'CANCELLED'],
+  CONFIRMED:         ['PREPARING', 'CANCELLED'],
+  PREPARING:         ['READY', 'CANCELLED'],
+  READY:             ['SERVED', 'CANCELLED'],
+  SERVED:            ['BILLED', 'COMPLETED', 'CANCELLED'],
+  BILLED:            ['COMPLETED'],
+  COMPLETED:         [],
+  CANCELLED:         [],
+  PAYMENT_FAILED:    ['AWAITING_PAYMENT', 'CANCELLED'],
+  PAYMENT_CANCELLED: ['AWAITING_PAYMENT', 'CANCELLED'],
+  PAYMENT_EXPIRED:   [],
 } as const;
 
 /**
  * Valid item-level transitions (KDS).
  */
 export const ITEM_TRANSITIONS: Readonly<Record<ItemStatus, readonly ItemStatus[]>> = {
-  PENDING:   ['PREPARING', 'CANCELLED'],
+  PENDING:   ['CONFIRMED', 'PREPARING', 'CANCELLED'],
+  CONFIRMED: ['PREPARING', 'CANCELLED'],
   PREPARING: ['READY', 'CANCELLED'],
-  READY:     ['SERVED'],
+  READY:     ['SERVED', 'CANCELLED'],
   SERVED:    [],
   CANCELLED: [],
 } as const;
@@ -76,7 +88,7 @@ export function canTransitionItem(from: ItemStatus, to: ItemStatus): TransitionR
 
 /** Terminal states — order cannot be further modified */
 export function isTerminalOrderStatus(status: OrderStatus): boolean {
-  return status === 'BILLED' || status === 'CANCELLED';
+  return status === 'BILLED' || status === 'COMPLETED' || status === 'CANCELLED' || status === 'PAYMENT_EXPIRED';
 }
 
 /** Terminal states for items */
