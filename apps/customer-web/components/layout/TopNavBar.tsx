@@ -9,6 +9,7 @@ export interface TopNavBarProps {
   restaurantName?: string;
   onNavigateView?: (view: 'home' | 'menu') => void;
   onOpenTableModal?: () => void;
+  onOpenBookingModal?: () => void;
   onOpenFilterSheet?: () => void;
   onOpenOrdersHistory?: () => void;
   onOpenProfile?: () => void;
@@ -26,6 +27,7 @@ export const TopNavBar: React.FC<TopNavBarProps> = ({
   restaurantName = 'Royal Spice Bistro',
   onNavigateView,
   onOpenTableModal,
+  onOpenBookingModal,
   onOpenFilterSheet,
   onOpenOrdersHistory,
   onOpenProfile,
@@ -43,9 +45,12 @@ export const TopNavBar: React.FC<TopNavBarProps> = ({
   const storeCartLines = useOrderStore((s) => s.cartLines);
   const storeCartItemCount = useOrderStore((s) => s.getCartItemCount());
   const storeActiveOrderCount = useOrderStore((s) => s.activeOrderCount);
+  const storeOrderType = useOrderStore((s) => s.orderType);
+  const storeAllocatedTables = useOrderStore((s) => s.allocatedTableNumbers);
 
   // Dispatchers from Zustand store
   const storeSetIsTableModalOpen = useOrderStore((s) => s.setIsTableModalOpen);
+  const storeSetIsBookingModalOpen = useOrderStore((s) => s.setIsBookingModalOpen);
   const storeSetIsCartOpen = useOrderStore((s) => s.setIsCartOpen);
   const storeSetIsOrdersHistoryOpen = useOrderStore((s) => s.setIsOrdersHistoryOpen);
   const storeSetIsAuthModalOpen = useOrderStore((s) => s.setIsAuthModalOpen);
@@ -54,6 +59,14 @@ export const TopNavBar: React.FC<TopNavBarProps> = ({
   useEffect(() => {
     setIsMounted(true);
   }, []);
+
+  const handleBookingClick = () => {
+    if (onOpenBookingModal) {
+      onOpenBookingModal();
+    } else {
+      storeSetIsBookingModalOpen(true);
+    }
+  };
 
   const handleTableClick = () => {
     if (onOpenTableModal) {
@@ -114,15 +127,6 @@ export const TopNavBar: React.FC<TopNavBarProps> = ({
           </button>
           <div>
             <div className="brand-title">{restaurantName}</div>
-            <button
-              type="button"
-              className="table-badge-btn"
-              onClick={handleTableClick}
-              style={{ padding: '2px 8px', fontSize: '0.72rem' }}
-              title="Click to view or verify table"
-            >
-              <span>Table {storeSelectedTable}</span>
-            </button>
           </div>
         </div>
 
@@ -219,40 +223,10 @@ export const TopNavBar: React.FC<TopNavBarProps> = ({
         <div style={{ fontSize: '1.4rem' }}>👑</div>
         <div>
           <div className="brand-title">{restaurantName}</div>
-          <button
-            type="button"
-            className="table-badge-btn"
-            onClick={handleTableClick}
-            title="Click to change or verify table"
-          >
-            <span
-              style={{
-                width: '6px',
-                height: '6px',
-                borderRadius: '50%',
-                background: storeIsTableVerified ? '#10b981' : '#f59e0b',
-              }}
-            />
-            <span>Table {storeSelectedTable}</span>
-            <span style={{ fontSize: '0.65rem', opacity: 0.8 }}>▼</span>
-          </button>
         </div>
       </div>
 
       <div className="nav-right-actions">
-        {/* Language Switcher - Removed when logged in */}
-        {!customerToken && (
-          <button
-            type="button"
-            className="nav-icon-btn"
-            title="Switch Language"
-            onClick={() => showToast && showToast('Language: English (UK) active')}
-            aria-label="Switch Language"
-          >
-            <span style={{ fontSize: '0.85rem', fontWeight: 800 }}>EN</span>
-          </button>
-        )}
-
         {/* Orders History Icon - Badge shows active placed plates */}
         <button
           type="button"

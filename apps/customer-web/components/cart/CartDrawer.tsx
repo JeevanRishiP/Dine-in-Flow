@@ -8,6 +8,9 @@ import {
   matchHotelTable,
   openManualTableSession,
   resolveTenantIds,
+  loadCustomerAuth,
+  customerApiFetch,
+  loadGuestSession,
   type OutletTableInfo,
 } from '../../app/lib/guest-session';
 import { getLiveTableValidation as validateLiveTable } from '../modals/TableModal';
@@ -22,6 +25,7 @@ export interface CartDrawerProps {
   outletTables?: OutletTableInfo[];
   outletTablesLoaded?: boolean;
   showToast?: (msg: string) => void;
+  onApplyCoupon?: (code: string) => Promise<void> | void;
 }
 
 export function CartDrawer({
@@ -34,6 +38,7 @@ export function CartDrawer({
   outletTables = [],
   outletTablesLoaded = true,
   showToast = (msg: string) => console.log(msg),
+  onApplyCoupon,
 }: CartDrawerProps) {
   // ── Sourced strictly from Zustand Global Store ──
   const isCartOpen = useOrderStore((s) => s.isCartOpen);
@@ -51,6 +56,12 @@ export function CartDrawer({
   const cartSubtotalPaise = useOrderStore((s) => s.getCartSubtotalPaise());
   const discountPaise = useOrderStore((s) => s.getDiscountPaise());
   const cartGrandTotalPaise = useOrderStore((s) => s.getCartGrandTotalPaise());
+
+  const orderType = useOrderStore((s) => s.orderType);
+  const scheduledFor = useOrderStore((s) => s.scheduledFor);
+  const guestCount = useOrderStore((s) => s.guestCount);
+  const allocatedTableNumbers = useOrderStore((s) => s.allocatedTableNumbers);
+  const setIsBookingModalOpen = useOrderStore((s) => s.setIsBookingModalOpen);
 
   const incrementCartLine = useOrderStore((s) => s.incrementCartLine);
   const decrementCartLine = useOrderStore((s) => s.decrementCartLine);
@@ -90,29 +101,59 @@ export function CartDrawer({
   if (!isCartOpen) return null;
 
   // ── Coupon Application Handler ──
-  const handleApplyCoupon = (code: string) => {
+  const handleApplyCoupon = async (code: string) => {
     const trimmed = code.trim().toUpperCase();
     if (!trimmed) {
       setCouponError('Please enter a coupon code.');
       return;
     }
-    const found = coupons.find((c) => c.code === trimmed);
-    if (!found) {
-      setCouponError(`Invalid code "${trimmed}". Check available coupons.`);
+    if (onApplyCoupon) {
+      await onApplyCoupon(trimmed);
       return;
     }
-    if (cartSubtotalPaise < found.minOrderPaise) {
-      const deficit = found.minOrderPaise - cartSubtotalPaise;
-      setCouponError(
-        `Add ₹${(deficit / 100).toFixed(0)} more dishes to unlock ${found.code} (Min order ₹${(
-          found.minOrderPaise / 100
-        ).toFixed(0)})`,
+    const custAuth = loadCustomerAuth();
+    if (!custAuth?.accessToken) {
+      useOrderStore.getState().setPendingCouponCode(trimmed);
+      useOrderStore.getState().setIsAuthModalOpen(true);
+      setCouponError(`Log in or sign up to apply coupon ${trimmed}`);
+      showToast(`Log in or sign up to apply coupon ${trimmed}`);
+      return;
+    }
+    try {
+      const effOrg = resolveTenantIds(loadGuestSession()).orgId;
+      const res = await customerApiFetch(
+        '/api/v1/customer/coupons/apply',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            code: trimmed,
+            subtotalPaise: cartSubtotalPaise,
+            outletId: activeOutletId || '88888888-8888-4888-8888-888888888888',
+          }),
+        },
+        { preferToken: 'customer', tokenOverride: custAuth.accessToken, orgIdOverride: effOrg },
       );
-      return;
+      if (res.status === 401) {
+        useOrderStore.getState().setPendingCouponCode(trimmed);
+        useOrderStore.getState().setIsAuthModalOpen(true);
+        setCouponError(`Log in or sign up to apply coupon ${trimmed}`);
+        showToast(`Log in or sign up to apply coupon ${trimmed}`);
+        return;
+      }
+      const data = await res.json();
+      if (!res.ok || !data.valid) {
+        setCouponError(data.reason || data.detail || `Coupon "${trimmed}" is not valid.`);
+        setAppliedCoupon(null);
+        return;
+      }
+      setCouponError(null);
+      setAppliedCoupon(trimmed);
+      useOrderStore.getState().setAppliedCouponDiscountPaise(data.discountPaise);
+      showToast(`Coupon ${trimmed} applied! Saved ₹${Math.round(data.discountPaise / 100)} 🎉`);
+    } catch {
+      setCouponError('Error applying coupon. Check network connection.');
     }
-    setAppliedCoupon(trimmed);
-    setCouponError(null);
-    showToast(`Coupon ${found.code} applied! Saved ₹${(computeCouponDiscountPaise(found, cartSubtotalPaise) / 100).toFixed(0)} 🎉`);
   };
 
   return (
@@ -122,7 +163,13 @@ export function CartDrawer({
         <div className="drawer-header">
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
             <span style={{ fontSize: '1.2rem' }}>🛒</span>
-            <span className="drawer-title">Table {selectedTable} Cart</span>
+            <span className="drawer-title">
+              {orderType === 'TAKEAWAY'
+                ? 'Takeaway Cart'
+                : orderType === 'PRE_BOOK_DINE_IN'
+                ? `Pre-Order Cart (Table ${allocatedTableNumbers.length > 0 ? allocatedTableNumbers.join('+') : selectedTable})`
+                : `Table ${selectedTable} Cart`}
+            </span>
           </div>
           <button
             onClick={() => setIsCartOpen(false)}
@@ -132,6 +179,99 @@ export function CartDrawer({
             ✕
           </button>
         </div>
+
+        {/* Omnichannel Booking / Schedule Banner */}
+        {orderType === 'PRE_BOOK_DINE_IN' && (
+          <div
+            style={{
+              background: 'linear-gradient(135deg, rgba(251, 191, 36, 0.12), rgba(217, 119, 6, 0.15))',
+              border: '1px solid rgba(251, 191, 36, 0.35)',
+              borderRadius: '10px',
+              padding: '10px 14px',
+              margin: '12px 16px 0',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: '8px',
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <span style={{ fontSize: '1.3rem' }}>📅</span>
+              <div>
+                <div style={{ fontSize: '0.82rem', fontWeight: 800, color: '#fbbf24' }}>
+                  Pre-Booked: Table {allocatedTableNumbers.length > 0 ? allocatedTableNumbers.join('+') : selectedTable} ({guestCount} Guests)
+                </div>
+                <div style={{ fontSize: '0.72rem', color: '#cbd5e1' }}>
+                  {scheduledFor
+                    ? `Arrival: ${new Date(scheduledFor).toLocaleDateString([], { month: 'short', day: 'numeric' })} at ${new Date(scheduledFor).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+                    : 'Scheduled Dining'}
+                </div>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setIsBookingModalOpen(true)}
+              style={{
+                background: 'rgba(251, 191, 36, 0.2)',
+                border: '1px solid rgba(251, 191, 36, 0.5)',
+                color: '#fbbf24',
+                borderRadius: '6px',
+                padding: '4px 8px',
+                fontSize: '0.70rem',
+                fontWeight: 700,
+                cursor: 'pointer',
+              }}
+            >
+              Change
+            </button>
+          </div>
+        )}
+
+        {orderType === 'TAKEAWAY' && (
+          <div
+            style={{
+              background: 'linear-gradient(135deg, rgba(56, 189, 248, 0.12), rgba(2, 132, 199, 0.15))',
+              border: '1px solid rgba(56, 189, 248, 0.35)',
+              borderRadius: '10px',
+              padding: '10px 14px',
+              margin: '12px 16px 0',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: '8px',
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <span style={{ fontSize: '1.3rem' }}>🛍️</span>
+              <div>
+                <div style={{ fontSize: '0.82rem', fontWeight: 800, color: '#38bdf8' }}>
+                  Takeaway Order (Counter Pickup)
+                </div>
+                <div style={{ fontSize: '0.72rem', color: '#cbd5e1' }}>
+                  {scheduledFor
+                    ? `Ready by: ${new Date(scheduledFor).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+                    : 'Preparation: ASAP (~25 mins)'}
+                </div>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setIsBookingModalOpen(true)}
+              style={{
+                background: 'rgba(56, 189, 248, 0.2)',
+                border: '1px solid rgba(56, 189, 248, 0.5)',
+                color: '#38bdf8',
+                borderRadius: '6px',
+                padding: '4px 8px',
+                fontSize: '0.70rem',
+                fontWeight: 700,
+                cursor: 'pointer',
+              }}
+            >
+              Change
+            </button>
+          </div>
+        )}
 
         {/* Quick Link to Table Orders if dishes are already placed */}
         {flattenedPlatesCount > 0 && (
@@ -490,7 +630,7 @@ export function CartDrawer({
                 <div style={{ display: 'flex', gap: '8px' }}>
                   <input
                     type="text"
-                    placeholder="e.g. ROYAL15"
+                    placeholder="Enter coupon code"
                     value={couponInput}
                     onChange={(e) => {
                       setCouponInput(e.target.value.toUpperCase());
@@ -596,112 +736,118 @@ export function CartDrawer({
         </div>
 
         {/* ── Footer with Checkout Action ── */}
-        {cartLines.length > 0 && (
-          <div className="drawer-footer" style={{ padding: '16px', borderTop: '1px solid rgba(255, 255, 255, 0.08)' }}>
-            {(!isTableVerified || !activeSessionId) && (
-              <div
-                style={{
-                  background: 'rgba(245, 158, 11, 0.09)',
-                  border: '1px solid rgba(245, 158, 11, 0.35)',
-                  borderRadius: '10px',
-                  padding: '10px 12px',
-                  marginBottom: '12px',
-                }}
-              >
-                <div style={{ fontSize: '0.78rem', fontWeight: 800, color: '#fbbf24', marginBottom: '6px' }}>
-                  🪑 Enter Your Table Number to Checkout
-                </div>
-                <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                  <input
-                    type="text"
-                    inputMode="numeric"
-                    pattern="[0-9]*"
-                    placeholder="Digits only (e.g. 4)"
-                    value={cartCheckoutTableDigits}
-                    onChange={(e) => setCartCheckoutTableDigits(sanitizeTableDigits(e.target.value))}
-                    style={{
-                      flex: 1,
-                      padding: '8px 10px',
-                      borderRadius: '8px',
-                      background: 'rgba(0, 0, 0, 0.35)',
-                      border: cartCheckoutTableValidation.error
-                        ? '1px solid #ef4444'
-                        : '1px solid rgba(255,255,255,0.18)',
-                      color: '#fff',
-                      fontSize: '0.86rem',
-                      fontWeight: 700,
-                    }}
-                  />
-                  <button
-                    type="button"
-                    disabled={!cartCheckoutTableValidation.matched}
-                    onClick={async () => {
-                      const targetOutlet = activeOutletId || resolveTenantIds().outletId || undefined;
-                      if (cartCheckoutTableValidation.matched) {
-                        const res = await openManualTableSession(
-                          targetOutlet,
-                          cartCheckoutTableValidation.matched.table_number,
-                          tablePax,
-                        );
-                        if (res.ok) {
-                          setSelectedTable(
-                            res.session.tableNumber || cartCheckoutTableValidation.matched.table_number,
-                            tablePax,
-                            res.session.tableId,
-                            res.session.sessionId,
-                          );
-                          setCartCheckoutTableDigits('');
-                          showToast(`Saved Table ${res.session.tableNumber || cartCheckoutTableValidation.matched.table_number}!`);
-                        } else {
-                          showToast(res.error || 'Failed to open table session');
-                        }
-                      }
-                    }}
-                    style={{
-                      padding: '8px 12px',
-                      borderRadius: '8px',
-                      border: 'none',
-                      background: cartCheckoutTableValidation.matched
-                        ? 'linear-gradient(135deg, #10b981, #059669)'
-                        : 'rgba(255,255,255,0.08)',
-                      color: cartCheckoutTableValidation.matched ? '#fff' : '#64748b',
-                      fontWeight: 800,
-                      fontSize: '0.76rem',
-                      cursor: cartCheckoutTableValidation.matched ? 'pointer' : 'not-allowed',
-                    }}
-                  >
-                    Save Table
-                  </button>
-                </div>
-                {cartCheckoutTableValidation.error && (
-                  <div style={{ fontSize: '0.73rem', color: '#f87171', fontWeight: 600, marginTop: '5px' }}>
-                    {cartCheckoutTableValidation.error}
-                  </div>
-                )}
-                {cartCheckoutTableValidation.matched && (
-                  <div style={{ fontSize: '0.73rem', color: '#34d399', fontWeight: 600, marginTop: '5px' }}>
-                    ✓ Found Table {cartCheckoutTableValidation.matched.table_number}
-                  </div>
-                )}
-              </div>
-            )}
+        {cartLines.length > 0 && (() => {
+          const isTakeaway = orderType === 'TAKEAWAY';
+          const isPreBook = orderType === 'PRE_BOOK_DINE_IN';
+          const tableRequired = !isTakeaway && (!isTableVerified || !activeSessionId) && (!isPreBook || allocatedTableNumbers.length === 0);
 
-            <button
-              className="accordion-add-action-btn"
-              onClick={onPlaceOrder}
-              disabled={
-                isPlacingOrder ||
-                ((!isTableVerified || !activeSessionId) && !cartCheckoutTableValidation.matched)
-              }
-              style={{ width: '100%', margin: 0, padding: '12px 16px', fontSize: '0.92rem' }}
-            >
-              {isPlacingOrder ? 'Initiating Payment...' : `💳 Pay ₹${(cartGrandTotalPaise / 100).toFixed(0)} & Send to Kitchen`}
-            </button>
-            <div style={{ textAlign: 'center', fontSize: '0.72rem', color: '#94a3b8', marginTop: '6px' }}>
-              🔒 Dishes stay in your cart until payment is confirmed.
+          return (
+            <div className="drawer-footer" style={{ padding: '16px', borderTop: '1px solid rgba(255, 255, 255, 0.08)' }}>
+              {tableRequired && (
+                <div
+                  style={{
+                    background: 'rgba(245, 158, 11, 0.09)',
+                    border: '1px solid rgba(245, 158, 11, 0.35)',
+                    borderRadius: '10px',
+                    padding: '10px 12px',
+                    marginBottom: '12px',
+                  }}
+                >
+                  <div style={{ fontSize: '0.78rem', fontWeight: 800, color: '#fbbf24', marginBottom: '6px' }}>
+                    🪑 Enter Your Table Number to Checkout
+                  </div>
+                  <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      pattern="[0-9]*"
+                      placeholder="Digits only (e.g. 4)"
+                      value={cartCheckoutTableDigits}
+                      onChange={(e) => setCartCheckoutTableDigits(sanitizeTableDigits(e.target.value))}
+                      style={{
+                        flex: 1,
+                        padding: '8px 10px',
+                        borderRadius: '8px',
+                        background: 'rgba(0, 0, 0, 0.35)',
+                        border: cartCheckoutTableValidation.error
+                          ? '1px solid #ef4444'
+                          : '1px solid rgba(255,255,255,0.18)',
+                        color: '#fff',
+                        fontSize: '0.86rem',
+                        fontWeight: 700,
+                      }}
+                    />
+                    <button
+                      type="button"
+                      disabled={!cartCheckoutTableValidation.matched}
+                      onClick={async () => {
+                        const targetOutlet = activeOutletId || resolveTenantIds().outletId || undefined;
+                        if (cartCheckoutTableValidation.matched) {
+                          const res = await openManualTableSession(
+                            targetOutlet,
+                            cartCheckoutTableValidation.matched.table_number,
+                            tablePax,
+                          );
+                          if (res.ok) {
+                            setSelectedTable(
+                              res.session.tableNumber || cartCheckoutTableValidation.matched.table_number,
+                              tablePax,
+                              res.session.tableId,
+                              res.session.sessionId,
+                            );
+                            setCartCheckoutTableDigits('');
+                            showToast(`Saved Table ${res.session.tableNumber || cartCheckoutTableValidation.matched.table_number}!`);
+                          } else {
+                            showToast(res.error || 'Failed to open table session');
+                          }
+                        }
+                      }}
+                      style={{
+                        padding: '8px 12px',
+                        borderRadius: '8px',
+                        border: 'none',
+                        background: cartCheckoutTableValidation.matched
+                          ? 'linear-gradient(135deg, #10b981, #059669)'
+                          : 'rgba(255,255,255,0.08)',
+                        color: cartCheckoutTableValidation.matched ? '#fff' : '#64748b',
+                        fontWeight: 800,
+                        fontSize: '0.76rem',
+                        cursor: cartCheckoutTableValidation.matched ? 'pointer' : 'not-allowed',
+                      }}
+                    >
+                      Save Table
+                    </button>
+                  </div>
+                  {cartCheckoutTableValidation.error && (
+                    <div style={{ fontSize: '0.73rem', color: '#f87171', fontWeight: 600, marginTop: '5px' }}>
+                      {cartCheckoutTableValidation.error}
+                    </div>
+                  )}
+                  {cartCheckoutTableValidation.matched && (
+                    <div style={{ fontSize: '0.73rem', color: '#34d399', fontWeight: 600, marginTop: '5px' }}>
+                      ✓ Found Table {cartCheckoutTableValidation.matched.table_number}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <button
+                className="accordion-add-action-btn"
+                onClick={onPlaceOrder}
+                disabled={
+                  isPlacingOrder ||
+                  (tableRequired && !cartCheckoutTableValidation.matched)
+                }
+                style={{ width: '100%', margin: 0, padding: '12px 16px', fontSize: '0.92rem' }}
+              >
+                {isPlacingOrder ? 'Initiating Payment...' : `💳 Pay ₹${(cartGrandTotalPaise / 100).toFixed(0)} & Send to Kitchen`}
+              </button>
+              <div style={{ textAlign: 'center', fontSize: '0.72rem', color: '#94a3b8', marginTop: '6px' }}>
+                🔒 Dishes stay in your cart until payment is confirmed.
+              </div>
             </div>
-          </div>
-        )}
+          );
+        })()}
       </div>
     </div>
   );

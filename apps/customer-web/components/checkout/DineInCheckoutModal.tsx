@@ -86,6 +86,7 @@ export function DineInCheckoutModal({
   const setPaymentQrData = useOrderStore((s) => s.setPaymentQrData);
   const paymentSuccessData = useOrderStore((s) => s.paymentSuccessData);
   const setPaymentSuccessData = useOrderStore((s) => s.setPaymentSuccessData);
+  const resetCheckoutState = useOrderStore((s) => s.resetCheckoutState);
   const setIsCartOpen = useOrderStore((s) => s.setIsCartOpen);
   const clearCart = useOrderStore((s) => s.clearCart);
 
@@ -93,6 +94,28 @@ export function DineInCheckoutModal({
   const selectedTable = useOrderStore((s) => s.selectedTable);
   const activeSessionId = useOrderStore((s) => s.activeSessionId);
   const cartGrandTotalPaise = useOrderStore((s) => s.getCartGrandTotalPaise());
+
+  // Reset checkout state if user opens checkout with active cart items
+  useEffect(() => {
+    if (cartLines.length > 0 && paymentSuccessData) {
+      setPaymentSuccessData(null);
+    }
+  }, [cartLines.length, paymentSuccessData, setPaymentSuccessData]);
+
+  // Clean unmount reset
+  useEffect(() => {
+    return () => {
+      // Clear transient payment states on unmount
+      if (paymentSuccessData) {
+        setPaymentSuccessData(null);
+      }
+    };
+  }, [paymentSuccessData, setPaymentSuccessData]);
+
+  const orderType = useOrderStore((s) => s.orderType);
+  const scheduledFor = useOrderStore((s) => s.scheduledFor);
+  const guestCount = useOrderStore((s) => s.guestCount);
+  const allocatedTableNumbers = useOrderStore((s) => s.allocatedTableNumbers);
 
   // Confirm UPI / PhonePe Payment
   const handleConfirmUpiPayment = useCallback(async () => {
@@ -180,12 +203,13 @@ export function DineInCheckoutModal({
 
   const handleClose = () => {
     setIsPaymentModalOpen(false);
+    setPaymentSuccessData(null);
     if (cartLines.length > 0) {
       setIsCartOpen(true);
       if (onPostponePayment) {
         onPostponePayment();
       } else {
-        showToast('Payment postponed. All items saved in your cart.');
+        showToast('Payment not completed — your order was NOT sent to the kitchen. Items remain saved in your cart.');
       }
     }
   };
@@ -224,8 +248,22 @@ export function DineInCheckoutModal({
         {/* Header */}
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
           <div>
-            <h3 style={{ fontSize: '1.1rem', fontWeight: 800, color: '#fff', margin: 0 }}>Settle Table Bill</h3>
-            <span style={{ fontSize: '0.78rem', color: '#94a3b8' }}>Table {selectedTable}</span>
+            <h3 style={{ fontSize: '1.1rem', fontWeight: 800, color: '#fff', margin: 0 }}>
+              {orderType === 'TAKEAWAY'
+                ? 'Takeaway Checkout'
+                : orderType === 'PRE_BOOK_DINE_IN'
+                ? 'Pre-Booked Table Checkout'
+                : 'Settle Table Bill'}
+            </h3>
+            <span style={{ fontSize: '0.78rem', color: '#94a3b8' }}>
+              {orderType === 'TAKEAWAY'
+                ? scheduledFor
+                  ? `Pickup: ${new Date(scheduledFor).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+                  : 'Pickup: ASAP (~25 mins)'
+                : orderType === 'PRE_BOOK_DINE_IN'
+                ? `Table ${allocatedTableNumbers.length > 0 ? allocatedTableNumbers.join('+') : selectedTable} · ${guestCount} Guests`
+                : `Table ${selectedTable} · Live Dine-In`}
+            </span>
           </div>
           <button
             onClick={handleClose}
@@ -235,6 +273,40 @@ export function DineInCheckoutModal({
             ✕
           </button>
         </div>
+
+        {/* Omnichannel Mode Reminder */}
+        {orderType === 'PRE_BOOK_DINE_IN' && (
+          <div
+            style={{
+              background: 'rgba(251, 191, 36, 0.1)',
+              border: '1px solid rgba(251, 191, 36, 0.3)',
+              borderRadius: '8px',
+              padding: '8px 12px',
+              fontSize: '0.78rem',
+              color: '#fbbf24',
+              fontWeight: 700,
+              marginBottom: '12px',
+            }}
+          >
+            📅 Pre-Booked Dining: Table {allocatedTableNumbers.length > 0 ? allocatedTableNumbers.join('+') : selectedTable} ({guestCount} Guests)
+          </div>
+        )}
+        {orderType === 'TAKEAWAY' && (
+          <div
+            style={{
+              background: 'rgba(56, 189, 248, 0.1)',
+              border: '1px solid rgba(56, 189, 248, 0.3)',
+              borderRadius: '8px',
+              padding: '8px 12px',
+              fontSize: '0.78rem',
+              color: '#38bdf8',
+              fontWeight: 700,
+              marginBottom: '12px',
+            }}
+          >
+            🛍️ Takeaway Counter Pickup {scheduledFor ? `· ${new Date(scheduledFor).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : '· ASAP (~25 mins)'}
+          </div>
+        )}
 
         {/* ── View 1: Payment Completed Successfully ── */}
         {paymentSuccessData ? (
