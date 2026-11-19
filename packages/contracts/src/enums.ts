@@ -19,17 +19,49 @@ export const VerificationMode = {
 export type VerificationMode = (typeof VerificationMode)[keyof typeof VerificationMode];
 
 export const OrderStatus = {
+  AWAITING_PAYMENT: 'AWAITING_PAYMENT',
+  PENDING: 'PENDING',
   PENDING_APPROVAL: 'PENDING_APPROVAL',
   PENDING_PAYMENT: 'PENDING_PAYMENT',
   ACCEPTED: 'ACCEPTED',
+  CONFIRMED: 'CONFIRMED',
   PREPARING: 'PREPARING',
   READY: 'READY',
   SERVED: 'SERVED',
+  BILLED: 'BILLED',
   COMPLETED: 'COMPLETED',
   CANCELLED: 'CANCELLED',
   REJECTED: 'REJECTED',
+  PAYMENT_FAILED: 'PAYMENT_FAILED',
+  PAYMENT_CANCELLED: 'PAYMENT_CANCELLED',
+  PAYMENT_EXPIRED: 'PAYMENT_EXPIRED',
 } as const;
 export type OrderStatus = (typeof OrderStatus)[keyof typeof OrderStatus];
+
+export const OrderType = {
+  DINE_IN: 'DINE_IN',
+  PRE_BOOK_DINE_IN: 'PRE_BOOK_DINE_IN',
+  TAKEAWAY: 'TAKEAWAY',
+} as const;
+export type OrderType = (typeof OrderType)[keyof typeof OrderType];
+
+export const OrderHoldStatus = {
+  ACTIVE: 'ACTIVE',
+  SCHEDULED_WAIT: 'SCHEDULED_WAIT',
+  SERVE_LATER_HOLD: 'SERVE_LATER_HOLD',
+  RELEASED: 'RELEASED',
+} as const;
+export type OrderHoldStatus = (typeof OrderHoldStatus)[keyof typeof OrderHoldStatus];
+
+export const TableReservationStatus = {
+  PENDING_PAYMENT: 'PENDING_PAYMENT',
+  CONFIRMED: 'CONFIRMED',
+  SEATED: 'SEATED',
+  COMPLETED: 'COMPLETED',
+  NO_SHOW: 'NO_SHOW',
+  CANCELLED: 'CANCELLED',
+} as const;
+export type TableReservationStatus = (typeof TableReservationStatus)[keyof typeof TableReservationStatus];
 
 export const PaymentStatus = {
   UNPAID: 'UNPAID',
