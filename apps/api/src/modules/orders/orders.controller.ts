@@ -3,11 +3,24 @@ import {
   Param, Body, Query, HttpCode, HttpStatus,
 } from '@nestjs/common';
 import { OrdersService } from './orders.service.js';
-import { PlaceOrderDto, QuoteOrderDto, UpdateOrderStatusDto, UpdateItemStatusDto, OrderQueryDto, ReassignItemTableDto } from './orders.dto.js';
+import { KitchenSchedulerService } from './kitchen-scheduler.service.js';
+import {
+  PlaceOrderDto,
+  QuoteOrderDto,
+  UpdateOrderStatusDto,
+  UpdateItemStatusDto,
+  OrderQueryDto,
+  ReassignItemTableDto,
+  CheckAvailabilityDto,
+  CreateReservationDto,
+  SnoozeServeLaterDto,
+  ReleaseHoldDto,
+} from './orders.dto.js';
 
 import {
   Require,
   CurrentUser,
+  Public,
   type StaffJwtPayload,
   type CustomerJwtPayload,
   type GuestSessionJwtPayload,
@@ -27,7 +40,10 @@ import { Permission } from '@dineflow/contracts';
  */
 @Controller('console/orders')
 export class ConsoleOrdersController {
-  constructor(private readonly ordersService: OrdersService) {}
+  constructor(
+    private readonly ordersService: OrdersService,
+    private readonly kitchenSchedulerService: KitchenSchedulerService,
+  ) {}
 
   @Get()
   @Require(Permission.ORDER_READ)
@@ -37,6 +53,25 @@ export class ConsoleOrdersController {
   ) {
     const scopedOutlet = resolveScopedOutletId(user.outletId, query.outlet_id);
     return this.ordersService.listOrders(user.org, { ...query, outlet_id: scopedOutlet });
+  }
+
+  /**
+   * Flattened KDS Priority API:
+   * Returns ONLY PAID orders' items as an independent flat array (KdsItemTicket[]),
+   * sorted deterministically: targetFireAt ASC, courseSequence ASC, prepTimeMinutes DESC, paidAt ASC.
+   */
+  @Get('kds/items')
+  @Require(Permission.ORDER_READ)
+  async getKdsItems(
+    @CurrentUser() user: StaffJwtPayload,
+    @Query('outlet_id') outletId?: string,
+  ) {
+    const scopedOutlet = resolveScopedOutletId(user.outletId, outletId);
+    const items = await this.kitchenSchedulerService.getFlattenedKdsItems(user.org, scopedOutlet);
+    return {
+      items,
+      serverTimestamp: new Date().toISOString(),
+    };
   }
 
   /** Compute a server-side price quote (no side-effects). Returns price_fingerprint for PRICE_CHANGED detection. */
@@ -83,6 +118,42 @@ export class ConsoleOrdersController {
   ) {
     return this.ordersService.updateItemStatus(user.org, orderId, itemId, dto, user.sub, user.outletId);
   }
+
+  /** Staff (Captain/Manager) releases held items for a paid order or single item */
+  @Post(':id/serve-later/release')
+  @Require(Permission.ORDER_UPDATE_STATUS)
+  @HttpCode(HttpStatus.OK)
+  releaseServeLater(
+    @CurrentUser() user: StaffJwtPayload,
+    @Param('id') orderId: string,
+    @Body() body?: ReleaseHoldDto,
+    @Query('item_id') queryItemId?: string,
+  ) {
+    const targetItemId = body?.itemId ?? body?.item_id ?? queryItemId;
+    return this.ordersService.releaseOrderHeldItemsByStaff(
+      user.org,
+      orderId,
+      user.sub,
+      user.outletId,
+      targetItemId,
+    );
+  }
+
+  /** Staff (Captain/Manager) snoozes serve-later prompt for 10 minutes */
+  @Post(':id/serve-later/snooze')
+  @Require(Permission.ORDER_UPDATE_STATUS)
+  @HttpCode(HttpStatus.OK)
+  snoozeServeLater(
+    @CurrentUser() user: StaffJwtPayload,
+    @Param('id') orderId: string,
+    @Body() dto?: SnoozeServeLaterDto,
+  ) {
+    return this.kitchenSchedulerService.snoozeServeLater(
+      user.org,
+      orderId,
+      dto?.minutes ?? 10,
+    );
+  }
 }
 
 /**
@@ -92,7 +163,10 @@ export class ConsoleOrdersController {
  */
 @Controller('customer/orders')
 export class CustomerOrdersController {
-  constructor(private readonly ordersService: OrdersService) {}
+  constructor(
+    private readonly ordersService: OrdersService,
+    private readonly kitchenSchedulerService: KitchenSchedulerService,
+  ) {}
 
   @Post()
   @Require(Permission.GUEST_SESSION)
@@ -119,6 +193,19 @@ export class CustomerOrdersController {
   @Get('session/:sessionId')
   @Require(Permission.GUEST_SESSION)
   getSessionOrders(
+    @CurrentUser() user: GuestSessionJwtPayload | CustomerJwtPayload,
+    @Param('sessionId') sessionId: string,
+  ) {
+    return this.ordersService.getOrdersBySession(
+      user.org,
+      sessionId,
+      toCustomerAccessScope(user),
+    );
+  }
+
+  @Get('sessions/:sessionId/orders')
+  @Require(Permission.GUEST_SESSION)
+  getSessionsOrdersAlias(
     @CurrentUser() user: GuestSessionJwtPayload | CustomerJwtPayload,
     @Param('sessionId') sessionId: string,
   ) {
@@ -159,7 +246,9 @@ export class CustomerOrdersController {
 
   /** Customer signals the kitchen to prepare an on-hold dish now (e.g. Filter Coffee / dessert). */
   @Patch(':id/items/:itemId/release-hold')
+  @Post(':id/items/:itemId/release-hold')
   @Require(Permission.GUEST_SESSION)
+  @HttpCode(HttpStatus.OK)
   releaseItemHold(
     @CurrentUser() user: GuestSessionJwtPayload | CustomerJwtPayload,
     @Param('id') orderId: string,
@@ -172,5 +261,63 @@ export class CustomerOrdersController {
       user.sub,
       toCustomerAccessScope(user),
     );
+  }
+
+  /** Customer releases either a single held dish or all held dishes on that order */
+  @Post(':id/serve-later/release')
+  @Require(Permission.GUEST_SESSION)
+  @HttpCode(HttpStatus.OK)
+  releaseCustomerServeLater(
+    @CurrentUser() user: GuestSessionJwtPayload | CustomerJwtPayload,
+    @Param('id') orderId: string,
+    @Body() body?: ReleaseHoldDto,
+    @Query('item_id') queryItemId?: string,
+  ) {
+    const targetItemId = body?.itemId ?? body?.item_id ?? queryItemId;
+    return this.ordersService.releaseCustomerOrderHeldItems(
+      user.org,
+      orderId,
+      user.sub,
+      toCustomerAccessScope(user),
+      targetItemId,
+    );
+  }
+
+  /** Customer snoozes the serve-later prompt for 10 minutes */
+  @Post(':id/serve-later/snooze')
+  @Require(Permission.GUEST_SESSION)
+  @HttpCode(HttpStatus.OK)
+  snoozeServeLater(
+    @CurrentUser() user: GuestSessionJwtPayload | CustomerJwtPayload,
+    @Param('id') orderId: string,
+    @Body() dto?: SnoozeServeLaterDto,
+  ) {
+    return this.kitchenSchedulerService.snoozeServeLater(user.org, orderId, dto?.minutes ?? 10);
+  }
+}
+
+/**
+ * Customer Reservations Controller — public availability check
+ */
+@Controller('customer/reservations')
+export class CustomerReservationsController {
+  constructor(private readonly kitchenSchedulerService: KitchenSchedulerService) {}
+
+  @Post('check-availability')
+  @Public()
+  @HttpCode(HttpStatus.OK)
+  checkAvailability(@Body() dto: CheckAvailabilityDto) {
+    return this.kitchenSchedulerService.checkAvailability(dto.outlet_id, dto);
+  }
+
+  @Post()
+  @Public()
+  @HttpCode(HttpStatus.CREATED)
+  createReservation(
+    @Body() dto: CreateReservationDto,
+    @CurrentUser() user?: GuestSessionJwtPayload | CustomerJwtPayload,
+  ) {
+    const customerId = user && 'sub' in user ? user.sub : null;
+    return this.kitchenSchedulerService.createReservation(dto.outlet_id, dto, customerId);
   }
 }
