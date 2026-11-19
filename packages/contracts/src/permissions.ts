@@ -135,6 +135,7 @@ export const ROLE_PERMISSIONS: Record<string, Permission[]> = {
     Permission.ORDER_READ, Permission.ORDER_UPDATE_STATUS, Permission.ORDER_CANCEL,
     Permission.KITCHEN_VIEW,
     Permission.PAYMENT_READ, Permission.PAYMENT_MARK_PAID,
+    Permission.REPORT_READ,
     Permission.CUSTOMER_READ,
   ],
 
