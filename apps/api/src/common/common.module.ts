@@ -1,10 +1,12 @@
-import { Module } from '@nestjs/common';
+import { Module, type OnApplicationShutdown } from '@nestjs/common';
 import { APP_FILTER, APP_INTERCEPTOR } from '@nestjs/core';
 import { ZodSerializerInterceptor } from 'nestjs-zod';
 import { ConfigModule } from '../config/config.module.js';
 import { AllExceptionsFilter } from './filters/all-exceptions.filter.js';
 import { RequestIdInterceptor } from './interceptors/request-id.interceptor.js';
 import { HealthController } from './health/health.controller.js';
+import { closePool } from '../db/client.js';
+import { closeRedis } from './redis/redis.client.js';
 
 @Module({
   imports: [ConfigModule],
@@ -27,4 +29,9 @@ import { HealthController } from './health/health.controller.js';
     },
   ],
 })
-export class CommonModule {}
+export class CommonModule implements OnApplicationShutdown {
+  async onApplicationShutdown(): Promise<void> {
+    await closePool();
+    await closeRedis();
+  }
+}
