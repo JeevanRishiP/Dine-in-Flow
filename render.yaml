@@ -1,0 +1,106 @@
+services:
+  - type: web
+    name: dineflow-api
+    runtime: node
+    plan: starter
+    region: singapore
+    buildCommand: pnpm --filter @dineflow/contracts build && pnpm --filter @dineflow/api build
+    startCommand: pnpm --filter @dineflow/api start:prod
+    healthCheckPath: /api/v1/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+
+      # Database Connections
+      # Supabase Transaction Pooler URL (port 6543) for runtime pooled queries
+      - key: DATABASE_URL
+        sync: false
+      # Supabase Direct Connection URL (port 5432) for running migrations with DDL privileges
+      - key: DIRECT_DATABASE_URL
+        sync: false
+      - key: DATABASE_MIGRATOR_URL
+        sync: false
+
+      # Redis
+      - key: REDIS_URL
+        sync: false
+
+      # Security & JWT Secrets (HMAC ≥ 32 chars)
+      - key: JWT_SECRET
+        generateValue: true
+      - key: OTP_HMAC_PEPPER
+        generateValue: true
+      - key: QR_TOKEN_SECRET
+        generateValue: true
+
+      # CORS & Networking
+      - key: ALLOWED_ORIGINS
+        sync: false
+      - key: ALLOWED_CORS_ORIGINS
+        sync: false
+      - key: APP_BASE_URL
+        sync: false
+      - key: TRUST_PROXY
+        value: "true"
+
+      # Default Public Outlet (optional override for single-outlet or default routing)
+      - key: DEFAULT_PUBLIC_OUTLET_ID
+        sync: false
+
+      # Payment Gateways (PhonePe & Razorpay)
+      - key: PHONEPE_ENV
+        value: PRODUCTION
+      - key: PHONEPE_CLIENT_ID
+        sync: false
+      - key: PHONEPE_CLIENT_SECRET
+        sync: false
+      - key: PHONEPE_CLIENT_VERSION
+        value: "1"
+      - key: PHONEPE_SALT_INDEX
+        value: "1"
+      - key: PHONEPE_WEBHOOK_USERNAME
+        sync: false
+      - key: PHONEPE_WEBHOOK_PASSWORD
+        sync: false
+      - key: WEBHOOK_PUBLIC_URL
+        sync: false
+      - key: RAZORPAY_KEY_ID
+        sync: false
+      - key: RAZORPAY_KEY_SECRET
+        sync: false
+      - key: RAZORPAY_WEBHOOK_SECRET
+        sync: false
+
+      # S3-compatible Object Storage (Cloudflare R2 / AWS S3 / MinIO)
+      - key: S3_ENDPOINT
+        sync: false
+      - key: S3_REGION
+        value: ap-south-1
+      - key: S3_ACCESS_KEY
+        sync: false
+      - key: S3_SECRET_KEY
+        sync: false
+      - key: S3_RAW_BUCKET
+        value: dineflow-prod-raw
+      - key: S3_PROCESSED_BUCKET
+        value: dineflow-prod-processed
+
+      # AI Assistant (Gemini)
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-3.5-flash-lite
+
+      # WhatsApp OTP Provider (Meta Cloud API in Production)
+      - key: WHATSAPP_PROVIDER
+        value: meta
+      - key: WHATSAPP_PHONE_NUMBER_ID
+        sync: false
+      - key: WHATSAPP_ACCESS_TOKEN
+        sync: false
+
+      # Google OAuth
+      - key: GOOGLE_CLIENT_ID
+        sync: false
