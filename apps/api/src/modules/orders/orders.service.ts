@@ -59,7 +59,7 @@ type ReassignItemTableInput = z.infer<typeof ReassignItemTableSchema>;
  * Reference: ARCH §8, AGENTS §2 rule 1+2+6+8
  */
 const ORDER_ITEM_SELECT_FIELDS =
-  'oi.id, oi.menu_item_id, oi.name_snapshot, oi.unit_price_paise, oi.quantity, oi.line_total_paise, oi.modifiers, oi.notes, oi.status, oi.target_table_id, tt.table_number AS target_table_number, oi.created_at, oi.updated_at';
+  'oi.id, oi.menu_item_id, oi.name_snapshot, oi.unit_price_paise, oi.quantity, oi.line_total_paise, oi.modifiers, oi.notes, oi.status, oi.target_table_id, tt.table_number AS target_table_number, oi.course_sequence, oi.prep_time_minutes, oi.target_fire_at, oi.hold_status, oi.claimed_by_staff_id, oi.claimed_at, oi.is_combo_item, oi.combo_name, oi.diner_id, oi.diner_label, oi.created_at, oi.updated_at';
 
 @Injectable()
 export class OrdersService {
@@ -94,27 +94,48 @@ export class OrdersService {
 
     return withTenantContextRaw(targetOrgId, async (db) => {
       const params: unknown[] = [targetOrgId];
-      const clauses: string[] = ['o.org_id = $1'];
+      // Zero-Leak Payment Gate: Filter out any unpaid / awaiting / cancelled payment orders from console
+      const clauses: string[] = [
+        'o.org_id = $1',
+        `o.status NOT IN ('AWAITING_PAYMENT', 'PAYMENT_FAILED', 'PAYMENT_CANCELLED', 'PAYMENT_EXPIRED')`,
+        `(o.payment_status = 'PAID' OR o.payment_method = 'CASH_APPROVED')`,
+      ];
 
       if (query.outlet_id)  { params.push(query.outlet_id);  clauses.push(`o.outlet_id = $${params.length}`); }
       if (query.status)     { params.push(query.status);     clauses.push(`o.status = $${params.length}`); }
       if (query.session_id) { params.push(query.session_id); clauses.push(`o.session_id = $${params.length}`); }
+
+      if (!query.status) {
+        clauses.push(`o.status NOT IN ('CANCELLED', 'BILLED', 'COMPLETED')`);
+        clauses.push(`(o.order_type IN ('TAKEAWAY', 'PRE_BOOK_DINE_IN') OR o.session_id IS NULL OR ts.status = 'OPEN')`);
+      }
 
       params.push(query.limit, query.offset);
       const limitIdx  = params.length - 1;
       const offsetIdx = params.length;
 
       const { rows } = await db.query(
-        `SELECT o.id, o.status, o.subtotal_paise, o.tax_paise, o.discount_paise, o.total_paise,
+        `SELECT o.id, o.display_id, o.order_number, o.diner_id, o.diner_label,
+                o.status, o.payment_status, o.payment_method, o.order_type, o.scheduled_for, o.paid_at,
+                o.subtotal_paise, o.tax_paise, o.discount_paise, o.total_paise,
                 o.idempotency_key, o.session_id, o.table_id, o.notes, o.created_at, o.updated_at,
                 t.table_number
          FROM orders o
          LEFT JOIN tables t ON t.id = o.table_id
+         LEFT JOIN table_sessions ts ON ts.id = o.session_id AND ts.org_id = o.org_id
          WHERE ${clauses.join(' AND ')}
          ORDER BY o.created_at DESC
          LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
         params,
       );
+
+      for (const r of rows) {
+        const dId = (r as Record<string, unknown>)['display_id'] as string || ((r as Record<string, unknown>)['order_number'] ? `ORD-${String((r as Record<string, unknown>)['order_number']).padStart(4, '0')}` : `ORD-${String((r as Record<string, unknown>)['id']).slice(-4).toUpperCase()}`);
+        (r as Record<string, unknown>)['displayId'] = dId;
+        (r as Record<string, unknown>)['display_id'] = dId;
+        (r as Record<string, unknown>)['dinerId'] = (r as Record<string, unknown>)['diner_id'] ?? null;
+        (r as Record<string, unknown>)['dinerLabel'] = (r as Record<string, unknown>)['diner_label'] ?? null;
+      }
 
       await this.attachItemsToOrders(targetOrgId, rows, db);
 
@@ -132,28 +153,33 @@ export class OrdersService {
 
     return withTenantContextRaw(targetOrgId, async (db) => {
       const order = await this.getOrderInTx(targetOrgId, orderId, db);
+      const orderRec = order as Record<string, unknown>;
+      const session_id = orderRec['session_id'] as string | undefined;
+      const customer_id = orderRec['customer_id'] as string | undefined;
+      const temp_customer_id = orderRec['temp_customer_id'] as string | undefined;
+
       if (staffOutletId) {
-        assertStaffOutletAccess(staffOutletId, order.outlet_id as string | undefined);
+        assertStaffOutletAccess(staffOutletId, orderRec['outlet_id'] as string | undefined);
       }
       if (scope) {
         let sessionCustomerId: string | null = null;
         let sessionTempCustomerId: string | null = null;
-        if (order.session_id) {
+        if (session_id) {
           const { rows: sRows } = await db.query<{
             customer_id: string | null;
             temp_customer_id?: string | null;
           }>(
             `SELECT customer_id, temp_customer_id FROM table_sessions WHERE id = $1 AND org_id = $2`,
-            [order.session_id, targetOrgId],
+            [session_id, targetOrgId],
           );
           sessionCustomerId = sRows[0]?.customer_id ?? null;
           sessionTempCustomerId = sRows[0]?.temp_customer_id ?? null;
         }
         assertCustomerAccessScope(scope, {
-          session_id: order.session_id,
-          customer_id: order.customer_id,
+          session_id,
+          customer_id,
           session_customer_id: sessionCustomerId,
-          temp_customer_id: order.temp_customer_id ?? null,
+          temp_customer_id: temp_customer_id ?? null,
           session_temp_customer_id: sessionTempCustomerId,
         });
       }
@@ -357,14 +383,90 @@ export class OrdersService {
       // ── 5. Write order + items + events atomically ──────────────────────────
       const customerId = scope?.customerId ?? session.customer_id ?? null;
       const tempCustomerId = scope?.tempCustomerId ?? session.temp_customer_id ?? null;
+      // Zero-Leak Payment Gate: online/customer orders start in AWAITING_PAYMENT
+      const initialStatus = actorType === 'CUSTOMER' ? 'AWAITING_PAYMENT' : 'PENDING';
+      const initialPaymentStatus = 'PENDING';
+      const orderType = dto.order_type ?? 'DINE_IN';
+      const scheduledFor = dto.scheduled_for ? new Date(dto.scheduled_for) : null;
+      const guestCount = dto.guest_count ?? null;
+      const reservationId = dto.reservation_id ?? null;
+
+      // Section F: Gapless per-outlet daily order number sequence
+      const { rows: seqRows } = await db.query<{ last_seq: number }>(
+        `INSERT INTO order_counters (org_id, outlet_id, counter_date, last_seq)
+         VALUES ($1, $2, CURRENT_DATE, 1)
+         ON CONFLICT (outlet_id, counter_date)
+         DO UPDATE SET last_seq = order_counters.last_seq + 1
+         RETURNING last_seq`,
+        [targetOrgId, session.outlet_id],
+      );
+      const orderNumber = seqRows[0]?.last_seq ?? 100;
+      const displayId = `ORD-${String(orderNumber).padStart(4, '0')}`;
+
+      // Diner identification logic (Section 1)
+      let dinerId: string | null = null;
+      let dinerLabel: string | null = null;
+
+      if (customerId) {
+        dinerId = customerId;
+        const { rows: custRows } = await db.query<{ name: string | null }>(
+          `SELECT name FROM customers WHERE id = $1 AND org_id = $2`,
+          [customerId, targetOrgId],
+        );
+        const custName = custRows[0]?.name?.trim();
+        dinerLabel = custName && custName.length > 0 ? custName : 'Member';
+      } else {
+        dinerId =
+          dto.diner_id?.trim() ||
+          tempCustomerId ||
+          scope?.tempCustomerId ||
+          session.temp_customer_id ||
+          `guest-${targetOrgId.slice(0, 4)}-${session.id.slice(0, 8)}-${orderNumber}`;
+
+        if (dto.diner_label?.trim()) {
+          dinerLabel = dto.diner_label.trim();
+        } else {
+          const { rows: existingLabelRows } = await db.query<{ diner_label: string | null }>(
+            `SELECT diner_label FROM orders
+             WHERE session_id = $1 AND org_id = $2 AND diner_id = $3 AND diner_label IS NOT NULL
+             ORDER BY created_at ASC LIMIT 1`,
+            [session.id, targetOrgId, dinerId],
+          );
+          if (existingLabelRows[0]?.diner_label) {
+            dinerLabel = existingLabelRows[0].diner_label;
+          } else {
+            const { rows: countRows } = await db.query<{ count: number }>(
+              `SELECT COUNT(DISTINCT diner_id)::int AS count
+               FROM orders
+               WHERE session_id = $1 AND org_id = $2 AND diner_id IS NOT NULL AND diner_id != $3`,
+              [session.id, targetOrgId, dinerId],
+            );
+            const count = Number(countRows[0]?.count ?? 0);
+            dinerLabel = `Guest ${count + 1}`;
+          }
+        }
+      }
+
       const { rows: orderRows } = await db.query<{ id: string }>(
         `INSERT INTO orders (org_id, outlet_id, table_id, session_id, customer_id, temp_customer_id, idempotency_key,
-                             status, subtotal_paise, tax_paise, discount_paise, total_paise, notes)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'PENDING', $8, $9, 0, $10, $11)
+                             status, payment_status, order_type, scheduled_for, guest_count, reservation_id,
+                             order_number, display_id, diner_id, diner_label,
+                             subtotal_paise, tax_paise, discount_paise, total_paise, notes)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, 0, $20, $21)
          RETURNING id`,
         [
           targetOrgId, session.outlet_id, session.table_id, session.id, customerId, tempCustomerId,
           dto.idempotency_key,
+          initialStatus,
+          initialPaymentStatus,
+          orderType,
+          scheduledFor,
+          guestCount,
+          reservationId,
+          orderNumber,
+          displayId,
+          dinerId,
+          dinerLabel,
           quote.subtotal_paise, quote.tax_paise,
           quote.total_paise,
           dto.notes ?? null,
@@ -373,14 +475,30 @@ export class OrdersService {
       const orderId = orderRows[0]!.id;
 
       if (quote.lines.length > 0) {
+        const menuItemIds = quote.lines.map((l) => l.menu_item_id);
+        const { rows: menuRows } = await db.query<{
+          id: string;
+          course_sequence: number;
+          prep_time_minutes: number;
+        }>(
+          `SELECT id, course_sequence, prep_time_minutes FROM menu_items WHERE id = ANY($1)`,
+          [menuItemIds],
+        );
+        const menuMap = new Map((menuRows ?? []).map((m) => [m.id, m]));
+
         const valuePlaceholders: string[] = [];
         const itemParams: unknown[] = [];
         for (let idx = 0; idx < quote.lines.length; idx++) {
           const line = quote.lines[idx]!;
           const targetTableId = dto.items[idx]?.target_table_id ?? session.table_id;
+          const menuMeta = menuMap.get(line.menu_item_id);
+          const courseSeq = menuMeta?.course_sequence ?? 2;
+          const prepMins = menuMeta?.prep_time_minutes ?? 15;
+          const lineDinerId = dto.items[idx]?.diner_id ?? dinerId;
+          const lineDinerLabel = dto.items[idx]?.diner_label ?? dinerLabel;
           const offset = itemParams.length;
           valuePlaceholders.push(
-            `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, $${offset + 10})`,
+            `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, $${offset + 10}, $${offset + 11}, $${offset + 12}, 'ACTIVE', $${offset + 13}, $${offset + 14})`,
           );
           itemParams.push(
             targetOrgId,
@@ -393,12 +511,17 @@ export class OrdersService {
             JSON.stringify(line.modifiers),
             dto.items[idx]?.notes ?? null,
             targetTableId,
+            courseSeq,
+            prepMins,
+            lineDinerId,
+            lineDinerLabel,
           );
         }
 
         await db.query(
           `INSERT INTO order_items (org_id, order_id, menu_item_id, name_snapshot,
-                                    unit_price_paise, quantity, line_total_paise, modifiers, notes, target_table_id)
+                                    unit_price_paise, quantity, line_total_paise, modifiers, notes, target_table_id,
+                                    course_sequence, prep_time_minutes, hold_status, diner_id, diner_label)
            VALUES ${valuePlaceholders.join(', ')}`,
           itemParams,
         );
@@ -419,18 +542,21 @@ export class OrdersService {
         `INSERT INTO order_events (org_id, order_id, event_type, actor_type, actor_id, payload)
          VALUES ($1, $2, 'ORDER_PLACED', $3, $4, $5)`,
         [targetOrgId, orderId, actorType, validActorUuid,
-         JSON.stringify({ item_count: quote.lines.length, total_paise: quote.total_paise })],
+         JSON.stringify({ item_count: quote.lines.length, total_paise: quote.total_paise, status: initialStatus })],
       );
 
-      await db.query(
-        `INSERT INTO outbox_events (org_id, aggregate, aggregate_id, event_type, payload)
-         VALUES ($1, 'order', $2, 'ORDER_PLACED', $3)`,
-        [
-          targetOrgId,
-          orderId,
-          JSON.stringify({ session_id: session.id, outlet_id: session.outlet_id, total_paise: quote.total_paise }),
-        ],
-      );
+      // Zero-Leak Payment Gate: DO NOT emit KDS WebSocket event if order is in AWAITING_PAYMENT
+      if (initialStatus !== 'AWAITING_PAYMENT') {
+        await db.query(
+          `INSERT INTO outbox_events (org_id, aggregate, aggregate_id, event_type, payload)
+           VALUES ($1, 'order', $2, 'ORDER_PLACED', $3)`,
+          [
+            targetOrgId,
+            orderId,
+            JSON.stringify({ session_id: session.id, outlet_id: session.outlet_id, total_paise: quote.total_paise }),
+          ],
+        );
+      }
 
       return this.getOrderInTx(targetOrgId, orderId, db);
     });
@@ -460,8 +586,10 @@ export class OrdersService {
         customer_id: string | null;
         temp_customer_id?: string | null;
         status: OrderStatus;
+        payment_status?: string;
+        payment_method?: string;
       }>(
-        `SELECT id, outlet_id, table_id, session_id, customer_id, temp_customer_id, status
+        `SELECT id, outlet_id, table_id, session_id, customer_id, temp_customer_id, status, payment_status, payment_method
          FROM orders WHERE id = $1 AND org_id = $2`,
         [orderId, targetOrgId],
       );
@@ -644,8 +772,13 @@ export class OrdersService {
         customer_id: string | null;
         temp_customer_id?: string | null;
         status: OrderStatus;
+        payment_status?: string;
+        payment_method?: string;
+        display_id?: string;
+        diner_id?: string | null;
+        diner_label?: string | null;
       }>(
-        `SELECT id, outlet_id, table_id, session_id, customer_id, temp_customer_id, status
+        `SELECT id, outlet_id, table_id, session_id, customer_id, temp_customer_id, status, payment_status, payment_method, display_id, diner_id, diner_label
          FROM orders WHERE id = $1 AND org_id = $2`,
         [orderId, targetOrgId],
       );
@@ -673,12 +806,18 @@ export class OrdersService {
         session_temp_customer_id: sessionTempCustomerId,
       });
 
-      if (order.status === 'BILLED' || order.status === 'CANCELLED') {
+      if (order.status === 'BILLED' || order.status === 'CANCELLED' || order.status === 'COMPLETED') {
         throw domainError(
           ErrorCode.VALIDATION_ERROR,
           `Cannot release items on '${order.status}' order.`,
           400,
         );
+      }
+
+      // Zero-Leak Payment Gate: verify order is paid
+      const isPaid = order.payment_status === 'PAID' || order.payment_method === 'CASH_APPROVED';
+      if (!isPaid) {
+        throw domainError(ErrorCode.CONFLICT, 'Cannot prepare an unpaid order', 409);
       }
 
       const { rows: itemRows } = await db.query<{
@@ -687,8 +826,11 @@ export class OrdersService {
         name_snapshot: string;
         notes: string | null;
         status: ItemStatus;
+        hold_status: string;
+        diner_id?: string | null;
+        diner_label?: string | null;
       }>(
-        `SELECT id, order_id, name_snapshot, notes, status
+        `SELECT id, order_id, name_snapshot, notes, status, hold_status, diner_id, diner_label
          FROM order_items WHERE id = $1 AND org_id = $2 FOR UPDATE`,
         [itemId, targetOrgId],
       );
@@ -705,25 +847,15 @@ export class OrdersService {
         ? `${rawNotes} · [RELEASED_TO_KITCHEN]`
         : '[RELEASED_TO_KITCHEN]';
 
-      // Advance item status to PREPARING if it was PENDING
-      const nextItemStatus = item.status === 'PENDING' ? 'PREPARING' : item.status;
+      // Keep item status as CONFIRMED (or PENDING) - do NOT prematurely set PREPARING!
+      const nextItemStatus = item.status === 'PENDING' ? 'CONFIRMED' : item.status;
 
       await db.query(
         `UPDATE order_items
-         SET notes = $1, status = $2, updated_at = now()
+         SET notes = $1, status = $2, hold_status = 'RELEASED', target_fire_at = now(), updated_at = now()
          WHERE id = $3 AND org_id = $4`,
         [updatedNotes, nextItemStatus, itemId, targetOrgId],
       );
-
-      // Auto-advance order status if it was CONFIRMED or PENDING
-      if (order.status === 'PENDING' || order.status === 'CONFIRMED') {
-        if (canTransitionOrder(order.status, 'PREPARING').ok) {
-          await db.query(
-            `UPDATE orders SET status = 'PREPARING', updated_at = now() WHERE id = $1 AND org_id = $2`,
-            [orderId, targetOrgId],
-          );
-        }
-      }
 
       const validActorUuid = this.toValidUuidOrNull(actorId);
 
@@ -743,7 +875,28 @@ export class OrdersService {
         ],
       );
 
-      // Realtime Outbox Event
+      // Realtime Outbox Events: broadcast kds.item_fired and ORDER_ITEM_RELEASED
+      await db.query(
+        `INSERT INTO outbox_events (org_id, aggregate, aggregate_id, event_type, payload)
+         VALUES ($1, 'order_item', $2, 'kds.item_fired', $3)`,
+        [
+          targetOrgId,
+          itemId,
+          JSON.stringify({
+            orderId,
+            displayId: order.display_id,
+            itemId,
+            dishName: item.name_snapshot,
+            notes: updatedNotes,
+            status: nextItemStatus,
+            holdStatus: 'RELEASED',
+            dinerId: item.diner_id ?? order.diner_id ?? null,
+            dinerLabel: item.diner_label ?? order.diner_label ?? null,
+            targetFireAt: new Date().toISOString(),
+            firedAt: new Date().toISOString(),
+          }),
+        ],
+      );
       await db.query(
         `INSERT INTO outbox_events (org_id, aggregate, aggregate_id, event_type, payload)
          VALUES ($1, 'order', $2, 'ORDER_ITEM_RELEASED', $3)`,
@@ -756,6 +909,7 @@ export class OrdersService {
             itemName: item.name_snapshot,
             notes: updatedNotes,
             status: nextItemStatus,
+            holdStatus: 'RELEASED',
           }),
         ],
       );
@@ -763,10 +917,346 @@ export class OrdersService {
       return {
         id: itemId,
         order_id: orderId,
+        display_id: order.display_id,
+        displayId: order.display_id,
         name_snapshot: item.name_snapshot,
         notes: updatedNotes,
         status: nextItemStatus,
+        hold_status: 'RELEASED',
+        holdStatus: 'RELEASED',
         is_released: true,
+      };
+    });
+  }
+
+  /**
+   * Customer releases held items (either single item or all items on the order)
+   */
+  async releaseCustomerOrderHeldItems(
+    orgId: string,
+    orderId: string,
+    actorId: string,
+    scope: CustomerAccessScope,
+    targetItemId?: string,
+  ) {
+    if (targetItemId) {
+      return this.releaseItemHold(orgId, orderId, targetItemId, actorId, scope);
+    }
+    const targetOrgId = await this.resolveOrderOrgId(orgId, orderId);
+
+    return withTenantContextRaw(targetOrgId, async (db) => {
+      const { rows: ordRows } = await db.query<{
+        id: string;
+        outlet_id: string;
+        table_id: string;
+        session_id: string | null;
+        customer_id: string | null;
+        temp_customer_id?: string | null;
+        status: OrderStatus;
+        payment_status?: string;
+        payment_method?: string;
+        display_id?: string;
+        diner_id?: string | null;
+        diner_label?: string | null;
+      }>(
+        `SELECT id, outlet_id, table_id, session_id, customer_id, temp_customer_id, status, payment_status, payment_method, display_id, diner_id, diner_label
+         FROM orders WHERE id = $1 AND org_id = $2`,
+        [orderId, targetOrgId],
+      );
+      const order = ordRows[0];
+      if (!order) throw domainError(ErrorCode.NOT_FOUND, 'Order not found.', 404);
+
+      let sessionCustomerId: string | null = null;
+      let sessionTempCustomerId: string | null = null;
+      if (order.session_id) {
+        const { rows: sRows } = await db.query<{
+          customer_id: string | null;
+          temp_customer_id?: string | null;
+        }>(
+          `SELECT customer_id, temp_customer_id FROM table_sessions WHERE id = $1 AND org_id = $2`,
+          [order.session_id, targetOrgId],
+        );
+        sessionCustomerId = sRows[0]?.customer_id ?? null;
+        sessionTempCustomerId = sRows[0]?.temp_customer_id ?? null;
+      }
+      assertCustomerAccessScope(scope, {
+        session_id: order.session_id,
+        customer_id: order.customer_id,
+        session_customer_id: sessionCustomerId,
+        temp_customer_id: order.temp_customer_id ?? null,
+        session_temp_customer_id: sessionTempCustomerId,
+      });
+
+      if (order.status === 'BILLED' || order.status === 'CANCELLED' || order.status === 'COMPLETED') {
+        throw domainError(
+          ErrorCode.VALIDATION_ERROR,
+          `Cannot release items on '${order.status}' order.`,
+          400,
+        );
+      }
+
+      const isPaid = order.payment_status === 'PAID' || order.payment_method === 'CASH_APPROVED';
+      if (!isPaid) {
+        throw domainError(ErrorCode.CONFLICT, 'Cannot prepare an unpaid order', 409);
+      }
+
+      const { rows: itemsToRelease } = await db.query<{
+        id: string;
+        order_id: string;
+        name_snapshot: string;
+        notes: string | null;
+        status: ItemStatus;
+        hold_status: string;
+        diner_id?: string | null;
+        diner_label?: string | null;
+      }>(
+        `SELECT id, order_id, name_snapshot, notes, status, hold_status, diner_id, diner_label
+         FROM order_items
+         WHERE order_id = $1 AND org_id = $2 AND hold_status IN ('SERVE_LATER_HOLD', 'SCHEDULED_WAIT')
+         FOR UPDATE`,
+        [orderId, targetOrgId],
+      );
+
+      const validActorUuid = this.toValidUuidOrNull(actorId);
+
+      for (const item of itemsToRelease) {
+        const rawNotes = item.notes || '';
+        const updatedNotes = rawNotes.includes('[RELEASED_TO_KITCHEN]')
+          ? rawNotes
+          : rawNotes
+          ? `${rawNotes} · [RELEASED_TO_KITCHEN]`
+          : '[RELEASED_TO_KITCHEN]';
+
+        const nextItemStatus = item.status === 'PENDING' ? 'CONFIRMED' : item.status;
+
+        await db.query(
+          `UPDATE order_items
+           SET notes = $1, status = $2, hold_status = 'RELEASED', target_fire_at = now(), updated_at = now()
+           WHERE id = $3 AND org_id = $4`,
+          [updatedNotes, nextItemStatus, item.id, targetOrgId],
+        );
+
+        await db.query(
+          `INSERT INTO order_events (org_id, order_id, event_type, actor_type, actor_id, payload)
+           VALUES ($1, $2, 'ITEM_RELEASED_FROM_HOLD', 'CUSTOMER', $3, $4)`,
+          [
+            targetOrgId,
+            orderId,
+            validActorUuid,
+            JSON.stringify({
+              itemId: item.id,
+              itemName: item.name_snapshot,
+              releasedAt: new Date().toISOString(),
+              releasedBy: 'CUSTOMER',
+            }),
+          ],
+        );
+
+        await db.query(
+          `INSERT INTO outbox_events (org_id, aggregate, aggregate_id, event_type, payload)
+           VALUES ($1, 'order_item', $2, 'kds.item_fired', $3)`,
+          [
+            targetOrgId,
+            item.id,
+            JSON.stringify({
+              orderId,
+              displayId: order.display_id,
+              itemId: item.id,
+              dishName: item.name_snapshot,
+              notes: updatedNotes,
+              status: nextItemStatus,
+              holdStatus: 'RELEASED',
+              dinerId: item.diner_id ?? order.diner_id ?? null,
+              dinerLabel: item.diner_label ?? order.diner_label ?? null,
+              targetFireAt: new Date().toISOString(),
+              firedAt: new Date().toISOString(),
+            }),
+          ],
+        );
+
+        await db.query(
+          `INSERT INTO outbox_events (org_id, aggregate, aggregate_id, event_type, payload)
+           VALUES ($1, 'order', $2, 'ORDER_ITEM_RELEASED', $3)`,
+          [
+            targetOrgId,
+            orderId,
+            JSON.stringify({
+              orderId,
+              itemId: item.id,
+              itemName: item.name_snapshot,
+              notes: updatedNotes,
+              status: nextItemStatus,
+              holdStatus: 'RELEASED',
+            }),
+          ],
+        );
+      }
+
+      return {
+        order_id: orderId,
+        display_id: order.display_id,
+        displayId: order.display_id,
+        released_count: itemsToRelease.length,
+        released_item_ids: itemsToRelease.map((i) => i.id),
+      };
+    });
+  }
+
+  /**
+   * Staff (Captain/Manager) releases on-hold items (e.g. Desserts/Beverages or Scheduled Wait items)
+   * for an order so the kitchen prepares them immediately.
+   */
+  async releaseOrderHeldItemsByStaff(
+    orgId: string,
+    orderId: string,
+    actorId: string,
+    staffOutletId?: string,
+    targetItemId?: string,
+  ) {
+    const targetOrgId = await this.resolveOrderOrgId(orgId, orderId);
+
+    return withTenantContextRaw(targetOrgId, async (db) => {
+      const { rows: ordRows } = await db.query<{
+        id: string;
+        outlet_id: string;
+        table_id: string;
+        status: OrderStatus;
+        payment_status?: string;
+        payment_method?: string;
+        display_id?: string;
+        diner_id?: string | null;
+        diner_label?: string | null;
+      }>(
+        `SELECT id, outlet_id, table_id, status, payment_status, payment_method, display_id, diner_id, diner_label
+         FROM orders WHERE id = $1 AND org_id = $2`,
+        [orderId, targetOrgId],
+      );
+      const order = ordRows[0];
+      if (!order) throw domainError(ErrorCode.NOT_FOUND, 'Order not found.', 404);
+
+      if (staffOutletId) {
+        assertStaffOutletAccess(staffOutletId, order.outlet_id as string | undefined);
+      }
+
+      if (order.status === 'BILLED' || order.status === 'CANCELLED' || order.status === 'COMPLETED') {
+        throw domainError(
+          ErrorCode.VALIDATION_ERROR,
+          `Cannot release items on '${order.status}' order.`,
+          400,
+        );
+      }
+
+      // Zero-Leak Payment Gate: verify order is paid
+      const isPaid = order.payment_status === 'PAID' || order.payment_method === 'CASH_APPROVED';
+      if (!isPaid) {
+        throw domainError(ErrorCode.CONFLICT, 'Cannot prepare an unpaid order', 409);
+      }
+
+      let itemQuery = `SELECT id, order_id, name_snapshot, notes, status, hold_status, diner_id, diner_label
+                       FROM order_items
+                       WHERE order_id = $1 AND org_id = $2`;
+      const queryParams: unknown[] = [orderId, targetOrgId];
+
+      if (targetItemId) {
+        queryParams.push(targetItemId);
+        itemQuery += ` AND id = $${queryParams.length}`;
+      } else {
+        itemQuery += ` AND hold_status IN ('SERVE_LATER_HOLD', 'SCHEDULED_WAIT')`;
+      }
+      itemQuery += ` FOR UPDATE`;
+
+      const { rows: itemsToRelease } = await db.query<{
+        id: string;
+        order_id: string;
+        name_snapshot: string;
+        notes: string | null;
+        status: ItemStatus;
+        hold_status: string;
+        diner_id?: string | null;
+        diner_label?: string | null;
+      }>(itemQuery, queryParams);
+
+      const validActorUuid = this.toValidUuidOrNull(actorId);
+
+      for (const item of itemsToRelease) {
+        const rawNotes = item.notes || '';
+        const updatedNotes = rawNotes.includes('[RELEASED_TO_KITCHEN]')
+          ? rawNotes
+          : rawNotes
+          ? `${rawNotes} · [RELEASED_TO_KITCHEN]`
+          : '[RELEASED_TO_KITCHEN]';
+
+        const nextItemStatus = item.status === 'PENDING' ? 'CONFIRMED' : item.status;
+
+        await db.query(
+          `UPDATE order_items
+           SET notes = $1, status = $2, hold_status = 'RELEASED', target_fire_at = now(), updated_at = now()
+           WHERE id = $3 AND org_id = $4`,
+          [updatedNotes, nextItemStatus, item.id, targetOrgId],
+        );
+
+        await db.query(
+          `INSERT INTO order_events (org_id, order_id, event_type, actor_type, actor_id, payload)
+           VALUES ($1, $2, 'ITEM_RELEASED_FROM_HOLD', 'STAFF', $3, $4)`,
+          [
+            targetOrgId,
+            orderId,
+            validActorUuid,
+            JSON.stringify({
+              itemId: item.id,
+              itemName: item.name_snapshot,
+              releasedAt: new Date().toISOString(),
+              releasedBy: 'STAFF',
+            }),
+          ],
+        );
+
+        await db.query(
+          `INSERT INTO outbox_events (org_id, aggregate, aggregate_id, event_type, payload)
+           VALUES ($1, 'order_item', $2, 'kds.item_fired', $3)`,
+          [
+            targetOrgId,
+            item.id,
+            JSON.stringify({
+              orderId,
+              displayId: order.display_id,
+              itemId: item.id,
+              dishName: item.name_snapshot,
+              notes: updatedNotes,
+              status: nextItemStatus,
+              holdStatus: 'RELEASED',
+              dinerId: item.diner_id ?? order.diner_id ?? null,
+              dinerLabel: item.diner_label ?? order.diner_label ?? null,
+              targetFireAt: new Date().toISOString(),
+              firedAt: new Date().toISOString(),
+            }),
+          ],
+        );
+
+        await db.query(
+          `INSERT INTO outbox_events (org_id, aggregate, aggregate_id, event_type, payload)
+           VALUES ($1, 'order', $2, 'ORDER_ITEM_RELEASED', $3)`,
+          [
+            targetOrgId,
+            orderId,
+            JSON.stringify({
+              orderId,
+              itemId: item.id,
+              itemName: item.name_snapshot,
+              notes: updatedNotes,
+              status: nextItemStatus,
+              holdStatus: 'RELEASED',
+            }),
+          ],
+        );
+      }
+
+      return {
+        order_id: orderId,
+        display_id: order.display_id,
+        displayId: order.display_id,
+        released_count: itemsToRelease.length,
+        released_item_ids: itemsToRelease.map((i) => i.id),
       };
     });
   }
@@ -784,8 +1274,13 @@ export class OrdersService {
     const targetOrgId = await this.resolveOrderOrgId(orgId, orderId);
 
     return withTenantContextRaw(targetOrgId, async (db) => {
-      const { rows } = await db.query<{ status: OrderStatus; outlet_id?: string }>(
-        `SELECT status, outlet_id FROM orders WHERE id = $1 AND org_id = $2`,
+      const { rows } = await db.query<{
+        status: OrderStatus;
+        payment_status?: string;
+        payment_method?: string;
+        outlet_id?: string;
+      }>(
+        `SELECT status, payment_status, payment_method, outlet_id FROM orders WHERE id = $1 AND org_id = $2`,
         [orderId, targetOrgId],
       );
       const order = rows[0];
@@ -795,6 +1290,14 @@ export class OrdersService {
       }
       if (isTerminalOrderStatus(order.status)) {
         throw domainError(ErrorCode.VALIDATION_ERROR, `Order is in terminal state '${order.status}'.`, 400);
+      }
+
+      // Zero-Leak Payment Gate: Cannot prepare an unpaid order
+      if (['PREPARING', 'READY', 'SERVED'].includes(dto.status)) {
+        const isPaid = order.payment_status === 'PAID' || order.payment_method === 'CASH_APPROVED';
+        if (!isPaid) {
+          throw domainError(ErrorCode.CONFLICT, 'Cannot prepare an unpaid order', 409);
+        }
       }
 
       const result = canTransitionOrder(order.status, dto.status as OrderStatus);
@@ -854,8 +1357,16 @@ export class OrdersService {
         assertStaffOutletAccess(staffOutletId, ordRows[0].outlet_id);
       }
 
-      const { rows } = await db.query<{ status: ItemStatus; order_id: string }>(
-        `SELECT status, order_id FROM order_items WHERE id = $1 AND org_id = $2`,
+      const { rows } = await db.query<{
+        status: ItemStatus;
+        order_id: string;
+        payment_status?: string;
+        payment_method?: string;
+      }>(
+        `SELECT oi.status, oi.order_id, o.payment_status, o.payment_method
+         FROM order_items oi
+         JOIN orders o ON o.id = oi.order_id AND o.org_id = oi.org_id
+         WHERE oi.id = $1 AND oi.org_id = $2`,
         [itemId, targetOrgId],
       );
       const item = rows[0];
@@ -863,13 +1374,43 @@ export class OrdersService {
         throw domainError(ErrorCode.NOT_FOUND, 'Order item not found.', 404);
       }
 
+      // Zero-Leak Payment Gate: Cannot prepare an unpaid order item
+      if (['PREPARING', 'READY', 'SERVED'].includes(dto.status)) {
+        const isPaid = item.payment_status === 'PAID' || item.payment_method === 'CASH_APPROVED';
+        if (!isPaid) {
+          throw domainError(ErrorCode.CONFLICT, 'Cannot prepare an unpaid order', 409);
+        }
+      }
+
       const result = canTransitionItem(item.status, dto.status as ItemStatus);
       if (!result.ok) throw domainError(ErrorCode.VALIDATION_ERROR, result.reason, 400);
 
-      await db.query(
-        `UPDATE order_items SET status = $1, updated_at = now() WHERE id = $2 AND org_id = $3`,
-        [dto.status, itemId, targetOrgId],
-      );
+      const validActorUuid = this.toValidUuidOrNull(actorId);
+
+      if (dto.status === 'PREPARING') {
+        const { rowCount } = await db.query(
+          `UPDATE order_items
+           SET status = 'PREPARING',
+               claimed_by_staff_id = $1,
+               claimed_at = now(),
+               updated_at = now()
+           WHERE id = $2
+             AND order_id = $3
+             AND org_id = $4
+             AND status IN ('PENDING', 'CONFIRMED')
+             AND hold_status IN ('ACTIVE', 'RELEASED')
+             AND claimed_by_staff_id IS NULL`,
+          [validActorUuid, itemId, orderId, targetOrgId],
+        );
+        if (!rowCount || rowCount === 0) {
+          throw domainError(ErrorCode.CONFLICT, 'Item already claimed by another chef', 409);
+        }
+      } else {
+        await db.query(
+          `UPDATE order_items SET status = $1, updated_at = now() WHERE id = $2 AND org_id = $3`,
+          [dto.status, itemId, targetOrgId],
+        );
+      }
 
       // Auto-derive parent order status from all item statuses
       const { rows: allItems } = await db.query<{ status: string }>(
@@ -877,8 +1418,6 @@ export class OrdersService {
         [orderId, targetOrgId],
       );
       const derivedStatus = deriveOrderStatus(allItems.map((i) => i.status as ItemStatus));
-
-      const validActorUuid = this.toValidUuidOrNull(actorId);
 
       if (derivedStatus) {
         const { rows: orderRows } = await db.query<{ status: OrderStatus }>(
@@ -969,14 +1508,27 @@ export class OrdersService {
     }
     for (const ord of orders) {
       const id = ord['id'] as string;
+      const orderDisplayId = (ord['displayId'] as string) ?? (ord['display_id'] as string) ?? (ord['order_number'] ? `ORD-${String(ord['order_number']).padStart(4, '0')}` : `ORD-${String(id).slice(-4).toUpperCase()}`);
+      ord['displayId'] = orderDisplayId;
+      ord['display_id'] = orderDisplayId;
+      ord['dinerId'] = ord['diner_id'] ?? null;
+      ord['dinerLabel'] = ord['diner_label'] ?? null;
+
       const matched = itemsByOrder.get(id);
-      if (matched) {
-        ord['items'] = matched;
-      } else if (orders.length === 1 && allItems.length > 0 && allItems[0]!['order_id'] === undefined) {
-        ord['items'] = allItems;
-      } else {
-        ord['items'] = [];
-      }
+      const rawList = matched ?? (orders.length === 1 && allItems.length > 0 && allItems[0]!['order_id'] === undefined ? allItems : []);
+      const mappedItems = rawList.map((item) => {
+        const itemCopy = { ...item };
+        itemCopy['orderId'] = id;
+        itemCopy['displayId'] = orderDisplayId;
+        itemCopy['orderDisplayId'] = orderDisplayId;
+        itemCopy['dinerId'] = itemCopy['diner_id'] ?? ord['diner_id'] ?? null;
+        itemCopy['dinerLabel'] = itemCopy['diner_label'] ?? ord['diner_label'] ?? null;
+        itemCopy['itemStatus'] = itemCopy['status'];
+        itemCopy['holdStatus'] = itemCopy['hold_status'];
+        itemCopy['targetFireAt'] = itemCopy['target_fire_at'] ? new Date(itemCopy['target_fire_at'] as string).toISOString() : null;
+        return itemCopy;
+      });
+      ord['items'] = mappedItems;
     }
   }
 
@@ -1059,7 +1611,7 @@ export class OrdersService {
       }
     }
 
-    const modifierIds = [...new Set(items.flatMap((i) => i.modifiers.map((m) => m.modifier_id)))];
+    const modifierIds = [...new Set(items.flatMap((i) => (i.modifiers ?? []).map((m) => m.modifier_id)))];
     const modMap = new Map<string, { group_id: string; price_paise: number; name: string; is_available: boolean }>();
     const itemAllowedGroups = new Map<string, Set<string>>();
     if (modifierIds.length > 0) {
@@ -1092,7 +1644,7 @@ export class OrdersService {
     return items.map((line) => {
       const mi = menuItemMap.get(line.menu_item_id)!;
       const allowedGroups = itemAllowedGroups.get(line.menu_item_id);
-      const modPaise = line.modifiers.reduce((sum, m) => {
+      const modPaise = (line.modifiers ?? []).reduce((sum, m) => {
         const mod = modMap.get(m.modifier_id);
         if (!mod) throw domainError(ErrorCode.NOT_FOUND, `Modifier ${m.modifier_id} not found.`, 404);
         if (!mod.is_available) {
@@ -1119,7 +1671,7 @@ export class OrdersService {
         name_snapshot: nameSnapshot,
         unit_price_paise: basePricePaise + modPaise,
         quantity: line.quantity,
-        modifiers: line.modifiers.map((m) => ({
+        modifiers: (line.modifiers ?? []).map((m) => ({
           modifier_id: m.modifier_id,
           name: modMap.get(m.modifier_id)!.name,
           price_paise: modMap.get(m.modifier_id)!.price_paise,
@@ -1158,6 +1710,13 @@ export class OrdersService {
       [orderId, orgId],
     );
     if (!orderRows[0]) throw domainError(ErrorCode.NOT_FOUND, 'Order not found.', 404);
+    const order = orderRows[0] as Record<string, unknown>;
+    const orderDisplayId = (order['display_id'] as string) ?? (order['order_number'] ? `ORD-${String(order['order_number']).padStart(4, '0')}` : `ORD-${String(orderId).slice(-4).toUpperCase()}`);
+    order['displayId'] = orderDisplayId;
+    order['display_id'] = orderDisplayId;
+    order['dinerId'] = order['diner_id'] ?? null;
+    order['dinerLabel'] = order['diner_label'] ?? null;
+
     const { rows: itemRows } = await db.query(
       `SELECT ${ORDER_ITEM_SELECT_FIELDS}
        FROM order_items oi
@@ -1165,6 +1724,18 @@ export class OrdersService {
        WHERE oi.order_id = $1 AND oi.org_id = $2 ORDER BY oi.created_at`,
       [orderId, orgId],
     );
-    return { ...orderRows[0], items: itemRows };
+    const mappedItems = itemRows.map((item) => {
+      const itemCopy = { ...item } as Record<string, unknown>;
+      itemCopy['orderId'] = orderId;
+      itemCopy['displayId'] = orderDisplayId;
+      itemCopy['orderDisplayId'] = orderDisplayId;
+      itemCopy['dinerId'] = itemCopy['diner_id'] ?? order['diner_id'] ?? null;
+      itemCopy['dinerLabel'] = itemCopy['diner_label'] ?? order['diner_label'] ?? null;
+      itemCopy['itemStatus'] = itemCopy['status'];
+      itemCopy['holdStatus'] = itemCopy['hold_status'];
+      itemCopy['targetFireAt'] = itemCopy['target_fire_at'] ? new Date(itemCopy['target_fire_at'] as string).toISOString() : null;
+      return itemCopy;
+    });
+    return { ...order, items: mappedItems };
   }
 }
