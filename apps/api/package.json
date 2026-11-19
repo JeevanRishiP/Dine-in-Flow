@@ -6,6 +6,7 @@
     "build": "tsc -p tsconfig.json",
     "dev": "nest start --watch",
     "start": "node dist/main.js",
+    "start:prod": "node dist/main.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "node ../../packages/config/scripts/lint-workspace.mjs --package .",
     "test": "vitest run --reporter=verbose --passWithNoTests",
