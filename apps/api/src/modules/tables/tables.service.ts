@@ -476,6 +476,22 @@ export class TablesService {
       orgId = orgRows[0]?.resolve_outlet_org ?? null;
     }
 
+    // In non-production, if the provided outlet ID doesn't exist in the database (e.g. stale dev ID or reseeded DB),
+    // gracefully fall back to the pilot restaurant instead of throwing 404
+    if (!orgId) {
+      const cfg = getConfig();
+      if (cfg.NODE_ENV !== 'production') {
+        const { rows: pilotRows } = await pool.query<{ outlet_id: string; org_id: string }>(
+          `SELECT outlet_id, org_id FROM resolve_public_outlet_by_slug($1)`,
+          ['royal-spice-bistro'],
+        );
+        if (pilotRows[0]) {
+          resolvedOutletId = pilotRows[0].outlet_id;
+          orgId = pilotRows[0].org_id;
+        }
+      }
+    }
+
     if (!orgId) {
       throw domainError(ErrorCode.OUTLET_NOT_FOUND, 'Outlet not found or inactive.', 404);
     }
@@ -725,7 +741,9 @@ export class TablesService {
   /**
    * Captain/Waiter marks a table cleaned & ready for the next customer.
    * Marks active table links for this table CLEANED, closes open sessions on this table,
-   * and dissolves a temporary customer ONLY once ALL tables linked to them are cleaned.
+   * dissolves a temporary customer ONLY once ALL tables linked to them are cleaned,
+   * archives lingering unserved/held/ready items and terminal orders,
+   * and emits outbox events (table.cleaned, kds.sync_required) so KDS and Floor drop cleared table tickets.
    */
   async cleanTableAndDissolve(
     orgId: string,
@@ -759,25 +777,27 @@ export class TablesService {
         [orgId, tableId, staffUserId],
       );
 
-      await db.query(
+      const closeTableSessResult = await db.query<{ id: string }>(
         `UPDATE table_sessions
          SET status = 'CLOSED', closed_at = now(), updated_at = now()
-         WHERE org_id = $1 AND table_id = $2 AND status = 'OPEN'`,
+         WHERE org_id = $1 AND table_id = $2 AND status = 'OPEN'
+         RETURNING id`,
         [orgId, tableId],
       );
+      const closedSessionIds: string[] = (closeTableSessResult?.rows ?? []).map((r) => r.id);
 
       const dissolvedTempCustomerIds: string[] = [];
       let stillActiveOtherTablesCount = 0;
 
-      for (const row of linkedTcs) {
+      for (const row of (linkedTcs ?? [])) {
         const tcId = row.temp_customer_id;
-        const { rows: remRows } = await db.query<{ remaining: number }>(
+        const remResult = await db.query<{ remaining: number }>(
           `SELECT COUNT(*)::int AS remaining
            FROM temp_customer_tables
            WHERE org_id = $1 AND temp_customer_id = $2 AND status = 'ACTIVE'`,
           [orgId, tcId],
         );
-        const remaining = Number(remRows[0]?.remaining ?? 0);
+        const remaining = Number(remResult?.rows?.[0]?.remaining ?? 0);
         if (remaining === 0) {
           await db.query(
             `UPDATE temp_customers
@@ -785,17 +805,92 @@ export class TablesService {
              WHERE id = $1 AND org_id = $2 AND status = 'ACTIVE'`,
             [tcId, orgId],
           );
-          await db.query(
+          const closeTcSessResult = await db.query<{ id: string }>(
             `UPDATE table_sessions
              SET status = 'CLOSED', closed_at = now(), updated_at = now()
-             WHERE org_id = $1 AND temp_customer_id = $2 AND status = 'OPEN'`,
+             WHERE org_id = $1 AND temp_customer_id = $2 AND status = 'OPEN'
+             RETURNING id`,
             [orgId, tcId],
           );
+          for (const s of closeTcSessResult?.rows ?? []) {
+            closedSessionIds.push(s.id);
+          }
           dissolvedTempCustomerIds.push(tcId);
         } else {
           stillActiveOtherTablesCount += remaining;
         }
       }
+
+      // Transition lingering unserved/held/ready/preparing items to terminal state
+      const sessionParam = closedSessionIds.length > 0 ? closedSessionIds : ['00000000-0000-0000-0000-000000000000'];
+
+      await db.query(
+        `UPDATE order_items
+         SET status = 'SERVED', updated_at = now()
+         WHERE org_id = $1
+           AND (order_id IN (SELECT id FROM orders WHERE session_id = ANY($2) OR table_id = $3) OR target_table_id = $3)
+           AND status = 'READY'`,
+        [orgId, sessionParam, tableId],
+      );
+
+      await db.query(
+        `UPDATE order_items
+         SET status = 'CANCELLED', updated_at = now()
+         WHERE org_id = $1
+           AND (order_id IN (SELECT id FROM orders WHERE session_id = ANY($2) OR table_id = $3) OR target_table_id = $3)
+           AND status NOT IN ('SERVED', 'CANCELLED')`,
+        [orgId, sessionParam, tableId],
+      );
+
+      await db.query(
+        `UPDATE orders
+         SET status = 'BILLED', updated_at = now()
+         WHERE org_id = $1
+           AND (session_id = ANY($2) OR table_id = $3)
+           AND (payment_status = 'PAID' OR payment_method = 'CASH_APPROVED')
+           AND status NOT IN ('BILLED', 'COMPLETED', 'CANCELLED')`,
+        [orgId, sessionParam, tableId],
+      );
+
+      await db.query(
+        `UPDATE orders
+         SET status = 'CANCELLED', updated_at = now()
+         WHERE org_id = $1
+           AND (session_id = ANY($2) OR table_id = $3)
+           AND status NOT IN ('BILLED', 'COMPLETED', 'CANCELLED')`,
+        [orgId, sessionParam, tableId],
+      );
+
+      // Emit table.cleaned and kds.sync_required outbox events
+      await db.query(
+        `INSERT INTO outbox_events (org_id, aggregate, aggregate_id, event_type, payload)
+         VALUES ($1, 'table', $2, 'table.cleaned', $3)`,
+        [
+          orgId,
+          tableId,
+          JSON.stringify({
+            tableId,
+            tableNumber,
+            cleanedAt: new Date().toISOString(),
+            dissolvedTempCustomerIds,
+          }),
+        ],
+      );
+
+      await db.query(
+        `INSERT INTO outbox_events (org_id, aggregate, aggregate_id, event_type, payload)
+         VALUES ($1, 'kds', $2, 'kds.sync_required', $3)`,
+        [
+          orgId,
+          tableId,
+          JSON.stringify({
+            reason: 'TABLE_CLEANED',
+            tableId,
+            tableNumber,
+            cleanedAt: new Date().toISOString(),
+          }),
+        ],
+      );
 
       return {
         cleaned: true,
