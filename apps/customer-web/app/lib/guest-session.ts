@@ -22,8 +22,8 @@ export interface OutletTableInfo {
   capacity?: number;
 }
 
-export const DEFAULT_DEV_OUTLET_ID = 'b0000000-0000-0000-0000-000000000001';
-export const DEFAULT_DEV_ORG_ID = 'a0000000-0000-0000-0000-000000000001';
+export const DEFAULT_DEV_OUTLET_ID = '71ad00a6-d79b-4035-b563-bf9543fcfa86';
+export const DEFAULT_DEV_ORG_ID = '7762b6af-d052-4e74-b917-39e3c56e7914';
 
 const GUEST_SESSION_STORAGE_KEY = 'dineflow_guest_session_v2';
 const CUSTOMER_AUTH_STORAGE_KEY = 'dineflow_customer_auth_v2';
@@ -143,8 +143,11 @@ export function loadGuestSession(): GuestSessionState | null {
       !parsed?.orgId ||
       !parsed?.outletId ||
       !parsed?.tableId ||
-      !parsed?.guestSessionToken
+      !parsed?.guestSessionToken ||
+      parsed.orgId === 'a0000000-0000-0000-0000-000000000001' ||
+      parsed.outletId === 'b0000000-0000-0000-0000-000000000001'
     ) {
+      storage.removeItem(GUEST_SESSION_STORAGE_KEY);
       return null;
     }
     return {
@@ -217,9 +220,19 @@ export function resolveTenantIds(
   const isDev = process.env.NODE_ENV === 'development';
   const shouldFallbackDev = options?.fallbackToDev ?? isDev;
 
+  const resolvedOrg =
+    active?.orgId && active.orgId !== 'a0000000-0000-0000-0000-000000000001'
+      ? active.orgId
+      : envOrg || (shouldFallbackDev ? DEFAULT_DEV_ORG_ID : '');
+
+  const resolvedOutlet =
+    active?.outletId && active.outletId !== 'b0000000-0000-0000-0000-000000000001'
+      ? active.outletId
+      : envOutlet || (shouldFallbackDev ? DEFAULT_DEV_OUTLET_ID : '');
+
   return {
-    orgId: active?.orgId || envOrg || (shouldFallbackDev ? DEFAULT_DEV_ORG_ID : ''),
-    outletId: active?.outletId || envOutlet || (shouldFallbackDev ? DEFAULT_DEV_OUTLET_ID : ''),
+    orgId: resolvedOrg,
+    outletId: resolvedOutlet,
   };
 }
 
@@ -234,14 +247,31 @@ export async function fetchOutletTableDirectory(
 } | null> {
   try {
     const qs = new URLSearchParams();
-    const isDev = process.env.NODE_ENV === 'development';
-    const shouldFallbackDev = options?.fallbackToDev ?? isDev;
-    const effectiveOutletId = outletId || (shouldFallbackDev ? DEFAULT_DEV_OUTLET_ID : undefined);
-    if (effectiveOutletId && UUID_REGEX.test(effectiveOutletId)) qs.set('outlet_id', effectiveOutletId);
-    if (slug && slug.trim()) qs.set('slug', slug.trim());
+    const envDefaultOutlet = process.env['NEXT_PUBLIC_DEFAULT_OUTLET_ID']?.trim();
+
+    // Prioritize explicit outletId -> NEXT_PUBLIC_DEFAULT_OUTLET_ID (or fallbackToDev only when explicitly requested)
+    const effectiveOutletId =
+      outletId ||
+      (envDefaultOutlet && UUID_REGEX.test(envDefaultOutlet) ? envDefaultOutlet : undefined) ||
+      (options?.fallbackToDev ? DEFAULT_DEV_OUTLET_ID : undefined);
+
+    if (effectiveOutletId && UUID_REGEX.test(effectiveOutletId)) {
+      qs.set('outlet_id', effectiveOutletId);
+    }
+    if (slug && slug.trim()) {
+      qs.set('slug', slug.trim());
+    }
+
     const queryStr = qs.toString();
     const url = queryStr ? `/api/v1/public/tables/directory?${queryStr}` : '/api/v1/public/tables/directory';
-    const res = await fetch(url);
+    let res = await fetch(url);
+
+    // If query with specific outlet_id failed (e.g. 404 because outlet id changed or is unseeded),
+    // automatically retry without query params so backend resolves the default/pilot seeded outlet
+    if (!res.ok && queryStr) {
+      res = await fetch('/api/v1/public/tables/directory');
+    }
+
     if (!res.ok) return null;
     const data = (await res.json()) as {
       org_id?: string;

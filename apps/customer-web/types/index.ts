@@ -131,14 +131,20 @@ export interface CartLineItem {
 }
 
 export interface AvailableCoupon {
+  id?: string;
   code: string;
-  tag: string;
-  title: string;
-  description: string;
+  tag?: string;
+  title?: string;
+  description?: string;
   minOrderPaise: number;
-  type: 'PERCENT' | 'FIXED';
+  type: 'PERCENT' | 'FIXED' | 'PERCENTAGE' | 'FLAT';
   percent?: number;
   fixedPaise?: number;
+  discountValue?: number;
+  maxDiscountPaise?: number;
+  value?: number;
+  validity?: string;
+  isActive?: boolean;
 }
 
 export type ActiveModalType =
@@ -152,6 +158,8 @@ export type ActiveModalType =
   | 'customizer'
   | 'combo'
   | 'payment'
+  | 'booking'
+  | 'serve_later'
   | null;
 
 // ============================================================================
@@ -175,11 +183,29 @@ export interface TableOrderItemRecord {
   created_at?: string;
   target_table_id?: string | null;
   target_table_number?: string | null;
+  course_sequence?: number;
+  prep_time_minutes?: number;
+  target_fire_at?: string | null;
+  hold_status?: 'ACTIVE' | 'SCHEDULED_WAIT' | 'SERVE_LATER_HOLD' | 'RELEASED';
+  is_combo_item?: boolean;
+  combo_name?: string | null;
   modifiers?: TableOrderItemModifier[];
+  displayId?: string;
+  display_id?: string;
+  dinerId?: string | null;
+  diner_id?: string | null;
+  dinerLabel?: string | null;
+  diner_label?: string | null;
 }
 
 export interface TableOrderRecord {
   id: string;
+  displayId?: string;
+  display_id?: string;
+  dinerId?: string | null;
+  diner_id?: string | null;
+  dinerLabel?: string | null;
+  diner_label?: string | null;
   table_number: string;
   status: 'PENDING' | 'PREPARING' | 'CONFIRMED' | 'READY' | 'SERVED' | 'BILLED' | 'CANCELLED';
   subtotal_paise: number;
@@ -189,6 +215,12 @@ export interface TableOrderRecord {
   payment_status?: 'PAID' | 'PENDING' | 'FAILED' | 'AUTHORIZED' | 'REFUNDED' | null;
   payment_method?: string | null;
   payment_settled_at?: string | null;
+  order_type?: 'DINE_IN' | 'PRE_BOOK_DINE_IN' | 'TAKEAWAY';
+  scheduled_for?: string | null;
+  guest_count?: number | null;
+  paid_at?: string | null;
+  main_course_served_at?: string | null;
+  serve_later_prompt_sent_at?: string | null;
   items: TableOrderItemRecord[];
 }
 
@@ -196,6 +228,9 @@ export interface FlattenedPlateItem {
   plateKey: string;
   orderId: string;
   orderNumber: string;
+  displayId?: string;
+  dinerId?: string | null;
+  dinerLabel?: string | null;
   tableId?: string | null;
   tableNumber: string;
   orderCreatedAt: string;
@@ -219,5 +254,14 @@ export interface FlattenedPlateItem {
   rawNotes?: string;
   isOnHold?: boolean;
   itemStatus?: string;
+  courseSequence?: number;
+  prepTimeMinutes?: number;
+  targetFireAt?: string | null;
+  holdStatus?: 'ACTIVE' | 'SCHEDULED_WAIT' | 'SERVE_LATER_HOLD' | 'RELEASED';
+  isScheduledWait?: boolean;
+  isComboItem?: boolean;
+  comboName?: string | null;
+  orderType?: string;
+  scheduledFor?: string | null;
 }
 
