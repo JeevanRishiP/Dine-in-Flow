@@ -96,8 +96,16 @@ export function MenuGrid({
   const [viewMode, setViewMode] = useState<MenuViewMode>(defaultViewMode);
 
   // ── Category Navigation State ──
+  const sortedCategories = useMemo(() => {
+    return [...categories].sort((a, b) => {
+      if (a.toLowerCase() === 'combos') return -1;
+      if (b.toLowerCase() === 'combos') return 1;
+      return 0;
+    });
+  }, [categories]);
+
   const [internalActiveCategory, setInternalActiveCategory] = useState<string>(
-    categories[0] || 'Starters'
+    sortedCategories[0] || 'Combos'
   );
   const activeCategory =
     propActiveCategory !== undefined ? propActiveCategory : internalActiveCategory;
@@ -280,70 +288,72 @@ export function MenuGrid({
         </div>
       </div>
 
-      {/* 2. Category Filter Pill Bar */}
-      <CategoryFilterBar
-        categories={categories}
-        activeCategory={activeCategory}
-        onSelectCategory={handleCategorySelect}
-      />
+      {/* 2 & 3. Sticky Combined Toolbar: Category Pills + Secondary Filter Row */}
+      <div className="menu-sticky-toolbar-wrapper">
+        <CategoryFilterBar
+          categories={sortedCategories}
+          activeCategory={activeCategory}
+          onSelectCategory={handleCategorySelect}
+        />
 
-      {/* 3. Filter Chips & Sort Row */}
-      <div className="menu-filter-sort-row">
-        <div className="dietary-chips-group">
-          <button
-            type="button"
-            className={`dietary-chip-btn ${dietaryFilter === 'ALL' ? 'active' : ''}`}
-            onClick={() => handleDietaryFilterChange('ALL')}
-          >
-            All
-          </button>
-          <button
-            type="button"
-            className={`dietary-chip-btn ${dietaryFilter === 'VEG' ? 'active' : ''}`}
-            onClick={() => handleDietaryFilterChange(dietaryFilter === 'VEG' ? 'ALL' : 'VEG')}
-          >
-            <span style={{ color: '#10b981' }}>🟢</span> Veg
-          </button>
-          <button
-            type="button"
-            className={`dietary-chip-btn ${dietaryFilter === 'NON_VEG' ? 'active' : ''}`}
-            onClick={() => handleDietaryFilterChange(dietaryFilter === 'NON_VEG' ? 'ALL' : 'NON_VEG')}
-          >
-            <span style={{ color: '#ef4444' }}>🔴</span> Non-Veg
-          </button>
-        </div>
-
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          {showViewToggle && (
+        {/* 3. Filter Chips & Sort Row */}
+        <div className="menu-filter-sort-row">
+          <div className="dietary-chips-group">
             <button
               type="button"
-              onClick={() => setViewMode((prev) => (prev === 'row' ? 'grid' : 'row'))}
-              className="dietary-chip-btn"
-              style={{ padding: '6px 10px', fontSize: '0.8rem' }}
-              title={viewMode === 'row' ? 'Switch to Card Grid' : 'Switch to List Rows'}
+              className={`dietary-chip-btn ${dietaryFilter === 'ALL' ? 'active' : ''}`}
+              onClick={() => handleDietaryFilterChange('ALL')}
             >
-              {viewMode === 'row' ? '⊞ Grid' : '☰ Rows'}
+              All
             </button>
-          )}
+            <button
+              type="button"
+              className={`dietary-chip-btn ${dietaryFilter === 'VEG' ? 'active' : ''}`}
+              onClick={() => handleDietaryFilterChange(dietaryFilter === 'VEG' ? 'ALL' : 'VEG')}
+            >
+              <span style={{ color: '#10b981' }}>🟢</span> Veg
+            </button>
+            <button
+              type="button"
+              className={`dietary-chip-btn ${dietaryFilter === 'NON_VEG' ? 'active' : ''}`}
+              onClick={() => handleDietaryFilterChange(dietaryFilter === 'NON_VEG' ? 'ALL' : 'NON_VEG')}
+            >
+              <span style={{ color: '#ef4444' }}>🔴</span> Non-Veg
+            </button>
+          </div>
 
-          <select
-            className="sort-select-dropdown"
-            value={sortOption}
-            onChange={(e) => handleSortOptionChange(e.target.value as MenuSortOption)}
-          >
-            <option value="POPULAR">Sort: Popular</option>
-            <option value="PRICE_ASC">Price: Low to High</option>
-            <option value="PRICE_DESC">Price: High to Low</option>
-            <option value="RATING">Rating: High to Low</option>
-            <option value="PREP_TIME">Prep Time</option>
-          </select>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            {showViewToggle && (
+              <button
+                type="button"
+                onClick={() => setViewMode((prev) => (prev === 'row' ? 'grid' : 'row'))}
+                className="dietary-chip-btn"
+                style={{ padding: '6px 10px', fontSize: '0.8rem' }}
+                title={viewMode === 'row' ? 'Switch to Card Grid' : 'Switch to List Rows'}
+              >
+                {viewMode === 'row' ? '⊞ Grid' : '☰ Rows'}
+              </button>
+            )}
+
+            <select
+              className="sort-select-dropdown"
+              value={sortOption}
+              onChange={(e) => handleSortOptionChange(e.target.value as MenuSortOption)}
+            >
+              <option value="POPULAR">Sort: Popular</option>
+              <option value="PRICE_ASC">Price: Low to High</option>
+              <option value="PRICE_DESC">Price: High to Low</option>
+              <option value="RATING">Rating: High to Low</option>
+              <option value="PREP_TIME">Prep Time</option>
+            </select>
+          </div>
         </div>
       </div>
 
       {/* 4. Menu Category Sections */}
       <div style={{ paddingBottom: '30px' }}>
         {hasAnyItems ? (
-          categories.map((cat) => {
+          sortedCategories.map((cat) => {
             const itemsInCat = groupedItems[cat] || [];
             if (itemsInCat.length === 0) return null;
 

@@ -3,9 +3,9 @@
 import React from 'react';
 import type { MenuItem } from '../../types';
 import { useOrderStore } from '../../store/useOrderStore';
+import { FALLBACK_DISH_IMG, resolveDishImageUrl } from './menu-image.utils';
 
-export const FALLBACK_DISH_IMG =
-  'https://images.unsplash.com/photo-1546833999-b9f581a1996d?auto=format&fit=crop&w=600&q=80';
+export { FALLBACK_DISH_IMG, resolveDishImageUrl };
 
 export interface SquareItemCardProps {
   item: MenuItem;
@@ -70,16 +70,20 @@ export function SquareItemCard({
     }
   };
 
+  const resolvedImageSrc = resolveDishImageUrl(item.imageUrl);
+
   return (
     <div className="square-item-card">
       <div className="square-img-container" onClick={onOpenAccordion}>
         <img
-          src={item.imageUrl || FALLBACK_DISH_IMG}
+          src={resolvedImageSrc}
           alt={item.name}
           className="square-dish-img"
           loading="lazy"
           onError={(e) => {
-            e.currentTarget.src = FALLBACK_DISH_IMG;
+            if (e.currentTarget.src !== FALLBACK_DISH_IMG) {
+              e.currentTarget.src = FALLBACK_DISH_IMG;
+            }
           }}
         />
 

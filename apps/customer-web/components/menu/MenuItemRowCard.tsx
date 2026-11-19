@@ -3,7 +3,7 @@
 import React from 'react';
 import type { MenuItem, ComboOffer } from '../../types';
 import { useOrderStore } from '../../store/useOrderStore';
-import { FALLBACK_DISH_IMG } from './SquareItemCard';
+import { FALLBACK_DISH_IMG, resolveDishImageUrl } from './menu-image.utils';
 
 // ============================================================================
 // Props Interface
@@ -154,12 +154,14 @@ export function MenuItemRowCard({
         <div className="menu-item-media-col" onClick={(e) => e.stopPropagation()}>
           <div className="menu-item-thumb-wrap" onClick={() => onSelectItem(item)}>
             <img
-              src={item.imageUrl || FALLBACK_DISH_IMG}
+              src={resolveDishImageUrl(item.imageUrl)}
               alt={item.name}
               className="menu-item-thumb-img"
               loading="lazy"
               onError={(e) => {
-                e.currentTarget.src = FALLBACK_DISH_IMG;
+                if (e.currentTarget.src !== FALLBACK_DISH_IMG) {
+                  e.currentTarget.src = FALLBACK_DISH_IMG;
+                }
               }}
             />
           </div>
@@ -186,7 +188,14 @@ export function MenuItemRowCard({
                 }
                 onClick={(e) => {
                   e.stopPropagation();
-                  onSelectItem(item);
+                  const hasMods =
+                    (item.modifierGroups && item.modifierGroups.length > 0) ||
+                    (item.modifiers && item.modifiers.length > 0);
+                  if (hasMods || item.category === 'Combos') {
+                    onSelectItem(item);
+                  } else {
+                    storeQuickAdd(item);
+                  }
                 }}
               >
                 <span>{item.category === 'Combos' ? 'Customize +' : 'Add +'}</span>
