@@ -11,70 +11,53 @@ import type {
 // Constants & Minor-Unit (Paise) Helper Functions
 // ============================================================================
 
-export const DEFAULT_COUPONS: AvailableCoupon[] = [
-  {
-    code: 'ROYAL15',
-    tag: 'POPULAR · 15% OFF',
-    title: 'Flat 15% Off Your Feast',
-    description: 'Get 15% instant discount on dine-in orders above ₹500.',
-    minOrderPaise: 50000,
-    type: 'PERCENT',
-    percent: 15,
-  },
-  {
-    code: 'DINEFIRST',
-    tag: 'FIRST DINE-IN',
-    title: '₹100 Welcome Discount',
-    description: 'Welcome gift of ₹100 off on dining bills above ₹300.',
-    minOrderPaise: 30000,
-    type: 'FIXED',
-    fixedPaise: 10000,
-  },
-  {
-    code: 'AWADHI50',
-    tag: 'BIRYANI SPECIAL',
-    title: '₹50 Biryani Delight',
-    description: 'Flat ₹50 savings on any authentic handi biryani or feast above ₹400.',
-    minOrderPaise: 40000,
-    type: 'FIXED',
-    fixedPaise: 5000,
-  },
-  {
-    code: 'FEAST20',
-    tag: 'GRAND GATHERINGS',
-    title: '20% Mega Savings',
-    description: 'Enjoy 20% savings for family gatherings and table bills above ₹1,500.',
-    minOrderPaise: 150000,
-    type: 'PERCENT',
-    percent: 20,
-  },
-  {
-    code: 'ROYAL200',
-    tag: 'CHEF VIP',
-    title: 'Flat ₹200 Off Royal Banquet',
-    description: 'Flat ₹200 deduction on lavish banquet dining above ₹2,000.',
-    minOrderPaise: 200000,
-    type: 'FIXED',
-    fixedPaise: 20000,
-  },
-];
+export const DEFAULT_COUPONS: AvailableCoupon[] = [];
 
 /**
  * Calculates discount in integer minor units (paise).
  * Rule 2.1: No floating-point money.
  */
 export function computeCouponDiscountPaise(coupon: AvailableCoupon, subtotalPaise: number): number {
-  if (subtotalPaise < coupon.minOrderPaise) return 0;
-  if (coupon.type === 'PERCENT' && coupon.percent) {
-    return Math.round((subtotalPaise * coupon.percent) / 100);
+  if (subtotalPaise < (coupon.minOrderPaise || 0)) return 0;
+  const typeUpper = (coupon.type || '').toUpperCase();
+  const isPercent = typeUpper === 'PERCENT' || typeUpper === 'PERCENTAGE';
+  const isFixed = typeUpper === 'FIXED' || typeUpper === 'FLAT';
+
+  let discount = 0;
+  if (isPercent) {
+    const rate = coupon.percent ?? coupon.discountValue ?? coupon.value ?? 0;
+    discount = Math.round((subtotalPaise * rate) / 100);
+  } else if (isFixed) {
+    const fixed =
+      coupon.fixedPaise ??
+      coupon.discountValue ??
+      (coupon.value ? (coupon.value > 1000 ? coupon.value : coupon.value * 100) : 0);
+    discount = Math.min(fixed, subtotalPaise);
   }
-  if (coupon.type === 'FIXED' && coupon.fixedPaise) {
-    return Math.min(coupon.fixedPaise, subtotalPaise);
+
+  if (coupon.maxDiscountPaise && discount > coupon.maxDiscountPaise) {
+    discount = coupon.maxDiscountPaise;
   }
-  return 0;
+  return Math.max(0, discount);
 }
 
 const STORAGE_CART_KEY = 'dineflow_customer_cart_v2';
+const STORAGE_BOOKING_KEY = 'dineflow_customer_booking_v1';
+
+function persistBookingToStorage(booking: {
+  orderType: 'DINE_IN' | 'PRE_BOOK_DINE_IN' | 'TAKEAWAY';
+  scheduledFor: string | null;
+  guestCount: number;
+  reservationId: string | null;
+  allocatedTableNumbers: string[];
+}) {
+  if (typeof window === 'undefined') return;
+  try {
+    sessionStorage.setItem(STORAGE_BOOKING_KEY, JSON.stringify(booking));
+  } catch {
+    // Ignore storage quota or access errors
+  }
+}
 
 function persistCartToStorage(cartLines: CartLineItem[]) {
   if (typeof window === 'undefined') return;
@@ -97,7 +80,12 @@ export interface OrderState {
   // ── Cart & Items State ──
   cartLines: CartLineItem[];
   appliedCoupon: string | null;
+  appliedCouponDiscountPaise: number | null;
+  pendingCouponCode: string | null;
   coupons: AvailableCoupon[];
+  setCoupons: (coupons: AvailableCoupon[]) => void;
+  setPendingCouponCode: (code: string | null) => void;
+  setAppliedCouponDiscountPaise: (paise: number | null) => void;
 
   // ── Table & Session State ──
   selectedTable: string;
@@ -109,6 +97,31 @@ export interface OrderState {
   isTableVerified: boolean;
   activeOrderCount: number;
   setActiveOrderCount: (count: number) => void;
+
+  // ── Smart Scheduling & Reservation State ──
+  orderType: 'DINE_IN' | 'PRE_BOOK_DINE_IN' | 'TAKEAWAY';
+  setOrderType: (type: 'DINE_IN' | 'PRE_BOOK_DINE_IN' | 'TAKEAWAY') => void;
+  setOrderMode: (mode: 'DINE_IN' | 'PRE_BOOK_DINE_IN' | 'TAKEAWAY') => void;
+  scheduledFor: string | null;
+  setScheduledFor: (iso: string | null) => void;
+  guestCount: number;
+  setGuestCount: (count: number) => void;
+  reservationId: string | null;
+  setReservationId: (id: string | null) => void;
+  allocatedTableNumbers: string[];
+  setAllocatedTableNumbers: (tables: string[]) => void;
+  serveLaterPrompt: { orderId: string; itemNames: string[]; promptedAt: string } | null;
+  setServeLaterPrompt: (prompt: { orderId: string; itemNames: string[]; promptedAt: string } | null) => void;
+  setBookingDetails: (details: {
+    orderType?: 'DINE_IN' | 'PRE_BOOK_DINE_IN' | 'TAKEAWAY';
+    scheduledFor?: string | null;
+    guestCount?: number;
+    reservationId?: string | null;
+    allocatedTableNumbers?: string[];
+  }) => void;
+  clearBookingDetails: () => void;
+  serveLaterDismissedUntil: number | null;
+  setServeLaterDismissedUntil: (ts: number | null) => void;
 
   // ── Modals & Overlays ──
   activeModal: ActiveModalType;
@@ -163,6 +176,8 @@ export interface OrderState {
   setIsOrdersHistoryOpen: (open: boolean) => void;
   isPaymentModalOpen: boolean;
   setIsPaymentModalOpen: (open: boolean) => void;
+  isBookingModalOpen: boolean;
+  setIsBookingModalOpen: (open: boolean) => void;
 
   // ── Payment & Settlement State ──
   selectedPaymentMethod: 'UPI' | 'CASH';
@@ -193,6 +208,7 @@ export interface OrderState {
     paymentId: string;
     totalPaise: number;
   } | null) => void;
+  resetCheckoutState: () => void;
 
   toggleWishlist: (itemId: string) => void;
   hydrateFromStorage: () => void;
@@ -206,6 +222,8 @@ export const useOrderStore = create<OrderState>((set, get) => ({
   // Initial state
   cartLines: [],
   appliedCoupon: null,
+  appliedCouponDiscountPaise: null,
+  pendingCouponCode: null,
   coupons: DEFAULT_COUPONS,
 
   selectedTable: '--',
@@ -217,6 +235,15 @@ export const useOrderStore = create<OrderState>((set, get) => ({
   isTableVerified: false,
   activeOrderCount: 0,
 
+  // Smart Scheduling & Reservation initial values
+  orderType: 'DINE_IN',
+  scheduledFor: null,
+  guestCount: 2,
+  reservationId: null,
+  allocatedTableNumbers: [],
+  serveLaterPrompt: null,
+  serveLaterDismissedUntil: null,
+
   activeModal: null,
   customizingItem: null,
   isCartOpen: false,
@@ -224,6 +251,7 @@ export const useOrderStore = create<OrderState>((set, get) => ({
   isAuthModalOpen: false,
   isOrdersHistoryOpen: false,
   isPaymentModalOpen: false,
+  isBookingModalOpen: false,
   selectedPaymentMethod: 'UPI',
   paymentLoading: false,
   paymentQrData: null,
@@ -247,8 +275,11 @@ export const useOrderStore = create<OrderState>((set, get) => ({
   },
 
   getDiscountPaise: () => {
-    const { appliedCoupon, coupons, getCartSubtotalPaise } = get();
+    const { appliedCoupon, appliedCouponDiscountPaise, coupons, getCartSubtotalPaise } = get();
     if (!appliedCoupon) return 0;
+    if (appliedCouponDiscountPaise !== null && appliedCouponDiscountPaise > 0) {
+      return appliedCouponDiscountPaise;
+    }
     const found = coupons.find((c) => c.code === appliedCoupon);
     if (!found) return 0;
     return computeCouponDiscountPaise(found, getCartSubtotalPaise());
@@ -292,7 +323,10 @@ export const useOrderStore = create<OrderState>((set, get) => ({
 
   quickAdd: (item, onCustomizationNeeded) => {
     // If the item has modifiers/customizations, request parent/customizer to open
-    if (item.modifiers && item.modifiers.length > 0) {
+    const hasModifierGroups =
+      (item.modifierGroups && item.modifierGroups.length > 0) ||
+      (item.modifiers && item.modifiers.length > 0);
+    if (hasModifierGroups) {
       if (onCustomizationNeeded) {
         onCustomizationNeeded(item);
         return;
@@ -428,7 +462,22 @@ export const useOrderStore = create<OrderState>((set, get) => ({
   },
 
   setAppliedCoupon: (code) => {
-    set({ appliedCoupon: code });
+    set((state) => ({
+      appliedCoupon: code,
+      appliedCouponDiscountPaise: code === state.appliedCoupon ? state.appliedCouponDiscountPaise : null,
+    }));
+  },
+
+  setAppliedCouponDiscountPaise: (paise) => {
+    set({ appliedCouponDiscountPaise: paise });
+  },
+
+  setPendingCouponCode: (code) => {
+    set({ pendingCouponCode: code });
+  },
+
+  setCoupons: (coupons) => {
+    set({ coupons });
   },
 
   setSelectedTable: (table, pax = 2, tableId = '', sessionId = '') => {
@@ -465,18 +514,20 @@ export const useOrderStore = create<OrderState>((set, get) => ({
       isAuthModalOpen: modal === 'auth',
       isOrdersHistoryOpen: modal === 'orders',
       isPaymentModalOpen: modal === 'payment',
+      isBookingModalOpen: modal === 'booking',
     });
   },
 
   closeModal: () => {
     set({
       activeModal: null,
-  customizingItem: null,
+      customizingItem: null,
       isCartOpen: false,
       isTableModalOpen: false,
       isAuthModalOpen: false,
       isOrdersHistoryOpen: false,
       isPaymentModalOpen: false,
+      isBookingModalOpen: false,
     });
   },
 
@@ -515,6 +566,13 @@ export const useOrderStore = create<OrderState>((set, get) => ({
     });
   },
 
+  setIsBookingModalOpen: (open) => {
+    set({
+      isBookingModalOpen: open,
+      activeModal: open ? 'booking' : null,
+    });
+  },
+
   setCustomizingItem: (item) => {
     set({
       customizingItem: item,
@@ -526,6 +584,109 @@ export const useOrderStore = create<OrderState>((set, get) => ({
   setPaymentLoading: (loading) => set({ paymentLoading: loading }),
   setPaymentQrData: (data) => set({ paymentQrData: data }),
   setPaymentSuccessData: (data) => set({ paymentSuccessData: data }),
+  resetCheckoutState: () =>
+    set({
+      paymentLoading: false,
+      paymentQrData: null,
+      paymentSuccessData: null,
+    }),
+
+  // Smart Scheduling & Reservation Setters
+  setOrderType: (type) => {
+    set((state) => {
+      const nextBooking = {
+        orderType: type,
+        scheduledFor: state.scheduledFor,
+        guestCount: state.guestCount,
+        reservationId: state.reservationId,
+        allocatedTableNumbers: state.allocatedTableNumbers,
+      };
+      persistBookingToStorage(nextBooking);
+      return { orderType: type };
+    });
+  },
+  setOrderMode: (mode) => {
+    get().setOrderType(mode);
+  },
+  setScheduledFor: (iso) => {
+    set((state) => {
+      const nextBooking = {
+        orderType: state.orderType,
+        scheduledFor: iso,
+        guestCount: state.guestCount,
+        reservationId: state.reservationId,
+        allocatedTableNumbers: state.allocatedTableNumbers,
+      };
+      persistBookingToStorage(nextBooking);
+      return { scheduledFor: iso };
+    });
+  },
+  setGuestCount: (count) => {
+    const validCount = Math.max(1, count);
+    set((state) => {
+      const nextBooking = {
+        orderType: state.orderType,
+        scheduledFor: state.scheduledFor,
+        guestCount: validCount,
+        reservationId: state.reservationId,
+        allocatedTableNumbers: state.allocatedTableNumbers,
+      };
+      persistBookingToStorage(nextBooking);
+      return { guestCount: validCount };
+    });
+  },
+  setReservationId: (id) => {
+    set((state) => {
+      const nextBooking = {
+        orderType: state.orderType,
+        scheduledFor: state.scheduledFor,
+        guestCount: state.guestCount,
+        reservationId: id,
+        allocatedTableNumbers: state.allocatedTableNumbers,
+      };
+      persistBookingToStorage(nextBooking);
+      return { reservationId: id };
+    });
+  },
+  setAllocatedTableNumbers: (tables) => {
+    set((state) => {
+      const nextBooking = {
+        orderType: state.orderType,
+        scheduledFor: state.scheduledFor,
+        guestCount: state.guestCount,
+        reservationId: state.reservationId,
+        allocatedTableNumbers: tables,
+      };
+      persistBookingToStorage(nextBooking);
+      return { allocatedTableNumbers: tables };
+    });
+  },
+  setBookingDetails: (details) => {
+    set((state) => {
+      const nextBooking = {
+        orderType: details.orderType ?? state.orderType,
+        scheduledFor: details.scheduledFor !== undefined ? details.scheduledFor : state.scheduledFor,
+        guestCount: details.guestCount !== undefined ? Math.max(1, details.guestCount) : state.guestCount,
+        reservationId: details.reservationId !== undefined ? details.reservationId : state.reservationId,
+        allocatedTableNumbers: details.allocatedTableNumbers ?? state.allocatedTableNumbers,
+      };
+      persistBookingToStorage(nextBooking);
+      return nextBooking;
+    });
+  },
+  clearBookingDetails: () => {
+    const resetBooking = {
+      orderType: 'DINE_IN' as const,
+      scheduledFor: null,
+      guestCount: 2,
+      reservationId: null,
+      allocatedTableNumbers: [],
+    };
+    persistBookingToStorage(resetBooking);
+    set(resetBooking);
+  },
+  setServeLaterPrompt: (prompt) => set({ serveLaterPrompt: prompt }),
+  setServeLaterDismissedUntil: (ts) => set({ serveLaterDismissedUntil: ts }),
 
   toggleWishlist: (itemId) => {
     set((state) => {
@@ -568,6 +729,23 @@ export const useOrderStore = create<OrderState>((set, get) => ({
       }
     } catch {
       // Ignore session read failure
+    }
+    try {
+      const rawBooking = typeof sessionStorage !== 'undefined' ? sessionStorage.getItem(STORAGE_BOOKING_KEY) : null;
+      if (rawBooking) {
+        const b = JSON.parse(rawBooking);
+        if (b && typeof b === 'object') {
+          set({
+            orderType: b.orderType || 'DINE_IN',
+            scheduledFor: b.scheduledFor || null,
+            guestCount: typeof b.guestCount === 'number' ? b.guestCount : 2,
+            reservationId: b.reservationId || null,
+            allocatedTableNumbers: Array.isArray(b.allocatedTableNumbers) ? b.allocatedTableNumbers : [],
+          });
+        }
+      }
+    } catch {
+      // Ignore booking read failure
     }
   },
 }));

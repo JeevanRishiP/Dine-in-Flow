@@ -81,6 +81,20 @@ test('useOrderStore computes coupon discounts, 5% GST, and grand total in intege
   store.quickAdd(mockItem);
   store.quickAdd(mockItem);
 
+  // Configure database coupons in store (100% DB-driven)
+  store.setCoupons([
+    {
+      code: 'ROYAL15',
+      tag: '15% OFF',
+      title: 'Flat 15% OFF',
+      description: '15% off orders above ₹500',
+      minOrderPaise: 50000,
+      type: 'PERCENTAGE',
+      percent: 15,
+      maxDiscountPaise: 10000,
+    },
+  ]);
+
   // ROYAL15 gives 15% off orders >= 50,000 paise
   store.setAppliedCoupon('ROYAL15');
   const subtotal = useOrderStore.getState().getCartSubtotalPaise();
@@ -209,4 +223,204 @@ test('useOrderStore supports line-level increment, decrement, and table assignme
   // Decrement line to removal
   store.decrementCartLine(lines[0]!.cartLineId);
   assert.equal(useOrderStore.getState().cartLines.length, 1);
+});
+
+test('useOrderStore manages smart scheduling, pre-booking and serve-later prompt snooze', () => {
+  const store = useOrderStore.getState();
+
+  // Pre-booking mode and party size
+  store.setOrderType('PRE_BOOK_DINE_IN');
+  store.setGuestCount(6);
+  const scheduledTime = '2026-11-16T19:30:00.000Z';
+  store.setScheduledFor(scheduledTime);
+  store.setReservationId('res-1234-abcd');
+
+  assert.equal(useOrderStore.getState().orderType, 'PRE_BOOK_DINE_IN');
+  assert.equal(useOrderStore.getState().guestCount, 6);
+  assert.equal(useOrderStore.getState().scheduledFor, scheduledTime);
+  assert.equal(useOrderStore.getState().reservationId, 'res-1234-abcd');
+
+  // Serve later snooze timestamp
+  const snoozeUntil = Date.now() + 10 * 60 * 1000;
+  store.setServeLaterDismissedUntil(snoozeUntil);
+  assert.equal(useOrderStore.getState().serveLaterDismissedUntil, snoozeUntil);
+
+  // Reset to regular dine-in
+  store.setOrderType('DINE_IN');
+  store.setScheduledFor(null);
+  assert.equal(useOrderStore.getState().orderType, 'DINE_IN');
+  assert.equal(useOrderStore.getState().scheduledFor, null);
+});
+
+test('useOrderStore manages omnichannel booking details and serve-later prompt', () => {
+  const store = useOrderStore.getState();
+
+  // Test setOrderMode
+  store.setOrderMode('TAKEAWAY');
+  assert.equal(useOrderStore.getState().orderType, 'TAKEAWAY');
+
+  // Test setAllocatedTableNumbers
+  store.setAllocatedTableNumbers(['T04', 'T05']);
+  assert.deepEqual(useOrderStore.getState().allocatedTableNumbers, ['T04', 'T05']);
+
+  // Test setBookingDetails
+  const bookingIso = '2026-11-20T19:30:00.000Z';
+  store.setBookingDetails({
+    orderType: 'PRE_BOOK_DINE_IN',
+    scheduledFor: bookingIso,
+    guestCount: 8,
+    reservationId: 'res-888',
+    allocatedTableNumbers: ['T08', 'T09'],
+  });
+
+  const state = useOrderStore.getState();
+  assert.equal(state.orderType, 'PRE_BOOK_DINE_IN');
+  assert.equal(state.scheduledFor, bookingIso);
+  assert.equal(state.guestCount, 8);
+  assert.equal(state.reservationId, 'res-888');
+  assert.deepEqual(state.allocatedTableNumbers, ['T08', 'T09']);
+
+  // Test serveLaterPrompt setter
+  store.setServeLaterPrompt({
+    orderId: 'ord-123',
+    itemNames: ['Gulab Jamun', 'Filter Coffee'],
+    promptedAt: '2026-11-19T14:30:00.000Z',
+  });
+  assert.deepEqual(useOrderStore.getState().serveLaterPrompt, {
+    orderId: 'ord-123',
+    itemNames: ['Gulab Jamun', 'Filter Coffee'],
+    promptedAt: '2026-11-19T14:30:00.000Z',
+  });
+
+  // Test clearBookingDetails resets state cleanly
+  store.clearBookingDetails();
+  const resetState = useOrderStore.getState();
+  assert.equal(resetState.orderType, 'DINE_IN');
+  assert.equal(resetState.scheduledFor, null);
+  assert.equal(resetState.guestCount, 2);
+  assert.equal(resetState.reservationId, null);
+  assert.deepEqual(resetState.allocatedTableNumbers, []);
+});
+
+test('regression: resetCheckoutState wipes stale payment data so Order #2 opens clean', () => {
+  const store = useOrderStore.getState();
+
+  // Simulate Order #1 payment completion
+  store.setPaymentSuccessData({
+    paymentId: 'pay-ord-1',
+    totalPaise: 85000,
+  });
+  store.setPaymentLoading(true);
+  store.setPaymentQrData({
+    paymentId: 'pay-ord-1',
+    qrCodeUrl: 'https://phonepe.example/qr',
+    upiString: 'upi://pay?pa=test',
+  });
+
+  assert.ok(useOrderStore.getState().paymentSuccessData !== null);
+  assert.equal(useOrderStore.getState().paymentLoading, true);
+  assert.ok(useOrderStore.getState().paymentQrData !== null);
+
+  // Calling resetCheckoutState (e.g., when adding dishes for Order #2 or opening fresh checkout)
+  store.resetCheckoutState();
+
+  const cleanedState = useOrderStore.getState();
+  assert.equal(cleanedState.paymentSuccessData, null, 'Stale paymentSuccessData must be cleared');
+  assert.equal(cleanedState.paymentLoading, false);
+  assert.equal(cleanedState.paymentQrData, null, 'Stale paymentQrData must be cleared');
+});
+
+test('computeCouponDiscountPaise computes exact non-zero savings for FLAT and PERCENTAGE coupons', () => {
+  // FLAT coupon: saves fixed 10000 paise (₹100) on order >= 40000 paise (₹400)
+  const flatCoupon = {
+    code: 'FLAT100',
+    type: 'FLAT' as const,
+    minOrderPaise: 40000,
+    discountValue: 10000,
+    fixedPaise: 10000,
+  };
+  assert.equal(computeCouponDiscountPaise(flatCoupon, 50000), 10000);
+  assert.equal(computeCouponDiscountPaise(flatCoupon, 35000), 0); // below min order
+
+  // PERCENTAGE coupon: saves 20% capped at 8000 paise (₹80)
+  const pctCoupon = {
+    code: 'FESTIVE20',
+    type: 'PERCENTAGE' as const,
+    minOrderPaise: 30000,
+    percent: 20,
+    maxDiscountPaise: 8000,
+  };
+  // 20% of 35000 = 7000
+  assert.equal(computeCouponDiscountPaise(pctCoupon, 35000), 7000);
+  // 20% of 50000 = 10000, capped at maxDiscountPaise = 8000
+  assert.equal(computeCouponDiscountPaise(pctCoupon, 50000), 8000);
+});
+
+test('unauthenticated coupon apply sets pendingCouponCode and preserves cartLines & table 100%', () => {
+  const store = useOrderStore.getState();
+  store.clearCart();
+  store.setSelectedTable('T09', 4, 'tbl-09');
+  store.setOrderType('DINE_IN');
+  store.quickAdd(mockItem);
+
+  assert.equal(useOrderStore.getState().cartLines.length, 1);
+  assert.equal(useOrderStore.getState().selectedTable, 'T09');
+
+  // Customer attempts to apply coupon while unauthenticated
+  store.setPendingCouponCode('WELCOME50');
+  store.setIsAuthModalOpen(true);
+
+  // Cart and table are 100% preserved
+  const currentState = useOrderStore.getState();
+  assert.equal(currentState.pendingCouponCode, 'WELCOME50');
+  assert.equal(currentState.isAuthModalOpen, true);
+  assert.equal(currentState.cartLines.length, 1);
+  assert.equal(currentState.cartLines[0]!.item.id, mockItem.id);
+  assert.equal(currentState.selectedTable, 'T09');
+  assert.equal(currentState.orderType, 'DINE_IN');
+
+  // Login completes: pendingCouponCode is consumed, cart and table remain intact
+  store.setPendingCouponCode(null);
+  store.setIsAuthModalOpen(false);
+  store.setAppliedCoupon('WELCOME50');
+  store.setAppliedCouponDiscountPaise(5000);
+
+  const finalState = useOrderStore.getState();
+  assert.equal(finalState.appliedCoupon, 'WELCOME50');
+  assert.equal(finalState.getDiscountPaise(), 5000);
+  assert.equal(finalState.cartLines.length, 1);
+  assert.equal(finalState.selectedTable, 'T09');
+});
+
+test('zero hardcoded fallback: empty DB coupon array produces zero coupons in store', () => {
+  const store = useOrderStore.getState();
+  store.setCoupons([]);
+  assert.equal(useOrderStore.getState().coupons.length, 0);
+
+  // Setting an unknown coupon when DB is empty results in 0 discount
+  store.setAppliedCoupon('FAKE100');
+  assert.equal(useOrderStore.getState().getDiscountPaise(), 0);
+});
+
+test('item without modifierGroups allows direct quickAdd to cart', () => {
+  const store = useOrderStore.getState();
+  store.clearCart();
+
+  const plainItem: MenuItem = {
+    ...mockItem,
+    id: 'dish-plain-roti',
+    name: 'Tandoori Roti',
+    pricePaise: 3000,
+    modifiers: [],
+    modifierGroups: [],
+  };
+
+  let modalOpened = false;
+  store.quickAdd(plainItem, () => {
+    modalOpened = true;
+  });
+
+  assert.equal(modalOpened, false, 'Modal must NOT open for items with zero modifiers');
+  assert.equal(useOrderStore.getState().cartLines.length, 1);
+  assert.equal(useOrderStore.getState().cartLines[0]!.item.id, 'dish-plain-roti');
 });
