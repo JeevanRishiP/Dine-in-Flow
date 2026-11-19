@@ -316,6 +316,7 @@ describe('PaymentsService Webhook Processing & Concurrency', () => {
     );
 
     service = new PaymentsService();
+    vi.spyOn((service as any).kitchenScheduler, 'scheduleOrderItemsInTx').mockResolvedValue(undefined);
   });
 
   it('prevents race conditions and duplicate outbox capture when payment is already PAID', async () => {
@@ -377,7 +378,7 @@ describe('PaymentsService Webhook Processing & Concurrency', () => {
       rows: [{ id: paymentId, org_id: orgId, order_id: orderId, amount_paise: 50000, status: 'PENDING' }],
     });
 
-    // 3. tenantClientQueryMock for SELECT ... FOR UPDATE
+    // 3. tenantClientQueryMock for SELECT ... FOR UPDATE (payments)
     tenantClientQueryMock.mockResolvedValueOnce({
       rows: [
         {
@@ -387,6 +388,19 @@ describe('PaymentsService Webhook Processing & Concurrency', () => {
           amount_paise: 50000,
           status: 'PENDING',
           provider_payment_id: null,
+        },
+      ],
+    });
+
+    // 3.5. tenantClientQueryMock: SELECT ... FOR UPDATE (orders)
+    tenantClientQueryMock.mockResolvedValueOnce({
+      rows: [
+        {
+          id: orderId,
+          org_id: orgId,
+          outlet_id: outletId,
+          status: 'AWAITING_PAYMENT',
+          payment_status: 'PENDING',
         },
       ],
     });
