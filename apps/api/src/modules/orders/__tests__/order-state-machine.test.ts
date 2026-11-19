@@ -14,6 +14,12 @@ import {
 // ─── canTransitionOrder ───────────────────────────────────────────────────────
 
 describe('canTransitionOrder', () => {
+  it('allows AWAITING_PAYMENT → CONFIRMED and AWAITING_PAYMENT → PAYMENT_EXPIRED', () => {
+    expect(canTransitionOrder('AWAITING_PAYMENT', 'CONFIRMED')).toEqual({ ok: true });
+    expect(canTransitionOrder('AWAITING_PAYMENT', 'PAYMENT_EXPIRED')).toEqual({ ok: true });
+    expect(canTransitionOrder('AWAITING_PAYMENT', 'PREPARING').ok).toBe(false);
+  });
+
   it('allows PENDING → CONFIRMED', () => {
     expect(canTransitionOrder('PENDING', 'CONFIRMED')).toEqual({ ok: true });
   });
@@ -101,8 +107,9 @@ describe('canTransitionItem', () => {
 describe('isTerminalOrderStatus', () => {
   it('returns true for BILLED', () => expect(isTerminalOrderStatus('BILLED')).toBe(true));
   it('returns true for CANCELLED', () => expect(isTerminalOrderStatus('CANCELLED')).toBe(true));
+  it('returns true for PAYMENT_EXPIRED', () => expect(isTerminalOrderStatus('PAYMENT_EXPIRED')).toBe(true));
   it('returns false for non-terminal statuses', () => {
-    const nonTerminal: OrderStatus[] = ['PENDING', 'CONFIRMED', 'PREPARING', 'READY', 'SERVED'];
+    const nonTerminal: OrderStatus[] = ['AWAITING_PAYMENT', 'PENDING', 'CONFIRMED', 'PREPARING', 'READY', 'SERVED', 'PAYMENT_FAILED', 'PAYMENT_CANCELLED'];
     for (const s of nonTerminal) {
       expect(isTerminalOrderStatus(s)).toBe(false);
     }
