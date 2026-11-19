@@ -34,19 +34,23 @@ const REFRESH_MAX_AGE_SEC = 30 * 24 * 60 * 60;
 
 function setCustomerRefreshCookies(reply: FastifyReply | undefined, refreshToken: string, orgId: string): void {
   if (!reply || typeof reply.header !== 'function') return;
-  const secureFlag = process.env['NODE_ENV'] === 'production' ? '; Secure' : '';
+  const isProd = process.env['NODE_ENV'] === 'production';
+  const sameSite = isProd ? 'SameSite=None' : 'SameSite=Lax';
+  const secureFlag = isProd ? '; Secure' : '';
   reply.header('Set-Cookie', [
-    `${REFRESH_COOKIE_NAME}=${encodeURIComponent(refreshToken)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${REFRESH_MAX_AGE_SEC}${secureFlag}`,
-    `${ORG_COOKIE_NAME}=${encodeURIComponent(orgId)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${REFRESH_MAX_AGE_SEC}${secureFlag}`,
+    `${REFRESH_COOKIE_NAME}=${encodeURIComponent(refreshToken)}; Path=/; HttpOnly; ${sameSite}; Max-Age=${REFRESH_MAX_AGE_SEC}${secureFlag}`,
+    `${ORG_COOKIE_NAME}=${encodeURIComponent(orgId)}; Path=/; HttpOnly; ${sameSite}; Max-Age=${REFRESH_MAX_AGE_SEC}${secureFlag}`,
   ]);
 }
 
 function clearCustomerRefreshCookies(reply: FastifyReply | undefined): void {
   if (!reply || typeof reply.header !== 'function') return;
-  const secureFlag = process.env['NODE_ENV'] === 'production' ? '; Secure' : '';
+  const isProd = process.env['NODE_ENV'] === 'production';
+  const sameSite = isProd ? 'SameSite=None' : 'SameSite=Lax';
+  const secureFlag = isProd ? '; Secure' : '';
   reply.header('Set-Cookie', [
-    `${REFRESH_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secureFlag}`,
-    `${ORG_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secureFlag}`,
+    `${REFRESH_COOKIE_NAME}=; Path=/; HttpOnly; ${sameSite}; Max-Age=0${secureFlag}`,
+    `${ORG_COOKIE_NAME}=; Path=/; HttpOnly; ${sameSite}; Max-Age=0${secureFlag}`,
   ]);
 }
 
