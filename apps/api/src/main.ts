@@ -61,9 +61,10 @@ async function bootstrap(): Promise<void> {
   // Global validation pipe via nestjs-zod
   app.useGlobalPipes(new ZodValidationPipe());
 
+  const allowedOriginsRaw = config.ALLOWED_ORIGINS || config.ALLOWED_CORS_ORIGINS;
   const corsOrigins =
     config.NODE_ENV === 'production'
-      ? (config.ALLOWED_CORS_ORIGINS ?? 'https://app.dineflow.in,https://console.dineflow.in')
+      ? (allowedOriginsRaw ?? 'https://app.dineflow.in,https://console.dineflow.in')
           .split(',')
           .map((o) => o.trim())
           .filter(Boolean)
@@ -101,8 +102,26 @@ async function bootstrap(): Promise<void> {
     'onRequest',
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Fastify onRequest signature
     async (req: any, reply: any) => {
+      // Seamlessly map /api/v1/* and /health to NestJS /v1/* routes
+      if (typeof req.url === 'string') {
+        if (req.url === '/health' || req.url.startsWith('/health?')) {
+          req.url = req.url.replace('/health', '/v1/health');
+          if (req.raw) req.raw.url = req.url;
+        } else if (req.url.startsWith('/api/v1/')) {
+          req.url = req.url.replace('/api/v1/', '/v1/');
+          if (req.raw) req.raw.url = req.url;
+        }
+      }
+
       const url = typeof req.url === 'string' ? req.url : '';
-      if (url === '/healthz' || url === '/readyz') return;
+      if (
+        url === '/healthz' ||
+        url === '/readyz' ||
+        url === '/v1/health' ||
+        url.startsWith('/v1/health?') ||
+        url === '/api/v1/health' ||
+        url.startsWith('/api/v1/health?')
+      ) return;
       if (config.NODE_ENV !== 'production' && (config.DISABLE_RATE_LIMIT === 'true' || process.env['DISABLE_RATE_LIMIT'] === 'true')) return;
 
       const isAuthOrSession =
