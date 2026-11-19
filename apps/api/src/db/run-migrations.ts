@@ -3,7 +3,11 @@ import path from 'node:path';
 import { Pool } from 'pg';
 
 function loadLocalEnvIfPresent() {
-  if (process.env['DATABASE_URL'] || process.env['DATABASE_MIGRATOR_URL']) return;
+  if (
+    process.env['DIRECT_DATABASE_URL'] ||
+    process.env['DATABASE_MIGRATOR_URL'] ||
+    process.env['DATABASE_URL']
+  ) return;
   const candidates = [
     path.resolve(process.cwd(), '.env.local'),
     path.resolve(process.cwd(), '.env'),
@@ -40,10 +44,20 @@ loadLocalEnvIfPresent();
  */
 async function runMigrations(): Promise<void> {
   const connectionString =
-    process.env['DATABASE_MIGRATOR_URL'] ?? process.env['DATABASE_URL'];
+    process.env['DIRECT_DATABASE_URL'] ??
+    process.env['DATABASE_MIGRATOR_URL'] ??
+    process.env['DATABASE_URL'];
   if (!connectionString) {
-    console.error('[MIGRATE] DATABASE_URL or DATABASE_MIGRATOR_URL must be set');
+    console.error('[MIGRATE] DIRECT_DATABASE_URL, DATABASE_MIGRATOR_URL or DATABASE_URL must be set');
     process.exit(1);
+  }
+
+  if (process.env['DIRECT_DATABASE_URL']) {
+    console.log('[MIGRATE] Connecting via DIRECT_DATABASE_URL (direct port 5432 migration connection)');
+  } else if (process.env['DATABASE_MIGRATOR_URL']) {
+    console.log('[MIGRATE] Connecting via DATABASE_MIGRATOR_URL');
+  } else {
+    console.log('[MIGRATE] Connecting via DATABASE_URL');
   }
 
   const pool = new Pool({ connectionString });
