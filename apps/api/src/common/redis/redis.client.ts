@@ -46,3 +46,17 @@ export function getRedisSubscriber(): Redis {
   if (!subscriberClient) subscriberClient = makeRedis();
   return subscriberClient;
 }
+
+/**
+ * Cleanly closes Redis command and subscriber clients on application shutdown.
+ */
+export async function closeRedis(): Promise<void> {
+  if (commandClient) {
+    await commandClient.quit().catch(() => commandClient?.disconnect());
+    commandClient = undefined;
+  }
+  if (subscriberClient) {
+    await subscriberClient.quit().catch(() => subscriberClient?.disconnect());
+    subscriberClient = undefined;
+  }
+}
