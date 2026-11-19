@@ -21,6 +21,7 @@ export const CreatePaymentSchema = z.object({
   order_id:         z.string().uuid(),
   idempotency_key:  z.string().uuid(),
   method:           z.enum(PAYMENT_METHODS),
+  notes:            z.string().max(500).optional(),
   return_url:       z.string().url().optional(),
   customer_phone:   z.string().optional(),
   customer_name:    z.string().max(100).optional(),
