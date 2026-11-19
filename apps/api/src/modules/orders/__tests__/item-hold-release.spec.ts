@@ -29,7 +29,7 @@ describe('Customer Serve Later -> Kitchen Now Item Release', () => {
     ordersService = new OrdersService();
   });
 
-  it('successfully releases hold on an item, appends [RELEASED_TO_KITCHEN], and sets status to PREPARING', async () => {
+  it('successfully releases hold on an item, appends [RELEASED_TO_KITCHEN], and keeps status CONFIRMED (NOT PREPARING)', async () => {
     poolQueryMock.mockResolvedValueOnce({ rows: [{ resolve_order_org: orgId }] });
 
     queryMock
@@ -42,7 +42,9 @@ describe('Customer Serve Later -> Kitchen Now Item Release', () => {
             table_id: 'table-uuid',
             session_id: sessionId,
             customer_id: customerId,
-            status: 'PREPARING',
+            status: 'CONFIRMED',
+            payment_status: 'PAID',
+            display_id: 'ORD-0001',
           },
         ],
       })
@@ -59,6 +61,7 @@ describe('Customer Serve Later -> Kitchen Now Item Release', () => {
             name_snapshot: 'Filter Coffee',
             notes: 'Strong brew, less sugar',
             status: 'PENDING',
+            hold_status: 'SERVE_LATER_HOLD',
           },
         ],
       })
@@ -66,7 +69,9 @@ describe('Customer Serve Later -> Kitchen Now Item Release', () => {
       .mockResolvedValueOnce({ rowCount: 1 })
       // 5. Insert order_events
       .mockResolvedValueOnce({ rowCount: 1 })
-      // 6. Insert outbox_events
+      // 6. Insert outbox_events (kds.item_fired)
+      .mockResolvedValueOnce({ rowCount: 1 })
+      // 7. Insert outbox_events (ORDER_ITEM_RELEASED)
       .mockResolvedValueOnce({ rowCount: 1 });
 
     const result = await ordersService.releaseItemHold(
@@ -78,7 +83,8 @@ describe('Customer Serve Later -> Kitchen Now Item Release', () => {
     );
 
     expect(result.id).toBe(itemId);
-    expect(result.status).toBe('PREPARING');
+    expect(result.status).toBe('CONFIRMED');
+    expect(result.hold_status).toBe('RELEASED');
     expect(result.notes).toContain('Strong brew, less sugar');
     expect(result.notes).toContain('[RELEASED_TO_KITCHEN]');
     expect(result.is_released).toBe(true);
@@ -89,7 +95,7 @@ describe('Customer Serve Later -> Kitchen Now Item Release', () => {
     );
     expect(updateCall).toBeDefined();
     expect(updateCall![1][0]).toContain('[RELEASED_TO_KITCHEN]');
-    expect(updateCall![1][1]).toBe('PREPARING');
+    expect(updateCall![1][1]).toBe('CONFIRMED');
 
     // Verify audit event
     const eventCall = queryMock.mock.calls.find((call) =>
@@ -117,6 +123,7 @@ describe('Customer Serve Later -> Kitchen Now Item Release', () => {
             session_id: sessionId,
             customer_id: customerId,
             status: 'PREPARING',
+            payment_status: 'PAID',
           },
         ],
       })
@@ -134,6 +141,7 @@ describe('Customer Serve Later -> Kitchen Now Item Release', () => {
           },
         ],
       })
+      .mockResolvedValueOnce({ rowCount: 1 })
       .mockResolvedValueOnce({ rowCount: 1 })
       .mockResolvedValueOnce({ rowCount: 1 })
       .mockResolvedValueOnce({ rowCount: 1 });
