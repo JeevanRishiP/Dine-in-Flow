@@ -3,6 +3,8 @@ import {
   parseCreateCategoryDto,
   parseCreateMenuItemDto,
   parseCreateModifierGroupDto,
+  CreateModifierSchema,
+  UpdateModifierSchema,
   UpdateMenuItemSchema,
   UploadMenuPhotoSchema,
 } from '../menu.dto.js';
@@ -143,6 +145,54 @@ describe('Menu DTOs', () => {
       expect(() =>
         parseCreateModifierGroupDto({ ...base, extra_field: 'bad' }),
       ).toThrow();
+    });
+
+    it('accepts MULTI selection type and min_select/max_select', () => {
+      const dto = parseCreateModifierGroupDto({
+        name: 'Accompaniments',
+        selection_type: 'MULTI',
+        min_select: 0,
+        max_select: 3,
+        sort_order: 1,
+      });
+      expect(dto.selection_type).toBe('MULTI');
+      expect(dto.max_select).toBe(3);
+    });
+  });
+
+  describe('CreateModifierSchema and UpdateModifierSchema', () => {
+    it('accepts valid modifier option with paise price and defaults', () => {
+      const parsed = CreateModifierSchema.parse({
+        group_id: 'a0000000-0000-0000-0000-000000000001',
+        name: 'Extra Cheese',
+        price_paise: 5000,
+        is_default: false,
+        is_available: true,
+        sort_order: 0,
+      });
+      expect(parsed.name).toBe('Extra Cheese');
+      expect(parsed.price_paise).toBe(5000);
+    });
+
+    it('rejects float price in modifier option', () => {
+      expect(() =>
+        CreateModifierSchema.parse({
+          group_id: 'a0000000-0000-0000-0000-000000000001',
+          name: 'Extra Cheese',
+          price_paise: 50.5,
+        }),
+      ).toThrow();
+    });
+
+    it('allows updating modifier option fields cleanly', () => {
+      const updated = UpdateModifierSchema.parse({
+        name: 'Smoked Cheese',
+        price_paise: 6000,
+        is_available: false,
+      });
+      expect(updated.name).toBe('Smoked Cheese');
+      expect(updated.price_paise).toBe(6000);
+      expect(updated.is_available).toBe(false);
     });
   });
 });
