@@ -172,11 +172,11 @@ export async function seedPilotRestaurant(options: PilotSeederOptions = {}) {
   const ownerPassword =
     options.ownerPassword ||
     process.env['PILOT_OWNER_PASSWORD'] ||
-    (process.env['NODE_ENV'] === 'production' ? '' : 'PilotLaunch2026!');
+    (process.env['NODE_ENV'] === 'production' ? '' : '1234');
   const staffPassword =
     options.staffPassword ||
     process.env['PILOT_STAFF_PASSWORD'] ||
-    (process.env['NODE_ENV'] === 'production' ? '' : 'PilotStaff2026!');
+    (process.env['NODE_ENV'] === 'production' ? '' : '1234');
   if (!ownerPassword || !staffPassword) {
     throw new Error('PILOT_OWNER_PASSWORD and PILOT_STAFF_PASSWORD are required when seeding in production.');
   }
