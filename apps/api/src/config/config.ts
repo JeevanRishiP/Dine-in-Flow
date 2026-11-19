@@ -94,6 +94,7 @@ const envSchema = z
     // App public base URL (used to build returnUrl / webhook URLs)
     APP_BASE_URL: z.string().url().default('http://localhost:3000'),
     ALLOWED_CORS_ORIGINS: z.string().optional(),
+    ALLOWED_ORIGINS: z.string().optional(),
     TRUST_PROXY: z.coerce.boolean().default(true),
 
     // ── AI Assistant (Gemini) ────────────────────────────────────────────────
