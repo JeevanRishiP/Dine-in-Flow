@@ -3,9 +3,6 @@
 import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
 import {
-  ORGANIZATION,
-  OUTLETS,
-  ALL_STAFF_MEMBERS,
   getBranchData,
   formatPaise,
   formatOrderDateTime,
@@ -19,13 +16,8 @@ import {
   type Coupon,
   type FeedbackReview,
   type StaffMember,
-  BRANCH_1_CATEGORIES,
-  BRANCH_1_MENU_ITEMS,
   getStoredOutlets,
-  saveStoredOutlet,
   getStoredStaff,
-  saveStoredStaffMember,
-  deleteStoredStaffMember,
   getLoggedInUser,
 } from '../lib/restaurant-db';
 import {
@@ -94,15 +86,25 @@ export default function OwnerWebApp() {
 
   // Persistent Top Bar Shell State: Dynamic Stored Outlets
   const [outletsList, setOutletsList] = useState<Outlet[]>(() =>
-    typeof window !== 'undefined' ? getStoredOutlets() : OUTLETS
+    typeof window !== 'undefined' ? getStoredOutlets() : []
   );
   const [selectedOutletId, setSelectedOutletId] = useState<string>(() => {
     if (typeof window !== 'undefined') {
       const stored = getStoredOutlets();
-      return stored[0]?.id ?? OUTLETS[0]!.id;
+      return stored[0]?.id ?? '';
     }
-    return OUTLETS[0]!.id;
+    return '';
   });
+  const fallbackOutlet: Outlet = {
+    id: selectedOutletId || '',
+    orgId: '',
+    name: 'Main Flagship',
+    shortName: 'Flagship',
+    address: 'Bengaluru, India',
+    timezone: 'Asia/Kolkata',
+    isActive: true,
+  };
+  const currentOutlet = outletsList.find((o) => o.id === selectedOutletId) ?? outletsList[0] ?? fallbackOutlet;
   const [dateRange, setDateRange] = useState<'TODAY' | 'YESTERDAY' | 'WEEK' | 'MONTH'>('TODAY');
   const [activeScreen, setActiveScreen] = useState<OwnerScreen>('DASHBOARD');
 
@@ -128,21 +130,70 @@ export default function OwnerWebApp() {
   const [menuItems, setMenuItems] = useState<MenuItem[]>(currentBranchData.menuItems);
   const [selectedCategoryName, setSelectedCategoryName] = useState<string>('Main Course');
 
-  // Tables & QR State (Screen 4)
-  const [tables, setTables] = useState<Table[]>(currentBranchData.tables);
+  // Tables & QR State (Screen 4 — backed by PostgreSQL)
+  const [tablesList, setTablesList] = useState<Table[]>([]);
+  const [tablesLoading, setTablesLoading] = useState(false);
+  const [showAddTableModal, setShowAddTableModal] = useState(false);
+  const [newTableNumber, setNewTableNumber] = useState('');
+  const [newTableCapacity, setNewTableCapacity] = useState('4');
+  const [newTableSection, setNewTableSection] = useState('Main Dining Hall');
   const [showQrSheetModal, setShowQrSheetModal] = useState(false);
   const [qrModalTable, setQrModalTable] = useState<Table | null>(null);
+  const [qrModalData, setQrModalData] = useState<{
+    table: Table;
+    scanUrl: string;
+    token: string;
+  } | null>(null);
 
-  // Payments & Invoices Tab (Screen 5)
-  const [paymentsSubTab, setPaymentsSubTab] = useState<'PAYMENTS' | 'INVOICES'>('PAYMENTS');
+  // Payments & Invoices Tab (Screen 5 — backed by PostgreSQL)
+  const [paymentsList, setPaymentsList] = useState<Payment[]>([]);
+  const [invoicesList, setInvoicesList] = useState<Invoice[]>([]);
+  const [paymentsLoading, setPaymentsLoading] = useState(false);
+  const [paymentsSubTab, setPaymentsSubTab] = useState<'PAYMENTS' | 'INVOICES' | 'REFUND_FLAGS'>('PAYMENTS');
   const [selectedInvoiceModal, setSelectedInvoiceModal] = useState<Invoice | null>(null);
+  const [reconciliationFlags, setReconciliationFlags] = useState<Array<{
+    id: string;
+    org_id: string;
+    outlet_id: string;
+    order_id: string;
+    payment_id: string;
+    reason: string;
+    amount_paise: number;
+    status: 'NEEDS_REFUND' | 'RESOLVED';
+    created_at: string;
+    resolved_at?: string | null;
+    resolved_by_staff_id?: string | null;
+  }>>([]);
+  const [loadingFlags, setLoadingFlags] = useState(false);
+  const [resolvingFlagId, setResolvingFlagId] = useState<string | null>(null);
 
-  // Loyalty & Coupons (Screen 6)
-  const [coupons, setCoupons] = useState<Coupon[]>(currentBranchData.coupons);
+  // Loyalty & Coupons (Screen 6 — backed by PostgreSQL)
+  const [couponsList, setCouponsList] = useState<Coupon[]>([]);
+  const [couponsLoading, setCouponsLoading] = useState(false);
   const [showCreateCouponModal, setShowCreateCouponModal] = useState(false);
+  const [couponCode, setCouponCode] = useState('');
+  const [couponType, setCouponType] = useState<'FLAT' | 'PERCENTAGE'>('PERCENTAGE');
+  const [couponValueInput, setCouponValueInput] = useState('15');
+  const [couponMinSpendRupees, setCouponMinSpendRupees] = useState('500');
+  const [couponMaxCapRupees, setCouponMaxCapRupees] = useState('200');
 
-  // Feedback & Reviews (Screen 7)
-  const [feedbackList, setFeedbackList] = useState<FeedbackReview[]>(currentBranchData.feedback);
+  // Feedback & Reviews (Screen 7 — backed by PostgreSQL)
+  const [feedbackList, setFeedbackList] = useState<FeedbackReview[]>([]);
+
+  // Organization Settings (Screen 9 — backed by PostgreSQL)
+  const [orgDetails, setOrgDetails] = useState<{
+    name: string;
+    gstin: string;
+    fssai: string;
+    currency: string;
+    timezone: string;
+  }>({
+    name: '',
+    gstin: '',
+    fssai: '',
+    currency: 'INR',
+    timezone: 'Asia/Kolkata',
+  });
   const [selectedFeedbackDrawer, setSelectedFeedbackDrawer] = useState<FeedbackReview | null>(null);
   const [replyInput, setReplyInput] = useState('');
 
@@ -212,11 +263,59 @@ export default function OwnerWebApp() {
     }
   };
 
+  const fetchReconciliationFlags = async () => {
+    const auth = getConsoleAuthState();
+    if (!auth || (auth.user.role !== 'OWNER' && auth.user.role !== 'MANAGER')) return;
+    setLoadingFlags(true);
+    try {
+      const res = await consoleAuthFetch(
+        `/api/v1/console/payments/reconciliation-flags?outlet_id=${encodeURIComponent(selectedOutletId)}`
+      );
+      if (res.ok) {
+        const data = await res.json();
+        setReconciliationFlags(Array.isArray(data) ? data : []);
+      }
+    } catch (err) {
+      console.error('Failed to load reconciliation flags:', err);
+    } finally {
+      setLoadingFlags(false);
+    }
+  };
+
+  const handleResolveFlag = async (flagId: string) => {
+    setResolvingFlagId(flagId);
+    try {
+      const res = await consoleAuthFetch(
+        `/api/v1/console/payments/reconciliation-flags/${flagId}/resolve`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+        }
+      );
+      if (res.ok) {
+        showToast('✓ Payment marked as refunded');
+        await fetchReconciliationFlags();
+      } else {
+        showToast(`⚠️ Failed to mark as refunded: HTTP ${res.status}`);
+      }
+    } catch {
+      showToast('⚠️ Network error marking refund');
+    } finally {
+      setResolvingFlagId(null);
+    }
+  };
+
   useEffect(() => {
     if (isAuthenticated) {
       void loadServerStaffDirectory();
+      void fetchReconciliationFlags();
+      void fetchOwnerTables();
+      void fetchOwnerCoupons();
+      void fetchPaymentsAndInvoices();
+      void fetchOwnerFeedback();
+      void fetchOrgDetails();
     }
-  }, [isAuthenticated]);
+  }, [isAuthenticated, selectedOutletId]);
 
   // Listen for dynamic storage updates
   useEffect(() => {
@@ -229,54 +328,375 @@ export default function OwnerWebApp() {
     };
   }, []);
 
-  // Sync state whenever outlet changes
+  // Live sync whenever outlet changes
   const handleOutletChange = (newOutletId: string) => {
     setSelectedOutletId(newOutletId);
-    const data = getBranchData(newOutletId);
-    setCategories(data.categories);
-    setMenuItems(data.menuItems);
-    setTables(data.tables);
-    setCoupons(data.coupons);
-    setFeedbackList(data.feedback);
-    if (data.categories.length > 0) {
-      setSelectedCategoryName(data.categories[0]!.name);
+  };
+
+  const handleCloneMenu = () => {};
+
+  const fetchOwnerTables = async () => {
+    if (!getConsoleAuthState() || !selectedOutletId) return;
+    setTablesLoading(true);
+    try {
+      const res = await consoleAuthFetch(`/api/v1/console/tables?outlet_id=${encodeURIComponent(selectedOutletId)}`);
+      if (res.ok) {
+        const data = await res.json();
+        const mapped: Table[] = (Array.isArray(data) ? data : []).map((t: any) => ({
+          id: t.id,
+          number: t.table_number || t.number,
+          capacity: t.capacity || 4,
+          section: t.section || 'Main Dining Hall',
+          qrTokenVersion: t.qr_token_version ?? t.qrTokenVersion ?? 1,
+          isActive: t.is_active !== false,
+        }));
+        setTablesList(mapped);
+      }
+    } catch (e) {
+      console.warn('Tables fetch error:', e);
+    } finally {
+      setTablesLoading(false);
     }
   };
 
-  // Clone Menu from Indiranagar Flagship to blank branch
-  const handleCloneMenu = () => {
-    setCategories(BRANCH_1_CATEGORIES);
-    setMenuItems(BRANCH_1_MENU_ITEMS);
-    setSelectedCategoryName('Main Course');
+  const handleAddTable = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newTableNumber.trim()) {
+      showToast('⚠️ Please enter a table number');
+      return;
+    }
+    try {
+      const res = await consoleAuthFetch('/api/v1/console/tables', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          outlet_id: selectedOutletId,
+          table_number: newTableNumber.trim().toUpperCase(),
+          capacity: Number.parseInt(newTableCapacity, 10) || 4,
+          section: newTableSection.trim() || 'Main Dining Hall',
+        }),
+      });
+      if (res.ok) {
+        showToast(`🪑 Added Table ${newTableNumber.trim().toUpperCase()}`);
+        setShowAddTableModal(false);
+        setNewTableNumber('');
+        setNewTableCapacity('4');
+        await fetchOwnerTables();
+      } else {
+        const err = await res.json().catch(() => null);
+        showToast(`⚠️ ${err?.message || 'Failed to add table'}`);
+      }
+    } catch {
+      showToast('⚠️ Network error while adding table');
+    }
   };
 
-  // Hotel creation handler
-  const handleCreateHotel = (e: React.FormEvent) => {
+  const handleRotateTableQr = async (table: Table) => {
+    try {
+      const res = await consoleAuthFetch(`/api/v1/console/tables/${encodeURIComponent(table.id)}/qr/rotate`, {
+        method: 'POST',
+      });
+      if (res.ok) {
+        const data = await res.json();
+        showToast(`🔄 QR regenerated for Table ${table.number} (v${data.version}). Old QR codes invalidated.`);
+        await fetchOwnerTables();
+      } else {
+        showToast('⚠️ Failed to rotate QR code');
+      }
+    } catch {
+      showToast('⚠️ Network error');
+    }
+  };
+
+  const handlePreviewTableStand = async (table: Table) => {
+    try {
+      const res = await consoleAuthFetch(`/api/v1/console/tables/${encodeURIComponent(table.id)}/qr`);
+      if (res.ok) {
+        const data = await res.json();
+        setQrModalData({
+          table,
+          scanUrl: data.scan_url,
+          token: data.token,
+        });
+      } else {
+        showToast('⚠️ Could not load QR details');
+      }
+    } catch {
+      showToast('⚠️ Network error');
+    }
+  };
+
+  const handleDeleteTable = async (tableId: string) => {
+    if (!confirm('Are you sure you want to remove this table?')) return;
+    try {
+      const res = await consoleAuthFetch(`/api/v1/console/tables/${encodeURIComponent(tableId)}`, {
+        method: 'DELETE',
+      });
+      if (res.ok) {
+        showToast('🗑️ Table removed');
+        await fetchOwnerTables();
+      } else {
+        showToast('⚠️ Failed to delete table');
+      }
+    } catch {
+      showToast('⚠️ Network error');
+    }
+  };
+
+  const fetchOwnerCoupons = async () => {
+    if (!getConsoleAuthState() || !selectedOutletId) return;
+    setCouponsLoading(true);
+    try {
+      const res = await consoleAuthFetch(`/api/v1/console/coupons?outlet_id=${encodeURIComponent(selectedOutletId)}`);
+      if (res.ok) {
+        const data = await res.json();
+        const mapped: Coupon[] = (Array.isArray(data) ? data : []).map((c: any) => ({
+          id: c.id,
+          code: c.code,
+          discountType: c.discount_type,
+          discountValue: c.discount_type === 'FLAT' ? (c.discount_value || c.fixed_paise || 0) : (c.discount_value || c.percent || 0),
+          minOrderPaise: c.min_order_paise || 0,
+          maxDiscountPaise: c.max_discount_paise || 0,
+          isActive: Boolean(c.is_active),
+          usedCount: c.redemption_count || c.used_count || 0,
+        }));
+        setCouponsList(mapped);
+      }
+    } catch (e) {
+      console.warn('Coupons fetch error:', e);
+    } finally {
+      setCouponsLoading(false);
+    }
+  };
+
+  const handleCreateCoupon = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!couponCode.trim()) {
+      showToast('⚠️ Please enter a coupon code');
+      return;
+    }
+    const valNum = Number.parseFloat(couponValueInput);
+    if (!Number.isFinite(valNum) || valNum <= 0) {
+      showToast('⚠️ Please enter a valid positive discount value');
+      return;
+    }
+    const discountVal = couponType === 'FLAT' ? Math.round(valNum * 100) : Math.round(valNum);
+    const minSpendPaise = Math.round((Number.parseFloat(couponMinSpendRupees) || 0) * 100);
+    const maxCapPaise = Math.round((Number.parseFloat(couponMaxCapRupees) || 0) * 100);
+
+    try {
+      const res = await consoleAuthFetch('/api/v1/console/coupons', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          code: couponCode.trim().toUpperCase(),
+          discount_type: couponType,
+          discount_value: discountVal,
+          min_order_paise: minSpendPaise,
+          max_discount_paise: maxCapPaise,
+          outlet_id: selectedOutletId,
+        }),
+      });
+      if (res.ok) {
+        showToast(`🎟️ Created coupon: ${couponCode.trim().toUpperCase()}`);
+        setShowCreateCouponModal(false);
+        setCouponCode('');
+        setCouponValueInput('15');
+        await fetchOwnerCoupons();
+      } else {
+        const err = await res.json().catch(() => null);
+        showToast(`⚠️ ${err?.message || 'Failed to create coupon'}`);
+      }
+    } catch {
+      showToast('⚠️ Network error while creating coupon');
+    }
+  };
+
+  const handleToggleCouponActive = async (c: Coupon) => {
+    try {
+      const res = await consoleAuthFetch(`/api/v1/console/coupons/${encodeURIComponent(c.id)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ is_active: !c.isActive }),
+      });
+      if (res.ok) {
+        showToast(`Coupon ${c.code} is now ${!c.isActive ? 'ACTIVE' : 'INACTIVE'}`);
+        await fetchOwnerCoupons();
+      } else {
+        showToast('⚠️ Could not update coupon');
+      }
+    } catch {
+      showToast('⚠️ Network error');
+    }
+  };
+
+  const handleDeleteCoupon = async (c: Coupon) => {
+    if (!confirm(`Delete coupon ${c.code}?`)) return;
+    try {
+      const res = await consoleAuthFetch(`/api/v1/console/coupons/${encodeURIComponent(c.id)}`, {
+        method: 'DELETE',
+      });
+      if (res.ok) {
+        showToast(`🗑️ Deleted coupon ${c.code}`);
+        await fetchOwnerCoupons();
+      } else {
+        showToast('⚠️ Could not delete coupon');
+      }
+    } catch {
+      showToast('⚠️ Network error');
+    }
+  };
+
+  const fetchPaymentsAndInvoices = async () => {
+    if (!getConsoleAuthState() || !selectedOutletId) return;
+    setPaymentsLoading(true);
+    try {
+      const [payRes, invRes] = await Promise.all([
+        consoleAuthFetch(`/api/v1/console/payments?outlet_id=${encodeURIComponent(selectedOutletId)}`),
+        consoleAuthFetch(`/api/v1/console/payments/invoices?outlet_id=${encodeURIComponent(selectedOutletId)}`),
+      ]);
+      if (payRes.ok) {
+        const pData = await payRes.json();
+        const mappedPayments: Payment[] = (Array.isArray(pData) ? pData : []).map((p: any) => ({
+          id: p.id,
+          orderId: p.order_id,
+          displayId: 'PAY-#' + p.id.slice(-4).toUpperCase(),
+          tableNumber: p.table_number || '--',
+          method: p.method || 'UPI',
+          status: p.status || 'PAID',
+          amountPaise: p.amount_paise || 0,
+          gatewayFeePaise: p.gateway_fee_paise || 0,
+          netDepositedPaise: p.net_deposited_paise || p.amount_paise || 0,
+          timestamp: formatOrderDateTime(p.created_at),
+          customerName: p.customer_name || 'Walk-in Diner',
+        }));
+        setPaymentsList(mappedPayments);
+      }
+      if (invRes.ok) {
+        const iData = await invRes.json();
+        const mappedInvoices: Invoice[] = (Array.isArray(iData) ? iData : []).map((inv: any) => ({
+          id: inv.id,
+          orderId: inv.order_id,
+          invoiceNumber: inv.invoice_number,
+          sellerGstin: inv.seller_gstin || '29AAAAA0000A1Z5',
+          buyerName: inv.buyer_name || 'Guest Diner',
+          subtotalPaise: inv.subtotal_paise || 0,
+          cgstPaise: inv.cgst_paise || 0,
+          sgstPaise: inv.sgst_paise || 0,
+          totalPaise: inv.total_paise || 0,
+          issuedAt: formatOrderDateTime(inv.issued_at),
+          tableNumber: inv.table_number || '--',
+          paymentMethod: inv.payment_method || 'UPI',
+        }));
+        setInvoicesList(mappedInvoices);
+      }
+    } catch (e) {
+      console.warn('Payments/Invoices fetch error:', e);
+    } finally {
+      setPaymentsLoading(false);
+    }
+  };
+
+  const fetchOwnerFeedback = async () => {
+    if (!getConsoleAuthState() || !selectedOutletId) return;
+    try {
+      const res = await consoleAuthFetch(`/api/v1/console/feedback?outletId=${encodeURIComponent(selectedOutletId)}`);
+      if (res.ok) {
+        const data = await res.json();
+        const list = data?.items || data?.feedback || (Array.isArray(data) ? data : []);
+        const mapped: FeedbackReview[] = list.map((f: any) => ({
+          id: f.id,
+          tableNumber: f.table_number || f.tableNumber || '--',
+          rating: f.rating || 5,
+          tags: Array.isArray(f.tags) ? f.tags : [],
+          comments: f.comment || f.comments || '',
+          resolutionNotes: f.resolution_notes || f.resolutionNotes || null,
+          customerName: f.customer_name || f.customerName || 'Diner',
+          createdAt: formatOrderDateTime(f.created_at || f.createdAt),
+          isResolved: Boolean(f.resolution_notes || f.is_resolved),
+        }));
+        setFeedbackList(mapped);
+      }
+    } catch (e) {
+      console.warn('Feedback fetch error:', e);
+    }
+  };
+
+  const fetchOrgDetails = async () => {
+    if (!getConsoleAuthState()) return;
+    try {
+      const res = await consoleAuthFetch('/api/v1/console/organization');
+      if (res.ok) {
+        const data = await res.json();
+        setOrgDetails({
+          name: data.name || '',
+          gstin: data.gstin || '',
+          fssai: data.fssai || '',
+          currency: data.currency || 'INR',
+          timezone: data.timezone || 'Asia/Kolkata',
+        });
+      }
+    } catch (e) {
+      console.warn('Org details fetch error:', e);
+    }
+  };
+
+  const handleSaveOrgDetails = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      const res = await consoleAuthFetch('/api/v1/console/organization', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: orgDetails.name,
+          gstin: orgDetails.gstin,
+          fssai: orgDetails.fssai,
+        }),
+      });
+      if (res.ok) {
+        showToast('✅ Statutory organization details updated in PostgreSQL');
+        await fetchOrgDetails();
+      } else {
+        showToast('⚠️ Could not update organization details');
+      }
+    } catch {
+      showToast('⚠️ Network error while saving settings');
+    }
+  };
+
+  // Hotel creation handler (persisted directly to PostgreSQL)
+  const handleCreateHotel = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!hotelName.trim()) {
       showToast('⚠️ Please enter a hotel name');
       return;
     }
-    const newOutlet: Outlet = {
-      id: `b${Date.now().toString(16).padEnd(31, '0')}`,
-      orgId: ORGANIZATION.id,
-      name: hotelName.trim(),
-      shortName: hotelShortName.trim() || hotelName.trim().slice(0, 16),
-      address: hotelAddress.trim() || 'Bangalore, India',
-      timezone: 'Asia/Kolkata',
-      isActive: true,
-    };
-    const updated = saveStoredOutlet(newOutlet);
-    setOutletsList(updated);
-    handleOutletChange(newOutlet.id);
-    setShowAddHotelModal(false);
-    setHotelName('');
-    setHotelShortName('');
-    setHotelAddress('');
-    setHotelPhone('');
-    showToast(`🏨 Added new hotel: ${newOutlet.name}`);
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(new CustomEvent('dineflow-data-updated'));
+    try {
+      const res = await consoleAuthFetch('/api/v1/console/outlets', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: hotelName.trim(),
+          address: hotelAddress.trim() || 'Bangalore, India',
+          timezone: 'Asia/Kolkata',
+        }),
+      });
+      if (res.ok) {
+        const created = await res.json();
+        showToast(`🏨 Added new hotel: ${created.name}`);
+        setShowAddHotelModal(false);
+        setHotelName('');
+        setHotelShortName('');
+        setHotelAddress('');
+        setHotelPhone('');
+        await loadServerStaffDirectory();
+        setSelectedOutletId(created.id);
+      } else {
+        const err = await res.json().catch(() => null);
+        showToast(`⚠️ ${err?.message || 'Failed to create hotel'}`);
+      }
+    } catch {
+      showToast('⚠️ Network error while creating hotel');
     }
   };
 
@@ -378,8 +798,6 @@ export default function OwnerWebApp() {
   };
 
   // Active Outlet Info
-  const currentOutlet = outletsList.find((o) => o.id === selectedOutletId) ?? outletsList[0] ?? OUTLETS[0]!;
-  const isBranchPopulated = selectedOutletId === '71ad00a6-d79b-4035-b563-bf9543fcfa86' || selectedOutletId === 'b0000000-0000-0000-0000-000000000001';
 
   // Live Orders from PostgreSQL
   const [liveDbOrders, setLiveDbOrders] = useState<Order[]>([]);
@@ -396,18 +814,18 @@ export default function OwnerWebApp() {
       }
       if (res.ok) {
         const data = await res.json();
-        if (Array.isArray(data) && data.length > 0) {
+        if (Array.isArray(data)) {
           const mapped: Order[] = data.map((d: any) => ({
             id: d.id,
             displayId: 'ORD-#' + d.id.slice(-4).toUpperCase(),
             outletId: d.outlet_id || selectedOutletId,
-            tableNumber: d.table_number || 'T04',
+            tableNumber: d.table_number || 'T01',
             sessionId: d.session_id,
             status: d.status as Order['status'],
-            subtotalPaise: d.subtotal_paise,
-            taxPaise: d.tax_paise,
+            subtotalPaise: d.subtotal_paise || 0,
+            taxPaise: d.tax_paise || 0,
             discountPaise: d.discount_paise || 0,
-            totalPaise: d.total_paise,
+            totalPaise: d.total_paise || 0,
             createdAt: formatOrderDateTime(d.created_at),
             items: (d.items || []).map((it: any) => ({
               id: it.id,
@@ -447,14 +865,16 @@ export default function OwnerWebApp() {
     return () => clearInterval(interval);
   }, [selectedOutletId]);
 
-  // Computed Metrics
-  const allOrders: Order[] = liveDbOrders.length > 0
-    ? liveDbOrders
-    : (isBranchPopulated ? [...currentBranchData.activeOrders, ...currentBranchData.pastOrders] : []);
+  // Computed Metrics (100% database-driven)
+  const allOrders: Order[] = liveDbOrders;
+  const activeOrders = allOrders.filter(
+    (o) => o.status === 'PENDING_APPROVAL' || o.status === 'CONFIRMED' || o.status === 'PREPARING' || o.status === 'READY',
+  );
+  const seatedTablesCount = new Set(activeOrders.map((o) => o.tableNumber)).size;
 
   const liveRevenuePaise = allOrders.reduce((acc, o) => acc + (o.status !== 'CANCELLED' ? o.totalPaise : 0), 0);
-  const totalRevenuePaise = liveRevenuePaise > 0 ? liveRevenuePaise : currentBranchData.payments.reduce((acc, p) => acc + p.amountPaise, 0);
-  const totalBilledOrders = allOrders.filter((o) => o.status === 'BILLED' || o.status === 'SERVED').length || currentBranchData.payments.length;
+  const totalRevenuePaise = liveRevenuePaise;
+  const totalBilledOrders = allOrders.filter((o) => o.status === 'BILLED' || o.status === 'SERVED').length;
   const aovPaise = totalBilledOrders > 0 ? Math.round(totalRevenuePaise / totalBilledOrders) : 0;
 
   // Server-backed login handler with real JWT + pre-MFA TOTP verification
@@ -825,8 +1245,10 @@ export default function OwnerWebApp() {
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
               <span style={{ fontSize: '22px' }}>👔</span>
               <div>
-                <div style={{ fontSize: '0.82rem', fontWeight: 700 }}>Vikram Malhotra</div>
-                <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>Group Managing Director</div>
+                <div style={{ fontSize: '0.82rem', fontWeight: 700 }}>
+                  {getConsoleAuthState()?.user?.name || getConsoleAuthState()?.user?.email || 'Owner'}
+                </div>
+                <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>Restaurant Owner</div>
               </div>
             </div>
             <button
@@ -986,35 +1408,6 @@ export default function OwnerWebApp() {
 
         {/* CONTENT PANELS */}
         <main className="owner-content">
-          {/* Blank Branch Warning Banner */}
-          {!isBranchPopulated && (
-            <div
-              style={{
-                background: 'rgba(245, 158, 11, 0.12)',
-                border: '1px solid rgba(245, 158, 11, 0.3)',
-                borderRadius: 'var(--radius-md)',
-                padding: '18px 24px',
-                marginBottom: '24px',
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                color: '#fcd34d',
-              }}
-            >
-              <div>
-                <h3 style={{ fontSize: '1.05rem', fontWeight: 800, marginBottom: '4px' }}>
-                  Branch Setup Mode: {currentOutlet.name}
-                </h3>
-                <p style={{ fontSize: '0.85rem', color: '#fef3c7' }}>
-                  This outlet has blank child tables in the database. You can quickly onboard it by cloning the menu catalog and tables from Indiranagar Flagship.
-                </p>
-              </div>
-              <button onClick={handleCloneMenu} className="btn-primary" style={{ padding: '8px 16px', fontSize: '0.82rem' }}>
-                📋 Clone Menu from Flagship
-              </button>
-            </div>
-          )}
-
           {/* SCREEN 1: EXECUTIVE DASHBOARD */}
           {activeScreen === 'DASHBOARD' && (
             <div>
@@ -1047,7 +1440,7 @@ export default function OwnerWebApp() {
                     {totalBilledOrders}
                   </div>
                   <div style={{ marginTop: '8px' }} className="metric-trend-up">
-                    ▲ 3 active in kitchen now
+                    ▲ {activeOrders.length} active now
                   </div>
                 </div>
 
@@ -1059,7 +1452,7 @@ export default function OwnerWebApp() {
                     {formatPaise(aovPaise)}
                   </div>
                   <div style={{ marginTop: '8px' }} className="metric-trend-up">
-                    ▲ ₹45 higher than target
+                    ▲ Across {totalBilledOrders} completed orders
                   </div>
                 </div>
 
@@ -1068,10 +1461,10 @@ export default function OwnerWebApp() {
                     TABLE UTILIZATION
                   </span>
                   <div style={{ fontSize: '2rem', fontWeight: 900, color: 'var(--accent-amber)', marginTop: '4px' }}>
-                    {tables.length > 0 ? `${Math.round((3 / tables.length) * 100)}%` : '0%'}
+                    {tablesList.length > 0 ? `${Math.round((seatedTablesCount / tablesList.length) * 100)}%` : '0%'}
                   </div>
                   <div style={{ marginTop: '8px', fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-                    3 of {tables.length} tables seated
+                    {seatedTablesCount} of {tablesList.length} tables seated
                   </div>
                 </div>
               </div>
@@ -1336,22 +1729,34 @@ export default function OwnerWebApp() {
                 <div>
                   <h2 style={{ fontSize: '1.6rem', fontWeight: 900 }}>Tables & Cryptographic QR Codes</h2>
                   <p style={{ color: 'var(--text-secondary)', fontSize: '0.88rem' }}>
-                    Generate print-ready QR table stands with token versioning for security
+                    100% database-driven tables, live cryptographic HMAC QR tokens, and print-ready table stands
                   </p>
                 </div>
 
-                <button
-                  onClick={() => setShowQrSheetModal(true)}
-                  className="btn-primary"
-                >
-                  🖨 Print QR Table Stands Sheet
-                </button>
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  <button
+                    onClick={() => setShowAddTableModal(true)}
+                    className="btn-primary"
+                  >
+                    + Add Table
+                  </button>
+                  <button
+                    onClick={() => setShowQrSheetModal(true)}
+                    className="btn-secondary"
+                  >
+                    🖨 Print QR Table Stands Sheet
+                  </button>
+                </div>
               </div>
 
               <div className="data-table-container">
-                {tables.length === 0 ? (
+                {tablesLoading ? (
+                  <div style={{ padding: '40px', textAlign: 'center', color: 'var(--text-secondary)' }}>
+                    Loading dining tables from database...
+                  </div>
+                ) : tablesList.length === 0 ? (
                   <div style={{ padding: '60px 20px', textAlign: 'center', color: 'var(--text-muted)' }}>
-                    No tables configured for this branch yet.
+                    No tables configured for {currentOutlet.name || 'this outlet'} yet. Click <strong>+ Add Table</strong> to add dining tables.
                   </div>
                 ) : (
                   <table className="data-table">
@@ -1361,35 +1766,28 @@ export default function OwnerWebApp() {
                         <th>Section</th>
                         <th>Capacity</th>
                         <th>QR Token Version</th>
-                        <th>Active Session</th>
-                        <th>Security Actions</th>
+                        <th>Status</th>
+                        <th style={{ textAlign: 'right' }}>Security Actions</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {tables.map((t) => {
-                        const session = currentBranchData.sessions.find((s) => s.tableId === t.id && s.status === 'OPEN');
-                        return (
-                          <tr key={t.id}>
-                            <td style={{ fontWeight: 900, color: 'var(--accent-cyan)', fontSize: '1.1rem' }}>
-                              {t.number}
-                            </td>
-                            <td>{t.section}</td>
-                            <td>{t.capacity} Guests</td>
-                            <td>
-                              <span style={{ fontFamily: 'monospace', fontWeight: 700 }}>v{t.qrTokenVersion}</span>
-                            </td>
-                            <td>
-                              {session ? (
-                                <span className="status-chip chip-green">Active ({session.guestCount} pax)</span>
-                              ) : (
-                                <span className="status-chip chip-purple">Vacant</span>
-                              )}
-                            </td>
-                            <td style={{ display: 'flex', gap: '8px' }}>
+                      {tablesList.map((t) => (
+                        <tr key={t.id}>
+                          <td style={{ fontWeight: 900, color: 'var(--accent-cyan)', fontSize: '1.1rem' }}>
+                            {t.number}
+                          </td>
+                          <td>{t.section}</td>
+                          <td>{t.capacity} Guests</td>
+                          <td>
+                            <span style={{ fontFamily: 'monospace', fontWeight: 700 }}>v{t.qrTokenVersion}</span>
+                          </td>
+                          <td>
+                            <span className="status-chip chip-purple">Ready</span>
+                          </td>
+                          <td style={{ textAlign: 'right' }}>
+                            <div style={{ display: 'inline-flex', gap: '8px' }}>
                               <button
-                                onClick={() => {
-                                  setQrModalTable(t);
-                                }}
+                                onClick={() => handlePreviewTableStand(t)}
                                 style={{
                                   background: 'rgba(6, 182, 212, 0.15)',
                                   color: 'var(--accent-cyan)',
@@ -1398,19 +1796,13 @@ export default function OwnerWebApp() {
                                   borderRadius: '4px',
                                   fontSize: '0.78rem',
                                   fontWeight: 700,
+                                  cursor: 'pointer',
                                 }}
                               >
                                 🔍 Preview Stand
                               </button>
                               <button
-                                onClick={() => {
-                                  // Invalidate stolen QR code by bumping token version
-                                  setTables((prev) =>
-                                    prev.map((item) =>
-                                      item.id === t.id ? { ...item, qrTokenVersion: item.qrTokenVersion + 1 } : item
-                                    )
-                                  );
-                                }}
+                                onClick={() => handleRotateTableQr(t)}
                                 style={{
                                   background: 'rgba(244, 63, 94, 0.15)',
                                   color: 'var(--accent-rose)',
@@ -1419,14 +1811,29 @@ export default function OwnerWebApp() {
                                   borderRadius: '4px',
                                   fontSize: '0.78rem',
                                   fontWeight: 700,
+                                  cursor: 'pointer',
                                 }}
                               >
                                 🔄 Invalidate & Regen Token
                               </button>
-                            </td>
-                          </tr>
-                        );
-                      })}
+                              <button
+                                onClick={() => handleDeleteTable(t.id)}
+                                style={{
+                                  background: 'rgba(239, 68, 68, 0.12)',
+                                  color: '#f87171',
+                                  border: '1px solid rgba(239, 68, 68, 0.25)',
+                                  borderRadius: '4px',
+                                  padding: '4px 8px',
+                                  fontSize: '0.78rem',
+                                  cursor: 'pointer',
+                                }}
+                              >
+                                🗑️
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
                     </tbody>
                   </table>
                 )}
@@ -1441,7 +1848,7 @@ export default function OwnerWebApp() {
                 <div>
                   <h2 style={{ fontSize: '1.6rem', fontWeight: 900 }}>Invoices & Financial Settlement</h2>
                   <p style={{ color: 'var(--text-secondary)', fontSize: '0.88rem' }}>
-                    Gapless sequential GST tax invoices under Karnataka GSTIN {ORGANIZATION.gstin}
+                    Gapless sequential GST tax invoices under Karnataka GSTIN {orgDetails.gstin || '29AAAAA0000A1Z5'}
                   </p>
                 </div>
 
@@ -1458,7 +1865,7 @@ export default function OwnerWebApp() {
                       border: '1px solid var(--border-light)',
                     }}
                   >
-                    Payments List ({currentBranchData.payments.length})
+                    Payments List ({paymentsList.length})
                   </button>
                   <button
                     onClick={() => setPaymentsSubTab('INVOICES')}
@@ -1472,7 +1879,21 @@ export default function OwnerWebApp() {
                       border: '1px solid var(--border-light)',
                     }}
                   >
-                    Tax Invoices ({currentBranchData.invoices.length})
+                    Tax Invoices ({invoicesList.length})
+                  </button>
+                  <button
+                    onClick={() => setPaymentsSubTab('REFUND_FLAGS')}
+                    style={{
+                      padding: '8px 16px',
+                      borderRadius: 'var(--radius-sm)',
+                      fontWeight: 700,
+                      fontSize: '0.85rem',
+                      background: paymentsSubTab === 'REFUND_FLAGS' ? 'var(--accent-cyan)' : 'var(--bg-surface)',
+                      color: paymentsSubTab === 'REFUND_FLAGS' ? '#000' : 'var(--text-secondary)',
+                      border: '1px solid var(--border-light)',
+                    }}
+                  >
+                    Manual Refund Flags ({reconciliationFlags.filter((f) => f.status === 'NEEDS_REFUND').length})
                   </button>
                 </div>
               </div>
@@ -1494,7 +1915,7 @@ export default function OwnerWebApp() {
                       </tr>
                     </thead>
                     <tbody>
-                      {currentBranchData.payments.map((p) => (
+                      {paymentsList.map((p) => (
                         <tr key={p.id}>
                           <td style={{ fontFamily: 'monospace' }}>{p.id.slice(0, 10)}...</td>
                           <td style={{ fontWeight: 700 }}>{p.displayId}</td>
@@ -1514,7 +1935,7 @@ export default function OwnerWebApp() {
                     </tbody>
                   </table>
                 </div>
-              ) : (
+              ) : paymentsSubTab === 'INVOICES' ? (
                 <div className="data-table-container">
                   <table className="data-table">
                     <thead>
@@ -1530,7 +1951,7 @@ export default function OwnerWebApp() {
                       </tr>
                     </thead>
                     <tbody>
-                      {currentBranchData.invoices.map((inv) => (
+                      {invoicesList.map((inv) => (
                         <tr key={inv.id}>
                           <td style={{ fontWeight: 800, color: 'var(--accent-cyan)' }}>{inv.invoiceNumber}</td>
                           <td>{inv.buyerName}</td>
@@ -1559,6 +1980,80 @@ export default function OwnerWebApp() {
                     </tbody>
                   </table>
                 </div>
+              ) : (
+                <div className="data-table-container">
+                  {loadingFlags ? (
+                    <div style={{ padding: '30px', textAlign: 'center', color: 'var(--text-secondary)' }}>
+                      Loading reconciliation flags...
+                    </div>
+                  ) : reconciliationFlags.length === 0 ? (
+                    <div style={{ padding: '40px', textAlign: 'center', color: 'var(--text-secondary)' }}>
+                      <p style={{ fontSize: '1.1rem', fontWeight: 700, marginBottom: '6px' }}>Zero Refund Flags</p>
+                      <p style={{ fontSize: '0.88rem' }}>All late webhooks and payments are reconciled cleanly.</p>
+                    </div>
+                  ) : (
+                    <table className="data-table">
+                      <thead>
+                        <tr>
+                          <th>Flag ID</th>
+                          <th>Order ID</th>
+                          <th>Reason</th>
+                          <th>Amount</th>
+                          <th>Status</th>
+                          <th>Flagged At</th>
+                          <th>Resolved At</th>
+                          <th>Action</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {reconciliationFlags.map((flag) => (
+                          <tr key={flag.id}>
+                            <td style={{ fontFamily: 'monospace' }}>{flag.id.slice(0, 8)}...</td>
+                            <td style={{ fontWeight: 700, fontFamily: 'monospace' }}>{flag.order_id.slice(0, 8)}...</td>
+                            <td>
+                              <span className="status-chip chip-amber">{flag.reason}</span>
+                            </td>
+                            <td style={{ fontWeight: 800, color: 'var(--accent-rose)' }}>{formatPaise(flag.amount_paise)}</td>
+                            <td>
+                              <span className={`status-chip ${flag.status === 'RESOLVED' ? 'chip-green' : 'chip-rose'}`}>
+                                {flag.status === 'RESOLVED' ? '✓ RESOLVED' : '⚠️ NEEDS REFUND'}
+                              </span>
+                            </td>
+                            <td style={{ color: 'var(--text-muted)' }}>
+                              {flag.created_at ? new Date(flag.created_at).toLocaleString() : '--'}
+                            </td>
+                            <td style={{ color: 'var(--text-muted)' }}>
+                              {flag.resolved_at ? new Date(flag.resolved_at).toLocaleString() : '--'}
+                            </td>
+                            <td>
+                              {flag.status === 'NEEDS_REFUND' ? (
+                                <button
+                                  disabled={resolvingFlagId === flag.id}
+                                  onClick={() => handleResolveFlag(flag.id)}
+                                  style={{
+                                    padding: '6px 12px',
+                                    borderRadius: 'var(--radius-sm)',
+                                    fontSize: '0.78rem',
+                                    fontWeight: 700,
+                                    background: '#10b981',
+                                    color: '#fff',
+                                    border: 'none',
+                                    cursor: resolvingFlagId === flag.id ? 'not-allowed' : 'pointer',
+                                    opacity: resolvingFlagId === flag.id ? 0.6 : 1,
+                                  }}
+                                >
+                                  {resolvingFlagId === flag.id ? 'Marking...' : 'Mark Refunded'}
+                                </button>
+                              ) : (
+                                <span style={{ fontSize: '0.78rem', color: '#10b981', fontWeight: 700 }}>Resolved</span>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
               )}
             </div>
           )}
@@ -1580,38 +2075,81 @@ export default function OwnerWebApp() {
               </div>
 
               <div className="data-table-container">
-                <table className="data-table">
-                  <thead>
-                    <tr>
-                      <th>Coupon Code</th>
-                      <th>Discount Type</th>
-                      <th>Value</th>
-                      <th>Max Cap</th>
-                      <th>Min Spend</th>
-                      <th>Redemptions</th>
-                      <th>Status</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {coupons.map((c) => (
-                      <tr key={c.id}>
-                        <td style={{ fontWeight: 900, color: 'var(--accent-cyan)', letterSpacing: '1px' }}>
-                          {c.code}
-                        </td>
-                        <td>{c.discountType}</td>
-                        <td style={{ fontWeight: 800 }}>
-                          {c.discountType === 'FLAT' ? formatPaise(c.discountValue) : `${c.discountValue}% OFF`}
-                        </td>
-                        <td style={{ color: 'var(--text-muted)' }}>{formatPaise(c.maxDiscountPaise)}</td>
-                        <td>{formatPaise(c.minOrderPaise)}</td>
-                        <td>{c.usedCount} used</td>
-                        <td>
-                          <span className="status-chip chip-green">ACTIVE</span>
-                        </td>
+                {couponsLoading ? (
+                  <div style={{ padding: '40px', textAlign: 'center', color: 'var(--text-secondary)' }}>
+                    Loading coupons from database...
+                  </div>
+                ) : couponsList.length === 0 ? (
+                  <div style={{ padding: '60px 20px', textAlign: 'center', color: 'var(--text-muted)' }}>
+                    No promotional coupons configured for {currentOutlet.name || 'this outlet'} yet. Click <strong>+ Create Promotional Coupon</strong> to add one.
+                  </div>
+                ) : (
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th>Coupon Code</th>
+                        <th>Discount Type</th>
+                        <th>Value</th>
+                        <th>Max Cap</th>
+                        <th>Min Spend</th>
+                        <th>Redemptions</th>
+                        <th>Status</th>
+                        <th style={{ textAlign: 'right' }}>Actions</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody>
+                      {couponsList.map((c) => (
+                        <tr key={c.id}>
+                          <td style={{ fontWeight: 900, color: 'var(--accent-cyan)', letterSpacing: '1px' }}>
+                            {c.code}
+                          </td>
+                          <td>{c.discountType}</td>
+                          <td style={{ fontWeight: 800 }}>
+                            {c.discountType === 'FLAT' ? formatPaise(c.discountValue) : `${c.discountValue}% OFF`}
+                          </td>
+                          <td style={{ color: 'var(--text-muted)' }}>{formatPaise(c.maxDiscountPaise)}</td>
+                          <td>{formatPaise(c.minOrderPaise)}</td>
+                          <td>{c.usedCount} used</td>
+                          <td>
+                            <button
+                              type="button"
+                              onClick={() => handleToggleCouponActive(c)}
+                              style={{
+                                padding: '3px 8px',
+                                borderRadius: '4px',
+                                fontSize: '0.74rem',
+                                fontWeight: 800,
+                                cursor: 'pointer',
+                                background: c.isActive ? 'rgba(16, 185, 129, 0.15)' : 'rgba(239, 68, 68, 0.15)',
+                                color: c.isActive ? '#10b981' : '#f87171',
+                                border: `1px solid ${c.isActive ? 'rgba(16, 185, 129, 0.3)' : 'rgba(239, 68, 68, 0.3)'}`,
+                              }}
+                            >
+                              {c.isActive ? 'ACTIVE' : 'INACTIVE'}
+                            </button>
+                          </td>
+                          <td style={{ textAlign: 'right' }}>
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteCoupon(c)}
+                              style={{
+                                background: 'rgba(239, 68, 68, 0.12)',
+                                color: '#f87171',
+                                border: '1px solid rgba(239, 68, 68, 0.25)',
+                                borderRadius: '6px',
+                                padding: '4px 8px',
+                                fontSize: '0.78rem',
+                                cursor: 'pointer',
+                              }}
+                            >
+                              🗑️
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
               </div>
             </div>
           )}
@@ -1650,7 +2188,12 @@ export default function OwnerWebApp() {
               </div>
 
               <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
-                {feedbackList.map((f) => (
+                {feedbackList.length === 0 ? (
+                  <div style={{ padding: '60px 20px', textAlign: 'center', color: 'var(--text-muted)', background: 'var(--bg-card)', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-card)' }}>
+                    No customer feedback or reviews submitted yet for this outlet.
+                  </div>
+                ) : (
+                  feedbackList.map((f) => (
                   <div
                     key={f.id}
                     style={{
@@ -1713,7 +2256,7 @@ export default function OwnerWebApp() {
                       </button>
                     )}
                   </div>
-                ))}
+                )))}
               </div>
             </div>
           )}
@@ -1994,30 +2537,57 @@ export default function OwnerWebApp() {
                     Statutory & Organization Details
                   </h3>
                   <p style={{ color: 'var(--text-secondary)', fontSize: '0.82rem' }}>
-                    Government tax registrations and physical branch location
+                    Government tax registrations and legal entity details (persisted directly to PostgreSQL)
                   </p>
                 </div>
 
-                <div>
-                  <label className="form-label">Legal Organization Name</label>
-                  <input type="text" readOnly value={ORGANIZATION.name} className="form-input" />
-                </div>
-
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+                <form onSubmit={handleSaveOrgDetails} style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
                   <div>
-                    <label className="form-label">Seller GSTIN (Karnataka)</label>
-                    <input type="text" readOnly value={ORGANIZATION.gstin} className="form-input" />
+                    <label className="form-label">Legal Organization Name *</label>
+                    <input
+                      type="text"
+                      required
+                      value={orgDetails.name}
+                      onChange={(e) => setOrgDetails({ ...orgDetails, name: e.target.value })}
+                      placeholder="e.g. Royal Spice Bistro Group"
+                      className="form-input"
+                    />
                   </div>
-                  <div>
-                    <label className="form-label">FSSAI Food Safety License</label>
-                    <input type="text" readOnly value={ORGANIZATION.fssai} className="form-input" />
-                  </div>
-                </div>
 
-                <div>
-                  <label className="form-label">Active Hotel / Outlet Address</label>
-                  <input type="text" readOnly value={currentOutlet.address} className="form-input" />
-                </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+                    <div>
+                      <label className="form-label">Seller GSTIN</label>
+                      <input
+                        type="text"
+                        value={orgDetails.gstin}
+                        onChange={(e) => setOrgDetails({ ...orgDetails, gstin: e.target.value })}
+                        placeholder="e.g. 29AAAAA0000A1Z5"
+                        className="form-input"
+                      />
+                    </div>
+                    <div>
+                      <label className="form-label">FSSAI Food Safety License</label>
+                      <input
+                        type="text"
+                        value={orgDetails.fssai}
+                        onChange={(e) => setOrgDetails({ ...orgDetails, fssai: e.target.value })}
+                        placeholder="e.g. 11223344556677"
+                        className="form-input"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="form-label">Active Hotel / Outlet Address</label>
+                    <input type="text" readOnly value={currentOutlet.address} className="form-input" />
+                  </div>
+
+                  <div>
+                    <button type="submit" className="btn-primary" style={{ padding: '8px 16px', fontSize: '0.84rem' }}>
+                      💾 Save Statutory Details
+                    </button>
+                  </div>
+                </form>
               </div>
             </div>
           )}
@@ -2033,7 +2603,7 @@ export default function OwnerWebApp() {
             onClick={(e) => e.stopPropagation()}
           >
             <div style={{ textAlign: 'center', borderBottom: '2px solid #000', paddingBottom: '16px', marginBottom: '16px' }}>
-              <h2 style={{ fontSize: '1.4rem', fontWeight: 900, color: '#000' }}>{ORGANIZATION.name}</h2>
+              <h2 style={{ fontSize: '1.4rem', fontWeight: 900, color: '#000' }}>{orgDetails.name || currentOutlet.name || 'DineFlow Restaurant'}</h2>
               <div style={{ fontSize: '0.8rem' }}>{currentOutlet.address}</div>
               <div style={{ fontSize: '0.8rem', fontWeight: 700 }}>GSTIN: {selectedInvoiceModal.sellerGstin}</div>
               <div style={{ fontSize: '0.75rem', marginTop: '4px', textTransform: 'uppercase', letterSpacing: '1px', fontWeight: 800 }}>
@@ -2110,19 +2680,208 @@ export default function OwnerWebApp() {
         </div>
       )}
 
+      {/* ========================================================
+          ADD NEW TABLE MODAL
+          ======================================================== */}
+      {showAddTableModal && (
+        <div className="modal-overlay" onClick={() => setShowAddTableModal(false)}>
+          <div className="modal-content" style={{ maxWidth: '440px' }} onClick={(e) => e.stopPropagation()}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+              <div>
+                <h3 style={{ fontSize: '1.25rem', fontWeight: 800 }}>🪑 Add Dining Table</h3>
+                <p style={{ color: 'var(--text-secondary)', fontSize: '0.82rem' }}>
+                  Create a new physical dining table for {currentOutlet.name || 'this outlet'}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowAddTableModal(false)}
+                style={{ background: 'none', border: 'none', color: '#94a3b8', fontSize: '20px', cursor: 'pointer' }}
+              >
+                ✕
+              </button>
+            </div>
+
+            <form onSubmit={handleAddTable} style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+              <div>
+                <label className="form-label">Table Number / Label *</label>
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g. T01, T12, Patio-1"
+                  value={newTableNumber}
+                  onChange={(e) => setNewTableNumber(e.target.value)}
+                  className="form-input"
+                />
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                <div>
+                  <label className="form-label">Capacity (Guests) *</label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="50"
+                    required
+                    value={newTableCapacity}
+                    onChange={(e) => setNewTableCapacity(e.target.value)}
+                    className="form-input"
+                  />
+                </div>
+                <div>
+                  <label className="form-label">Dining Section</label>
+                  <select
+                    value={newTableSection}
+                    onChange={(e) => setNewTableSection(e.target.value)}
+                    className="form-input"
+                  >
+                    <option value="Main Dining Hall">Main Dining Hall</option>
+                    <option value="Verandah / Terrace">Verandah / Terrace</option>
+                    <option value="Family Lounge">Family Lounge</option>
+                    <option value="Outdoor Patio">Outdoor Patio</option>
+                    <option value="Bar Counter">Bar Counter</option>
+                  </select>
+                </div>
+              </div>
+
+              <div style={{ display: 'flex', gap: '10px', marginTop: '8px' }}>
+                <button type="submit" className="btn-primary" style={{ flex: 1, padding: '12px' }}>
+                  🪑 Save & Generate QR Token
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowAddTableModal(false)}
+                  className="btn-secondary"
+                  style={{ padding: '12px 18px' }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================
+          CREATE PROMOTIONAL COUPON MODAL
+          ======================================================== */}
+      {showCreateCouponModal && (
+        <div className="modal-overlay" onClick={() => setShowCreateCouponModal(false)}>
+          <div className="modal-content" style={{ maxWidth: '480px' }} onClick={(e) => e.stopPropagation()}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+              <div>
+                <h3 style={{ fontSize: '1.25rem', fontWeight: 800 }}>🎟️ Create Promotional Coupon</h3>
+                <p style={{ color: 'var(--text-secondary)', fontSize: '0.82rem' }}>
+                  Create discount voucher for {currentOutlet.name || 'this outlet'}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowCreateCouponModal(false)}
+                style={{ background: 'none', border: 'none', color: '#94a3b8', fontSize: '20px', cursor: 'pointer' }}
+              >
+                ✕
+              </button>
+            </div>
+
+            <form onSubmit={handleCreateCoupon} style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+              <div>
+                <label className="form-label">Coupon Code *</label>
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g. WELCOME50, FESTIVE20"
+                  value={couponCode}
+                  onChange={(e) => setCouponCode(e.target.value.toUpperCase())}
+                  className="form-input"
+                  style={{ textTransform: 'uppercase', letterSpacing: '1px', fontWeight: 800 }}
+                />
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                <div>
+                  <label className="form-label">Discount Type *</label>
+                  <select
+                    value={couponType}
+                    onChange={(e) => setCouponType(e.target.value as 'FLAT' | 'PERCENTAGE')}
+                    className="form-input"
+                  >
+                    <option value="PERCENTAGE">Percentage (%)</option>
+                    <option value="FLAT">Flat Amount (₹)</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="form-label">
+                    {couponType === 'FLAT' ? 'Discount Amount (₹) *' : 'Discount Percentage (%) *'}
+                  </label>
+                  <input
+                    type="number"
+                    min="1"
+                    step="1"
+                    required
+                    value={couponValueInput}
+                    onChange={(e) => setCouponValueInput(e.target.value)}
+                    className="form-input"
+                  />
+                </div>
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                <div>
+                  <label className="form-label">Min Spend (₹)</label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="1"
+                    value={couponMinSpendRupees}
+                    onChange={(e) => setCouponMinSpendRupees(e.target.value)}
+                    className="form-input"
+                  />
+                </div>
+                <div>
+                  <label className="form-label">Max Discount Cap (₹)</label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="1"
+                    value={couponMaxCapRupees}
+                    onChange={(e) => setCouponMaxCapRupees(e.target.value)}
+                    className="form-input"
+                  />
+                </div>
+              </div>
+
+              <div style={{ display: 'flex', gap: '10px', marginTop: '8px' }}>
+                <button type="submit" className="btn-primary" style={{ flex: 1, padding: '12px' }}>
+                  🎟️ Save Coupon in PostgreSQL
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowCreateCouponModal(false)}
+                  className="btn-secondary"
+                  style={{ padding: '12px 18px' }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
       {/* QR STAND PREVIEW MODAL */}
-      {qrModalTable && (
-        <div className="modal-overlay" onClick={() => setQrModalTable(null)}>
+      {(qrModalData || qrModalTable) && (
+        <div className="modal-overlay" onClick={() => { setQrModalData(null); setQrModalTable(null); }}>
           <div
             className="modal-content"
             style={{ maxWidth: '440px', textAlign: 'center', background: '#0f172a', border: '1px solid var(--accent-cyan)' }}
             onClick={(e) => e.stopPropagation()}
           >
             <h3 style={{ fontSize: '1.3rem', fontWeight: 900, marginBottom: '4px' }}>
-              Table Stand: {qrModalTable.number}
+              Table Stand: {qrModalData?.table.number || qrModalTable?.number}
             </h3>
             <p style={{ color: 'var(--text-secondary)', fontSize: '0.82rem', marginBottom: '18px' }}>
-              {qrModalTable.section} · Token v{qrModalTable.qrTokenVersion}
+              {(qrModalData?.table.section || qrModalTable?.section)} · Token v{qrModalData?.table.qrTokenVersion || qrModalTable?.qrTokenVersion}
             </p>
 
             {/* Stand Graphic */}
@@ -2135,10 +2894,13 @@ export default function OwnerWebApp() {
                 boxShadow: '0 10px 30px rgba(0,0,0,0.5)',
                 color: '#000',
                 marginBottom: '20px',
+                maxWidth: '280px',
               }}
             >
-              <div style={{ fontWeight: 900, fontSize: '1rem', marginBottom: '4px' }}>ROYAL SPICE BISTRO</div>
-              <div style={{ fontSize: '0.75rem', color: '#666', marginBottom: '12px' }}>Scan to View Menu & Order</div>
+              <div style={{ fontWeight: 900, fontSize: '1rem', marginBottom: '4px' }}>
+                {orgDetails.name || currentOutlet.name || 'DINEFLOW BISTRO'}
+              </div>
+              <div style={{ fontSize: '0.75rem', color: '#666', marginBottom: '12px' }}>Scan to View Menu &amp; Order</div>
               <div
                 style={{
                   width: '180px',
@@ -2152,16 +2914,25 @@ export default function OwnerWebApp() {
                   fontSize: '11px',
                   fontWeight: 800,
                   borderRadius: '8px',
+                  flexDirection: 'column',
+                  padding: '8px',
+                  wordBreak: 'break-all',
                 }}
               >
-                [ QR CODE: TABLE {qrModalTable.number} ]
+                <span>[ QR CODE: TABLE {qrModalData?.table.number || qrModalTable?.number} ]</span>
+                <span style={{ fontSize: '9px', color: '#aaa', marginTop: '6px' }}>HMAC Verified</span>
               </div>
               <div style={{ fontWeight: 900, fontSize: '1.4rem', marginTop: '12px' }}>
-                TABLE {qrModalTable.number}
+                TABLE {qrModalData?.table.number || qrModalTable?.number}
               </div>
+              {qrModalData?.scanUrl && (
+                <div style={{ fontSize: '0.68rem', color: '#666', marginTop: '6px', wordBreak: 'break-all' }}>
+                  {qrModalData.scanUrl}
+                </div>
+              )}
             </div>
 
-            <button onClick={() => setQrModalTable(null)} className="btn-secondary" style={{ width: '100%' }}>
+            <button onClick={() => { setQrModalData(null); setQrModalTable(null); }} className="btn-secondary" style={{ width: '100%' }}>
               Close Preview
             </button>
           </div>

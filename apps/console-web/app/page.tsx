@@ -455,11 +455,49 @@ export default function CommonLoginPage() {
               <span>→</span>
             </button>
           </form>
+
+          {/* Quick Demo Station Buttons */}
+          <div style={{ marginTop: '20px', paddingTop: '16px', borderTop: '1px solid rgba(255, 255, 255, 0.08)' }}>
+            <div style={{ fontSize: '0.74rem', color: '#64748b', marginBottom: '10px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+              Quick Demo Station Access (PIN: 1234)
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '8px' }}>
+              {[
+                { label: '👑 Owner Console', user: 'owner' },
+                { label: '🧑‍✈️ Captain Station', user: 'captain' },
+                { label: '🍳 Kitchen KDS', user: 'kitchen' },
+                { label: '💳 Cashier POS', user: 'cashier' },
+              ].map((acc) => (
+                <button
+                  key={acc.user}
+                  type="button"
+                  onClick={() => {
+                    setUsername(acc.user);
+                    setPassword('1234');
+                    setError('');
+                  }}
+                  style={{
+                    background: username === acc.user ? 'rgba(59, 130, 246, 0.2)' : 'rgba(255, 255, 255, 0.04)',
+                    border: username === acc.user ? '1px solid #3b82f6' : '1px solid rgba(255, 255, 255, 0.08)',
+                    borderRadius: '8px',
+                    padding: '8px 10px',
+                    fontSize: '0.78rem',
+                    color: '#e2e8f0',
+                    cursor: 'pointer',
+                    textAlign: 'left',
+                    transition: 'all 0.15s ease',
+                  }}
+                >
+                  {acc.label}
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
 
         {/* Staff Login Note */}
         <div style={{ marginTop: '20px', fontSize: '0.78rem', color: '#94a3b8', lineHeight: 1.5 }}>
-          Use the username &amp; password assigned by your Restaurant Owner. Roles, usernames, and passwords are managed in the Owner Console.
+          Use the username &amp; password assigned by your Restaurant Owner. Default demo PIN is <code>1234</code>. Roles, usernames, and passwords are managed in the Owner Console.
         </div>
       </div>
     </div>

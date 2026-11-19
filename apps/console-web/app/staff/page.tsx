@@ -5,8 +5,6 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { io, type Socket } from 'socket.io-client';
 import {
-  OUTLETS,
-  ALL_STAFF_MEMBERS,
   getStoredOutlets,
   getStoredStaff,
   getBranchData,
@@ -32,90 +30,43 @@ import {
   isAuthStateExpired,
 } from '../lib/auth-client';
 import MenuCatalogManager from '../components/MenuCatalogManager';
-
-type StaffTab = 'ORDERS' | 'TABLES' | 'PASS' | 'STOCK' | 'MENU' | 'CALLS' | 'POS' | 'MORE';
-
-interface RoleWorkstationConfig {
-  defaultTab: StaffTab;
-  allowedTabs: StaffTab[];
-  stationTitle: string;
-  stationBadge: string;
-  stationEmoji: string;
-  stationDescription: string;
-}
-
-const ROLE_CONFIGS: Record<StaffMember['role'], RoleWorkstationConfig> = {
-  KITCHEN: {
-    defaultTab: 'ORDERS',
-    allowedTabs: ['ORDERS', 'STOCK'],
-    stationTitle: 'Kitchen Display System (KDS)',
-    stationBadge: '🍳 KITCHEN WORKSTATION',
-    stationEmoji: '🍳',
-    stationDescription: 'Live ticket prep queue & 86 stock availability',
-  },
-  CAPTAIN: {
-    defaultTab: 'TABLES',
-    allowedTabs: ['TABLES', 'PASS', 'CALLS'],
-    stationTitle: 'Floor Captain & Seating Station',
-    stationBadge: '🪑 FLOOR & SERVICE',
-    stationEmoji: '👨‍💼',
-    stationDescription: 'Table seating map, guest sessions & service bells',
-  },
-  WAITER: {
-    defaultTab: 'PASS',
-    allowedTabs: ['PASS', 'TABLES', 'CALLS'],
-    stationTitle: 'Food Pass & Table Delivery',
-    stationBadge: '🤵 TABLE SERVER',
-    stationEmoji: '🤵',
-    stationDescription: 'Pick up ready dishes, deliver to tables & attend bells',
-  },
-  CASHIER: {
-    defaultTab: 'POS',
-    allowedTabs: ['POS', 'TABLES'],
-    stationTitle: 'Cashier Register & Billing Station',
-    stationBadge: '💳 FINANCE & POS',
-    stationEmoji: '👩‍💼',
-    stationDescription: 'Payment collection (UPI/Cash/Card), GST invoices & settlement',
-  },
-  MANAGER: {
-    defaultTab: 'TABLES',
-    allowedTabs: ['ORDERS', 'TABLES', 'PASS', 'STOCK', 'MENU', 'CALLS', 'POS'],
-    stationTitle: 'Floor Operations Cockpit',
-    stationBadge: '👔 GENERAL MANAGER',
-    stationEmoji: '👔',
-    stationDescription: 'Full multi-station access across Kitchen, Floor, Pass, Menu, and POS',
-  },
-  OWNER: {
-    defaultTab: 'TABLES',
-    allowedTabs: ['ORDERS', 'TABLES', 'PASS', 'STOCK', 'MENU', 'CALLS', 'POS'],
-    stationTitle: 'Executive Floor Operations',
-    stationBadge: '👑 GROUP OWNER',
-    stationEmoji: '👑',
-    stationDescription: 'Complete organizational oversight across all floor stations & Menu',
-  },
-};
+import {
+  useStaffStore,
+  ROLE_CONFIGS,
+  type StaffTab,
+  type StaffDashboardView,
+  type RoleWorkstationConfig,
+} from '../../store/useStaffStore';
+import { StaffSidebar } from '../../components/staff/shared/StaffSidebar';
+import { KdsKanbanBoard } from '../../components/staff/kds/KdsKanbanBoard';
+import { ServeLaterPromptBanner } from '../../components/staff/kds/ServeLaterPromptBanner';
+import { FloorMapView } from '../../components/staff/floor/FloorMapView';
+import { CashierPosView } from '../../components/staff/pos/CashierPosView';
 
 export default function StaffWebApp() {
   const router = useRouter();
 
   // Outlet Selection State (Stored & dynamically created by Owner)
   const [outletsList, setOutletsList] = useState<Outlet[]>(() =>
-    typeof window !== 'undefined' ? getStoredOutlets() : OUTLETS
+    typeof window !== 'undefined' ? getStoredOutlets() : []
   );
-  const [selectedOutletId, setSelectedOutletId] = useState<string>(() => {
-    if (typeof window !== 'undefined') {
-      const authOutlet = getConsoleAuthState()?.user.outletId;
-      if (authOutlet) return authOutlet;
-      const stored = getStoredOutlets();
-      return stored[0]?.id ?? OUTLETS[0]!.id;
-    }
-    return OUTLETS[0]!.id;
-  });
-  const currentOutlet = outletsList.find((o) => o.id === selectedOutletId) ?? outletsList[0] ?? OUTLETS[0]!;
+  // Outlet Selection State (Zustand: useStaffStore)
+  const selectedOutletId = useStaffStore((s) => s.selectedOutletId);
+  const setSelectedOutletId = useStaffStore((s) => s.setSelectedOutletId);
+  const fallbackOutlet: Outlet = {
+    id: selectedOutletId || '',
+    orgId: '',
+    name: 'Selected Outlet',
+    shortName: 'Outlet',
+    address: '',
+    timezone: 'Asia/Kolkata',
+    isActive: true,
+  };
+  const currentOutlet = outletsList.find((o) => o.id === selectedOutletId) ?? outletsList[0] ?? fallbackOutlet;
 
   // Staff User State (Stored & dynamically assigned by Owner)
   const [staffList, setStaffList] = useState<StaffMember[]>(() =>
-    typeof window !== 'undefined' ? getStoredStaff() : ALL_STAFF_MEMBERS
+    typeof window !== 'undefined' ? getStoredStaff() : []
   );
   const branchData = getBranchData(selectedOutletId);
 
@@ -147,11 +98,12 @@ export default function StaffWebApp() {
       return;
     }
     setCurrentUser(user);
+    useStaffStore.getState().setCurrentUser(user);
     setIsOwnerMode(state.user.role === 'OWNER');
     if (user.outletId) {
       setSelectedOutletId(user.outletId);
     }
-  }, [router]);
+  }, [router, setSelectedOutletId]);
 
   const [isLocked, setIsLocked] = useState(false);
   const [lockMfaToken, setLockMfaToken] = useState('');
@@ -181,14 +133,46 @@ export default function StaffWebApp() {
     };
   }, []);
 
-  // Connection & Sync State
-  const [connectionStatus, setConnectionStatus] = useState<'live' | 'degraded' | 'offline'>('live');
+  // Global Staff Store State (Zustand: useStaffStore)
+  const activeTab = useStaffStore((s) => s.activeTab);
+  const activeView = useStaffStore((s) => s.activeView);
+  const setActiveTab = useStaffStore((s) => s.setActiveTab);
+  const setActiveView = useStaffStore((s) => s.setActiveView);
 
-  // Navigation Tabs: ORDERS (KDS), TABLES (Floor Map), PASS (Food Pass), STOCK (86 Item Toggles), CALLS (Bells), POS (Cashier / POS)
-  const [activeTab, setActiveTab] = useState<StaffTab>(() => {
-    const role = currentUser?.role || 'CAPTAIN';
-    return (ROLE_CONFIGS[role] || ROLE_CONFIGS.CAPTAIN).defaultTab;
-  });
+  const connectionStatus = useStaffStore((s) => s.connectionStatus);
+  const setConnectionStatus = useStaffStore((s) => s.setConnectionStatus);
+  const pushWebSocketEvent = useStaffStore((s) => s.pushWebSocketEvent);
+
+  const orders = useStaffStore((s) => s.orders);
+  const setOrders = useStaffStore((s) => s.setOrders);
+  const setKdsItems = useStaffStore((s) => s.setKdsItems);
+  const setLastKdsSyncedAt = useStaffStore((s) => s.setLastKdsSyncedAt);
+  const tables = useStaffStore((s) => s.tables);
+  const setTables = useStaffStore((s) => s.setTables);
+  const sessions = useStaffStore((s) => s.sessions);
+  const setSessions = useStaffStore((s) => s.setSessions);
+  const reservations = useStaffStore((s) => s.reservations);
+  const setReservations = useStaffStore((s) => s.setReservations);
+  const serveLaterPrompts = useStaffStore((s) => s.serveLaterPrompts);
+  const dismissServeLaterPrompt = useStaffStore((s) => s.dismissServeLaterPrompt);
+  const markTableCleaned = useStaffStore((s) => s.markTableCleaned);
+  const stock = useStaffStore((s) => s.stock);
+  const setStock = useStaffStore((s) => s.setStock);
+  const calls = useStaffStore((s) => s.calls);
+  const setCalls = useStaffStore((s) => s.setCalls);
+  const setPayments = useStaffStore((s) => s.setPayments);
+
+  const needsCleaningTableIdsRaw = useStaffStore((s) => s.needsCleaningTableIds);
+  const setNeedsCleaningTableIds = useStaffStore((s) => s.setNeedsCleaningTableIds);
+  const needsCleaningTableIds = React.useMemo(
+    () => new Set(needsCleaningTableIdsRaw),
+    [needsCleaningTableIdsRaw],
+  );
+
+  const isSoundMuted = useStaffStore((s) => s.isSoundMuted);
+  const setIsSoundMuted = useStaffStore((s) => s.setIsSoundMuted);
+  const staffToast = useStaffStore((s) => s.staffToast);
+  const showStaffToast = useStaffStore((s) => s.showStaffToast);
 
   // Guard active tab to ensure the staff member only views allowed stations for their role
   useEffect(() => {
@@ -197,24 +181,9 @@ export default function StaffWebApp() {
     if (!config.allowedTabs.includes(activeTab)) {
       setActiveTab(config.defaultTab);
     }
-  }, [currentRole, currentUser?.id]);
+  }, [currentRole, currentUser?.id, activeTab, setActiveTab]);
 
-  const [moreSubTab, setMoreSubTab] = useState<'PAYMENTS' | 'STAFF' | 'SETTINGS'>('PAYMENTS');
-
-  // Branch Live State (Initialized from restaurant-db for the selected branch)
-  const [orders, setOrders] = useState<Order[]>(branchData.activeOrders);
-  const [tables, setTables] = useState<Table[]>(branchData.tables);
-  const [sessions, setSessions] = useState<TableSession[]>(branchData.sessions);
-  const [stock, setStock] = useState<MenuItem[]>(branchData.menuItems);
-  const [calls, setCalls] = useState<ServiceCall[]>(branchData.serviceCalls);
-  const [needsCleaningTableIds, setNeedsCleaningTableIds] = useState<Set<string>>(new Set());
   const [cleaningTableLoading, setCleaningTableLoading] = useState(false);
-  const [staffToast, setStaffToast] = useState<string | null>(null);
-
-  const showStaffToast = (msg: string) => {
-    setStaffToast(msg);
-    setTimeout(() => setStaffToast(null), 4000);
-  };
 
   const fetchLiveFloor = async () => {
     try {
@@ -223,7 +192,13 @@ export default function StaffWebApp() {
       );
       if (!res.ok) return;
       const data = await res.json();
-      if (!Array.isArray(data) || data.length === 0) return;
+      if (!Array.isArray(data)) return;
+      if (data.length === 0) {
+        setTables([]);
+        setSessions([]);
+        setNeedsCleaningTableIds(new Set());
+        return;
+      }
 
       const liveTables: Table[] = data.map((t: any, idx: number) => ({
         id: t.id,
@@ -238,20 +213,22 @@ export default function StaffWebApp() {
       }));
       const cleaningSet = new Set<string>();
       const liveSessions: TableSession[] = data
-        .filter((t: any) => t.needs_cleaning || Number(t.open_sessions_count || 0) > 0)
-        .map((t: any) => {
-          cleaningSet.add(t.id);
-          return {
-            id: `live-sess-${t.id}`,
-            tableId: t.id,
-            tableNumber: t.table_number,
-            status: 'OPEN' as const,
-            guestCount: Math.max(1, Number(t.active_guest_pax || 2)),
-            openedAt: t.first_opened_at ? formatOrderDateTime(t.first_opened_at) : 'Active',
-            closedAt: null,
-            tableCode: String(t.qr_token_version || 1),
-          };
-        });
+        .filter((t: any) => {
+          if (t.needs_cleaning) {
+            cleaningSet.add(t.id);
+          }
+          return Number(t.open_sessions_count || 0) > 0;
+        })
+        .map((t: any) => ({
+          id: `live-sess-${t.id}`,
+          tableId: t.id,
+          tableNumber: t.table_number,
+          status: 'OPEN' as const,
+          guestCount: Math.max(1, Number(t.active_guest_pax || 2)),
+          openedAt: t.first_opened_at ? formatOrderDateTime(t.first_opened_at) : 'Active',
+          closedAt: null,
+          tableCode: String(t.qr_token_version || 1),
+        }));
 
       setTables(liveTables);
       setSessions(liveSessions);
@@ -295,7 +272,74 @@ export default function StaffWebApp() {
     }
   };
 
+  const [releasingHeldOrderId, setReleasingHeldOrderId] = useState<string | null>(null);
+
+  const handleStaffFireHeldItems = async (orderId: string, itemId?: string) => {
+    if (releasingHeldOrderId === orderId) return;
+    setReleasingHeldOrderId(orderId);
+    try {
+      const url = `/api/v1/console/orders/${encodeURIComponent(orderId)}/serve-later/release`;
+      const res = await consoleAuthFetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(itemId ? { itemId } : {}),
+      });
+      if (res.ok) {
+        dismissServeLaterPrompt(orderId);
+        showStaffToast(itemId ? '🔥 Dish fired to kitchen!' : '🔥 Held dishes fired to kitchen!');
+        await Promise.all([fetchLiveOrders(), fetchKdsSnapshot()]);
+      } else {
+        const errData = await res.json().catch(() => ({}));
+        showStaffToast(errData.detail || errData.message || 'Failed to fire held items.');
+      }
+    } catch {
+      showStaffToast('Network error firing held items.');
+    } finally {
+      setReleasingHeldOrderId(null);
+    }
+  };
+
+  const handleStaffSnoozePrompt = async (orderId: string) => {
+    if (releasingHeldOrderId === orderId) return;
+    setReleasingHeldOrderId(orderId);
+    try {
+      const res = await consoleAuthFetch(`/api/v1/console/orders/${orderId}/serve-later/snooze`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ minutes: 10 }),
+      });
+      if (res.ok) {
+        dismissServeLaterPrompt(orderId);
+        showStaffToast('⏳ Snoozed dessert check-in for 10 minutes.');
+      } else {
+        showStaffToast('Failed to snooze check-in.');
+      }
+    } catch {
+      showStaffToast('Network error snoozing check-in.');
+    } finally {
+      setReleasingHeldOrderId(null);
+    }
+  };
+
   // Live Database Orders Sync
+  const fetchKdsSnapshot = async () => {
+    try {
+      const kdsRes = await consoleAuthFetch(
+        `/api/v1/console/orders/kds/items?outlet_id=${encodeURIComponent(selectedOutletId)}`,
+      );
+      if (kdsRes.ok) {
+        const kdsData = await kdsRes.json();
+        const tickets = Array.isArray(kdsData) ? kdsData : (kdsData?.items ?? []);
+        setKdsItems(tickets);
+        if (kdsData?.serverTimestamp) {
+          setLastKdsSyncedAt(kdsData.serverTimestamp);
+        }
+      }
+    } catch (err) {
+      console.error('Failed to sync KDS items:', err);
+    }
+  };
+
   const fetchLiveOrders = async () => {
     try {
       const res = await consoleAuthFetch(
@@ -308,8 +352,18 @@ export default function StaffWebApp() {
       }
       if (res.ok) {
         const data = await res.json();
-        const defaultActive = getBranchData(selectedOutletId).activeOrders;
-        const liveOrders: Order[] = (Array.isArray(data) ? data : []).map((d: any) => {
+        const liveOrders: Order[] = (Array.isArray(data) ? data : [])
+          .filter((d: any) => {
+            const isPaid = d.payment_status === 'PAID' || d.payment_method === 'CASH_APPROVED';
+            return (
+              d.status !== 'AWAITING_PAYMENT' &&
+              d.status !== 'PAYMENT_FAILED' &&
+              d.status !== 'PAYMENT_CANCELLED' &&
+              d.status !== 'PAYMENT_EXPIRED' &&
+              isPaid
+            );
+          })
+          .map((d: any) => {
           const frontendStatus: Order['status'] =
             d.status === 'PENDING' ? 'PENDING_APPROVAL' : (d.status as Order['status']);
           const isKnownMock =
@@ -320,11 +374,19 @@ export default function StaffWebApp() {
               : d.id === '10000000-0000-0000-0000-000000000003'
               ? 'RS-1003'
               : null;
+          const canonicalDisplayId =
+            d.display_id ||
+            d.displayId ||
+            (d.order_number ? ('ORD-' + String(d.order_number).padStart(4, '0')) : (isKnownMock || ('ORD-#' + d.id.slice(-4).toUpperCase())));
+
           return {
             id: d.id,
-            displayId: isKnownMock || ('ORD-#' + d.id.slice(-4).toUpperCase()),
+            displayId: canonicalDisplayId,
             outletId: d.outlet_id || selectedOutletId,
+            tableId: d.table_id ?? d.tableId ?? null,
             tableNumber: d.table_number || 'T04',
+            dinerId: d.diner_id ?? d.dinerId ?? null,
+            dinerLabel: d.diner_label ?? d.dinerLabel ?? null,
             sessionId: d.session_id,
             status: frontendStatus,
             subtotalPaise: d.subtotal_paise,
@@ -341,8 +403,17 @@ export default function StaffWebApp() {
               quantity: it.quantity,
               status: it.status,
               notes: it.notes,
+              targetTableId: it.target_table_id ?? it.targetTableId ?? null,
               targetTableNumber: it.target_table_number ?? null,
+              dinerId: it.diner_id ?? it.dinerId ?? null,
+              dinerLabel: it.diner_label ?? it.dinerLabel ?? null,
               createdAt: formatOrderDateTime(it.created_at || d.created_at),
+              courseSequence: it.course_sequence ?? 2,
+              prepTimeMinutes: it.prep_time_minutes ?? 15,
+              targetFireAt: it.target_fire_at ?? null,
+              holdStatus: it.hold_status ?? 'ACTIVE',
+              isComboItem: Boolean(it.is_combo_item),
+              comboName: it.combo_name ?? null,
             })),
             events: [
               {
@@ -356,12 +427,18 @@ export default function StaffWebApp() {
             ],
             needsAck: d.status === 'PENDING',
             specialInstructions: d.notes || d.items?.find((i: any) => i.notes)?.notes,
-            paymentMethod: 'UPI',
+            paymentMethod: d.payment_method || 'UPI',
+            paymentStatus: d.payment_status || 'PAID',
+            orderType: d.order_type || 'DINE_IN',
+            scheduledFor: d.scheduled_for ?? null,
+            paidAt: d.paid_at ?? null,
+            mainCourseServedAt: d.main_course_served_at ?? null,
+            serveLaterPromptSentAt: d.serve_later_prompt_sent_at ?? null,
           };
         });
 
-        // When database returns live orders (even if empty list), use them directly to prevent zombie mock orders
-        const combined = Array.isArray(data) ? liveOrders : defaultActive;
+        // Use live orders directly without falling back to phantom mock orders
+        const combined = Array.isArray(data) ? liveOrders : [];
 
         const ordersWithOverrides = combined.map((o) => {
           const itemOverrides = localItemStatusOverrides.current[o.id];
@@ -382,14 +459,15 @@ export default function StaffWebApp() {
 
         setOrders(ordersWithOverrides);
         setConnectionStatus('live');
+
+        // Also fetch flattened KDS priority items
+        await fetchKdsSnapshot();
       }
     } catch {
       setConnectionStatus('degraded');
     }
   };
 
-  // Audio state - Muted by default so NO ping/chime sound on login
-  const [isSoundMuted, setIsSoundMuted] = useState(true);
   const isInitialMount = useRef(true);
   const localStatusOverrides = useRef<Record<string, Order['status']>>({});
   const localItemStatusOverrides = useRef<Record<string, Record<string, OrderItem['status']>>>({});
@@ -422,9 +500,13 @@ export default function StaffWebApp() {
   useEffect(() => {
     const data = getBranchData(selectedOutletId);
     setTables(data.tables);
-    setSessions(data.sessions);
+    setSessions([]);
     setStock(data.menuItems);
     setCalls(data.serviceCalls);
+    setPayments(data.payments);
+    if ((data as any).reservations) {
+      setReservations((data as any).reservations);
+    }
 
     // Initial baseline fetch on mount or outlet switch
     void fetchLiveOrders();
@@ -460,10 +542,20 @@ export default function StaffWebApp() {
 
     socket.on('connect', () => {
       setConnectionStatus('live');
+      void fetchLiveOrders();
+      void fetchLiveFloor();
+    });
+
+    socket.on('reconnect', () => {
+      setConnectionStatus('live');
+      void fetchLiveOrders();
+      void fetchLiveFloor();
     });
 
     socket.on('connected', () => {
       setConnectionStatus('live');
+      void fetchLiveOrders();
+      void fetchLiveFloor();
     });
 
     socket.on('order:event', (msg: { id: string; org_id: string; outlet_id?: string; aggregate: string; eventType: string; payload: unknown }) => {
@@ -472,19 +564,72 @@ export default function StaffWebApp() {
         socket.emit('order:ack', { eventId: msg.id });
       }
 
-      // Filter by outlet if specified on event
-      if (msg?.outlet_id && msg.outlet_id !== selectedOutletId) {
+      // Filter by outlet if specified on event and matching active outlet
+      const eventOutletId = msg?.outlet_id || (msg?.payload as any)?.outlet_id;
+      if (eventOutletId && selectedOutletId && eventOutletId !== selectedOutletId) {
         return;
       }
+
+      // Record incoming socket event in global staff store queue
+      pushWebSocketEvent(msg);
 
       // Live push update from database outbox without polling
       void fetchLiveOrders();
       void fetchLiveFloor();
 
-      // Auditory alert for newly arrived orders
-      if (msg?.eventType === 'ORDER_PLACED') {
-        playAlertChime();
+      if (
+        msg?.eventType === 'table.cleaned' ||
+        msg?.eventType === 'kds.sync_required'
+      ) {
+        const tableId = (msg?.payload as any)?.tableId || (msg?.payload as any)?.table_id;
+        if (tableId) {
+          markTableCleaned(tableId);
+        }
+        void Promise.all([fetchLiveOrders(), fetchLiveFloor(), fetchKdsSnapshot()]);
       }
+
+      // Auditory and visual alert for newly arrived orders, item fired, payment, and serve-later prompts
+      if (
+        msg?.eventType === 'kds.item_fired' ||
+        msg?.eventType === 'PAYMENT_CAPTURED' ||
+        msg?.eventType === 'ORDER_PLACED'
+      ) {
+        playAlertChime();
+        if (msg?.eventType === 'kds.item_fired') {
+          showStaffToast('🍳 Kitchen item fired!');
+        } else if (msg?.eventType === 'PAYMENT_CAPTURED') {
+          showStaffToast('💰 Payment confirmed! Order sent to kitchen.');
+        } else {
+          showStaffToast('🔔 New customer order received in kitchen!');
+        }
+      } else if (msg?.eventType === 'course.prompt_serve_later') {
+        playAlertChime();
+        showStaffToast('🍨 Dessert/beverage check-in ready for table!');
+      }
+    });
+
+    socket.on('kds.item_fired', () => {
+      void Promise.all([fetchLiveOrders(), fetchKdsSnapshot()]);
+      playAlertChime();
+      showStaffToast('🍳 Kitchen item fired!');
+    });
+
+    socket.on('table.cleaned', (data: any) => {
+      const tid = data?.tableId || data?.table_id;
+      if (tid) markTableCleaned(tid);
+      void Promise.all([fetchLiveOrders(), fetchLiveFloor(), fetchKdsSnapshot()]);
+    });
+
+    socket.on('kds.sync_required', () => {
+      void Promise.all([fetchLiveOrders(), fetchKdsSnapshot()]);
+    });
+
+    socket.on('order.updated', () => {
+      void Promise.all([fetchLiveOrders(), fetchKdsSnapshot()]);
+    });
+
+    socket.on('item.updated', () => {
+      void Promise.all([fetchLiveOrders(), fetchKdsSnapshot()]);
     });
 
     socket.on('disconnect', (reason) => {
@@ -505,8 +650,15 @@ export default function StaffWebApp() {
       }
     }, 30000);
 
+    // 60s safety-net full resync interval for missed ticket recovery
+    const safetyNetInterval = setInterval(() => {
+      void fetchLiveOrders();
+      void fetchLiveFloor();
+    }, 60000);
+
     return () => {
       clearInterval(fallbackInterval);
+      clearInterval(safetyNetInterval);
       socket.disconnect();
       socketRef.current = null;
     };
@@ -515,7 +667,6 @@ export default function StaffWebApp() {
   // Filters & Views
   const [selectedSection, setSelectedSection] = useState<string>('ALL');
   const [stockSearch, setStockSearch] = useState('');
-  const [orderFilter, setOrderFilter] = useState<'ALL' | 'MY_TABLES'>('ALL');
 
   // Modals & Drawers
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
@@ -777,6 +928,18 @@ export default function StaffWebApp() {
             delete localStatusOverrides.current[orderId];
           }
         }
+        fetchLiveOrders();
+      } else if (res.status === 409) {
+        let msg = 'Item already claimed by another chef';
+        try {
+          const body = await res.json();
+          if (body?.detail) msg = body.detail;
+        } catch {}
+        showStaffToast(`⚠️ ${msg}`);
+        if (localItemStatusOverrides.current[orderId]) {
+          delete localItemStatusOverrides.current[orderId]![itemId];
+        }
+        delete localStatusOverrides.current[orderId];
         fetchLiveOrders();
       } else if (res.status === 401) {
         setIsLocked(true);
@@ -1396,463 +1559,19 @@ export default function StaffWebApp() {
           MAIN APP CONTENT CONTAINER
           ======================================================== */}
       <main style={{ paddingBottom: '80px', minHeight: 'calc(100vh - 64px)' }}>
-        {/* Branch 2 & 3 Blank Outlet Banner */}
-        {!branchData.isPopulated && (
-          <div
-            style={{
-              background: 'rgba(245, 158, 11, 0.12)',
-              borderBottom: '1px solid rgba(245, 158, 11, 0.3)',
-              padding: '12px 24px',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              color: '#fcd34d',
-            }}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-              <span style={{ fontSize: '20px' }}>ℹ️</span>
-              <div>
-                <strong>Blank Restaurant Branch: {currentOutlet.name}</strong>
-                <div style={{ fontSize: '0.8rem', color: '#fef3c7' }}>
-                  This outlet has blank child tables. Switch to <strong>Indiranagar Flagship</strong> to view populated tables, orders, and sessions.
-                </div>
-              </div>
-            </div>
-            <button
-              onClick={() => setSelectedOutletId('b0000000-0000-0000-0000-000000000001')}
-              style={{
-                background: 'var(--accent-amber)',
-                color: '#000',
-                padding: '6px 14px',
-                borderRadius: 'var(--radius-sm)',
-                fontWeight: 700,
-                fontSize: '0.82rem',
-              }}
-            >
-              Switch to Indiranagar Flagship
-            </button>
-          </div>
-        )}
+        {/* Captain & Floor Serve Later Auto-Prompter Banner */}
+        <ServeLaterPromptBanner />
 
         {/* TAB 1: KITCHEN DISPLAY SYSTEM (KDS) */}
-        {activeTab === 'ORDERS' && (
-          <div style={{ padding: '20px 24px' }}>
-            {/* Top Toolbar */}
-            <div
-              style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                marginBottom: '18px',
-                flexWrap: 'wrap',
-                gap: '12px',
-              }}
-            >
-              <div>
-                <h2 style={{ fontSize: '1.4rem', fontWeight: 800 }}>
-                  Kitchen Display & Order Management
-                </h2>
-                <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
-                  Live tickets for {currentOutlet.shortName} · Auto-sorted by urgency
-                </p>
-              </div>
-
-              <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
-                <div
-                  style={{
-                    background: 'var(--bg-surface)',
-                    border: '1px solid var(--border-light)',
-                    borderRadius: 'var(--radius-sm)',
-                    padding: '4px',
-                    display: 'flex',
-                    gap: '4px',
-                  }}
-                >
-                  <button
-                    onClick={() => setOrderFilter('ALL')}
-                    style={{
-                      padding: '6px 14px',
-                      borderRadius: '4px',
-                      fontSize: '0.82rem',
-                      fontWeight: 700,
-                      background: orderFilter === 'ALL' ? 'var(--accent-cyan)' : 'transparent',
-                      color: orderFilter === 'ALL' ? '#000' : 'var(--text-secondary)',
-                    }}
-                  >
-                    All Orders ({orders.length})
-                  </button>
-                  <button
-                    onClick={() => setOrderFilter('MY_TABLES')}
-                    style={{
-                      padding: '6px 14px',
-                      borderRadius: '4px',
-                      fontSize: '0.82rem',
-                      fontWeight: 700,
-                      background: orderFilter === 'MY_TABLES' ? 'var(--accent-cyan)' : 'transparent',
-                      color: orderFilter === 'MY_TABLES' ? '#000' : 'var(--text-secondary)',
-                    }}
-                  >
-                    Captain Assigned
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            {/* Empty State for Blank Branches */}
-            {orders.length === 0 ? (
-              <div
-                style={{
-                  background: 'var(--bg-card)',
-                  border: '1.5px dashed var(--border-light)',
-                  borderRadius: 'var(--radius-lg)',
-                  padding: '60px 20px',
-                  textAlign: 'center',
-                  maxWidth: '600px',
-                  margin: '40px auto',
-                }}
-              >
-                <div style={{ fontSize: '48px', marginBottom: '16px' }}>🍳</div>
-                <h3 style={{ fontSize: '1.25rem', fontWeight: 700, marginBottom: '8px' }}>
-                  No Active Orders in {currentOutlet.shortName}
-                </h3>
-                <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', marginBottom: '24px' }}>
-                  Orders placed by customers at table QR codes will appear in real-time on this kitchen screen with audio chimes.
-                </p>
-                <button
-                  onClick={() => setSelectedOutletId('b0000000-0000-0000-0000-000000000001')}
-                  className="btn-primary"
-                >
-                  View Active Orders in Indiranagar Flagship
-                </button>
-              </div>
-            ) : (
-              /* KDS Columns: CONFIRMED / PENDING -> PREPARING -> READY -> RECENTLY SERVED */
-              <div
-                style={{
-                  display: 'grid',
-                  gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))',
-                  gap: '20px',
-                }}
-              >
-                {/* Column 1: New / Confirmed Orders */}
-                <div
-                  style={{
-                    background: 'rgba(15, 23, 42, 0.6)',
-                    borderRadius: 'var(--radius-md)',
-                    border: '1px solid var(--border-light)',
-                    padding: '16px',
-                  }}
-                >
-                  <div
-                    style={{
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      alignItems: 'center',
-                      marginBottom: '14px',
-                      paddingBottom: '8px',
-                      borderBottom: '1px solid var(--border-light)',
-                    }}
-                  >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                      <span style={{ width: '10px', height: '10px', borderRadius: '50%', background: '#3b82f6' }} />
-                      <span style={{ fontWeight: 800, fontSize: '0.95rem' }}>NEW / CONFIRMED</span>
-                    </div>
-                    <span className="status-chip chip-blue">
-                      {orders.filter((o) => o.status === 'CONFIRMED' || o.status === 'PENDING_APPROVAL').length}
-                    </span>
-                  </div>
-
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
-                    {orders
-                      .filter((o) => o.status === 'CONFIRMED' || o.status === 'PENDING_APPROVAL')
-                      .map((order) => (
-                        <div
-                          key={order.id}
-                          className="kds-order-ticket"
-                          style={{
-                            borderLeft: order.unverifiedGuest ? '4px solid var(--accent-amber)' : '4px solid #3b82f6',
-                          }}
-                        >
-                          {/* Ticket Header */}
-                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', flexWrap: 'wrap', marginBottom: '10px' }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                              <span
-                                style={{
-                                  background: 'var(--accent-cyan)',
-                                  color: '#000',
-                                  fontWeight: 900,
-                                  fontSize: '0.9rem',
-                                  padding: '2px 8px',
-                                  borderRadius: '6px',
-                                }}
-                              >
-                                {order.tableNumber}
-                              </span>
-                              <span style={{ fontWeight: 700, fontSize: '0.85rem' }}>{order.displayId}</span>
-                            </div>
-                            <span style={{ fontSize: '0.73rem', color: 'var(--text-secondary)' }}>🕒 {order.createdAt}</span>
-                          </div>
-
-                          {/* Unverified Guest Alert Banner */}
-                          {order.unverifiedGuest && (
-                            <div
-                              style={{
-                                background: 'rgba(245, 158, 11, 0.15)',
-                                border: '1px solid rgba(245, 158, 11, 0.3)',
-                                borderRadius: '6px',
-                                padding: '6px 10px',
-                                marginBottom: '10px',
-                                fontSize: '0.75rem',
-                                color: '#fcd34d',
-                                display: 'flex',
-                                alignItems: 'center',
-                                gap: '6px',
-                              }}
-                            >
-                              ⚠️ Unverified walk-in guest — Captain confirm table
-                            </div>
-                          )}
-
-                          {/* Line Items with inline Proceed buttons */}
-                          {renderKdsOrderItems(order, 'var(--accent-cyan)')}
-
-                          {/* Special Instructions */}
-                          {order.specialInstructions && (
-                            <div
-                              style={{
-                                fontSize: '0.76rem',
-                                background: 'rgba(255, 255, 255, 0.04)',
-                                padding: '6px 8px',
-                                borderRadius: '4px',
-                                color: 'var(--text-secondary)',
-                              }}
-                            >
-                              💬 &quot;{order.specialInstructions}&quot;
-                            </div>
-                          )}
-                        </div>
-                      ))}
-                  </div>
-                </div>
-
-                {/* Column 2: In Kitchen / Preparing */}
-                <div
-                  style={{
-                    background: 'rgba(15, 23, 42, 0.6)',
-                    borderRadius: 'var(--radius-md)',
-                    border: '1px solid var(--border-light)',
-                    padding: '16px',
-                  }}
-                >
-                  <div
-                    style={{
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      alignItems: 'center',
-                      marginBottom: '14px',
-                      paddingBottom: '8px',
-                      borderBottom: '1px solid var(--border-light)',
-                    }}
-                  >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                      <span style={{ width: '10px', height: '10px', borderRadius: '50%', background: 'var(--accent-amber)' }} />
-                      <span style={{ fontWeight: 800, fontSize: '0.95rem' }}>PREPARING IN KITCHEN</span>
-                    </div>
-                    <span className="status-chip chip-amber">
-                      {orders.filter((o) => o.items.some((it) => !it.status || it.status === 'PREPARING' || it.status === 'PENDING' || it.status === 'CONFIRMED')).length}
-                    </span>
-                  </div>
-
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
-                    {orders
-                      .filter((o) => o.items.some((it) => !it.status || it.status === 'PREPARING' || it.status === 'PENDING' || it.status === 'CONFIRMED'))
-                      .map((order) => (
-                        <div
-                          key={order.id}
-                          className="kds-order-ticket"
-                          style={{ borderLeft: '4px solid var(--accent-amber)' }}
-                        >
-                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', flexWrap: 'wrap', marginBottom: '10px' }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                              <span
-                                style={{
-                                  background: 'var(--accent-amber)',
-                                  color: '#000',
-                                  fontWeight: 900,
-                                  fontSize: '0.9rem',
-                                  padding: '2px 8px',
-                                  borderRadius: '6px',
-                                }}
-                              >
-                                {order.tableNumber}
-                              </span>
-                              <span style={{ fontWeight: 700, fontSize: '0.85rem' }}>{order.displayId}</span>
-                            </div>
-                            <span style={{ fontSize: '0.73rem', color: 'var(--accent-amber)', fontWeight: 700 }}>
-                              🔥 Cooking · 🕒 {order.createdAt}
-                            </span>
-                          </div>
-
-                          {renderKdsOrderItems(order, 'var(--accent-cyan)')}
-                        </div>
-                      ))}
-                  </div>
-                </div>
-
-                {/* Column 3: Ready on Pass */}
-                <div
-                  style={{
-                    background: 'rgba(15, 23, 42, 0.6)',
-                    borderRadius: 'var(--radius-md)',
-                    border: '1px solid var(--border-light)',
-                    padding: '16px',
-                  }}
-                >
-                  <div
-                    style={{
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      alignItems: 'center',
-                      marginBottom: '14px',
-                      paddingBottom: '8px',
-                      borderBottom: '1px solid var(--border-light)',
-                    }}
-                  >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                      <span style={{ width: '10px', height: '10px', borderRadius: '50%', background: '#10b981' }} />
-                      <span style={{ fontWeight: 800, fontSize: '0.95rem' }}>READY ON PASS</span>
-                    </div>
-                    <span className="status-chip chip-green">
-                      {readyItemsCount}
-                    </span>
-                  </div>
-
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
-                    {orders
-                      .filter((o) => o.items.some((it) => it.status === 'READY') || o.status === 'READY')
-                      .map((order) => {
-                        const readyItems = order.items.filter((it) => it.status === 'READY');
-                        const cookingItems = order.items.filter((it) => !it.status || it.status === 'PREPARING' || it.status === 'PENDING' || it.status === 'CONFIRMED');
-
-                        return (
-                          <div
-                            key={order.id}
-                            className="kds-order-ticket pulse-glow"
-                            style={{ borderLeft: '4px solid #10b981' }}
-                          >
-                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', flexWrap: 'wrap', marginBottom: '10px' }}>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                <span
-                                  style={{
-                                    background: '#10b981',
-                                    color: '#000',
-                                    fontWeight: 900,
-                                    fontSize: '0.9rem',
-                                    padding: '2px 8px',
-                                    borderRadius: '6px',
-                                  }}
-                                >
-                                  {order.tableNumber}
-                                </span>
-                                <span style={{ fontWeight: 700, fontSize: '0.85rem' }}>{order.displayId}</span>
-                              </div>
-                              <div style={{ textAlign: 'right' }}>
-                                <div style={{ fontSize: '0.73rem', color: '#10b981', fontWeight: 800 }}>
-                                  ✓ {readyItems.length} PLATED ON PASS
-                                </div>
-                                <div style={{ fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
-                                  🕒 {order.createdAt}
-                                </div>
-                              </div>
-                            </div>
-
-                            {renderKdsOrderItems(order, '#10b981')}
-
-                            {/* Info if other items are still cooking in the kitchen */}
-                            {cookingItems.length > 0 && (
-                              <div
-                                style={{
-                                  padding: '6px 10px',
-                                  background: 'rgba(245, 158, 11, 0.1)',
-                                  border: '1px solid rgba(245, 158, 11, 0.25)',
-                                  borderRadius: '6px',
-                                  color: 'var(--accent-amber)',
-                                  fontSize: '0.74rem',
-                                  fontWeight: 700,
-                                  marginBottom: '8px',
-                                  display: 'flex',
-                                  alignItems: 'center',
-                                  gap: '6px',
-                                }}
-                              >
-                                <span>⏳</span>
-                                <span>{cookingItems.length} other dish{cookingItems.length === 1 ? '' : 'es'} still cooking in kitchen</span>
-                              </div>
-                            )}
-
-                            {/* Role footer: Kitchen waits for runner; floor roles can bulk-serve or settle */}
-                            {currentUser?.role === 'KITCHEN' ? (
-                              <div
-                                style={{
-                                  width: '100%',
-                                  padding: '10px 12px',
-                                  background: 'rgba(16, 185, 129, 0.15)',
-                                  border: '1px solid rgba(16, 185, 129, 0.3)',
-                                  borderRadius: 'var(--radius-sm)',
-                                  color: '#10b981',
-                                  fontSize: '0.82rem',
-                                  fontWeight: 700,
-                                  textAlign: 'center',
-                                }}
-                              >
-                                ✓ Plated on Pass · Waiting for Runner
-                              </div>
-                            ) : (
-                              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                                {readyItems.length > 0 && (
-                                  <button
-                                    onClick={async () => {
-                                      for (const it of readyItems) {
-                                        void transitionItem(order.id, it.id, 'SERVED');
-                                      }
-                                      if (order.status === 'READY') {
-                                        void transitionOrder(order.id, 'SERVED');
-                                      }
-                                    }}
-                                    className="btn-success"
-                                    style={{ width: '100%', padding: '9px 12px', fontSize: '0.82rem', fontWeight: 800 }}
-                                  >
-                                    🏃 Deliver {readyItems.length} Ready Dish{readyItems.length === 1 ? '' : 'es'} to Table
-                                  </button>
-                                )}
-                                <div style={{ display: 'flex', gap: '8px' }}>
-                                  <button
-                                    onClick={() => { setCollectPaymentOrder(order); }}
-                                    style={{
-                                      flex: 1,
-                                      background: 'rgba(6, 182, 212, 0.15)',
-                                      color: 'var(--accent-cyan)',
-                                      border: '1px solid rgba(6, 182, 212, 0.4)',
-                                      borderRadius: 'var(--radius-sm)',
-                                      padding: '8px 12px',
-                                      fontSize: '0.78rem',
-                                      fontWeight: 700,
-                                      cursor: 'pointer',
-                                    }}
-                                  >
-                                    💳 Settle ({formatPaise(order.totalPaise)})
-                                  </button>
-                                </div>
-                              </div>
-                            )}
-                          </div>
-                        );
-                      })}
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
+        {(activeTab === 'ORDERS' || activeView === 'KDS') && (
+          <KdsKanbanBoard
+            currentOutlet={currentOutlet}
+            currentUser={currentUser}
+            onTransitionItem={transitionItem}
+            onTransitionOrder={transitionOrder}
+            onSettleOrder={(order) => setCollectPaymentOrder(order)}
+            onSelectOutlet={(outletId) => setSelectedOutletId(outletId)}
+          />
         )}
 
         {/* TAB: FOOD PASS & EXPEDITER (CAPTAIN & WAITER SERVICE) */}
@@ -2124,187 +1843,13 @@ export default function StaffWebApp() {
         )}
 
         {/* TAB 2: TABLE FLOOR MAP */}
-        {activeTab === 'TABLES' && (
-          <div style={{ padding: '20px 24px' }}>
-            <div
-              style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                marginBottom: '18px',
-                flexWrap: 'wrap',
-                gap: '12px',
-              }}
-            >
-              <div>
-                <h2 style={{ fontSize: '1.4rem', fontWeight: 800 }}>Restaurant Floor Plan</h2>
-                <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
-                  {currentOutlet.name} · {tables.length} Tables Configured
-                </p>
-              </div>
-
-              {/* Section Filters */}
-              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-                {(['ALL', ...Array.from(new Set(tables.map((t) => t.section).filter(Boolean)))]).map((sec) => (
-                  <button
-                    key={sec}
-                    onClick={() => setSelectedSection(sec)}
-                    style={{
-                      padding: '6px 14px',
-                      borderRadius: 'var(--radius-sm)',
-                      fontSize: '0.82rem',
-                      fontWeight: 700,
-                      background: selectedSection === sec ? 'var(--accent-cyan)' : 'var(--bg-surface)',
-                      color: selectedSection === sec ? '#000' : 'var(--text-secondary)',
-                      border: '1px solid var(--border-light)',
-                    }}
-                  >
-                    {sec === 'ALL' ? 'All Sections' : sec}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {tables.length === 0 ? (
-              <div
-                style={{
-                  background: 'var(--bg-card)',
-                  border: '1.5px dashed var(--border-light)',
-                  borderRadius: 'var(--radius-lg)',
-                  padding: '60px 20px',
-                  textAlign: 'center',
-                  maxWidth: '600px',
-                  margin: '40px auto',
-                }}
-              >
-                <div style={{ fontSize: '48px', marginBottom: '16px' }}>🪑</div>
-                <h3 style={{ fontSize: '1.25rem', fontWeight: 700, marginBottom: '8px' }}>
-                  No Tables Configured in {currentOutlet.shortName}
-                </h3>
-                <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', marginBottom: '24px' }}>
-                  This branch has zero tables in the database. Use the Owner Cockpit to add dining zones, table numbers, and generate QR codes.
-                </p>
-                <button
-                  onClick={() => setSelectedOutletId('b0000000-0000-0000-0000-000000000001')}
-                  className="btn-primary"
-                >
-                  View Floor Map in Indiranagar Flagship
-                </button>
-              </div>
-            ) : (
-              /* Floor Grid of 12 Tables */
-              <div
-                style={{
-                  display: 'grid',
-                  gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))',
-                  gap: '16px',
-                }}
-              >
-                {tables
-                  .filter((t) => selectedSection === 'ALL' || t.section === selectedSection)
-                  .map((table) => {
-                    const session = sessions.find((s) => s.tableId === table.id && s.status === 'OPEN');
-                    const activeOrder = orders.find(
-                      (o) =>
-                        o.status !== 'CANCELLED' &&
-                        o.status !== 'BILLED' &&
-                        (o.tableNumber === table.number ||
-                          o.items?.some((it) => it.targetTableNumber === table.number)),
-                    );
-                    const needsCleaning = needsCleaningTableIds.has(table.id) || !!session;
-                    const isOccupied = needsCleaning || !!activeOrder;
-
-                    return (
-                      <div
-                        key={table.id}
-                        onClick={() => setSelectedTable(table)}
-                        style={{
-                          background: isOccupied ? 'rgba(30, 41, 59, 0.9)' : 'var(--bg-card)',
-                          border: isOccupied ? '1.5px solid var(--accent-cyan)' : '1px solid var(--border-card)',
-                          borderRadius: 'var(--radius-md)',
-                          padding: '18px',
-                          cursor: 'pointer',
-                          transition: 'all 0.2s ease',
-                          display: 'flex',
-                          flexDirection: 'column',
-                          justifyContent: 'space-between',
-                          minHeight: '160px',
-                        }}
-                      >
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                          <div>
-                            <span
-                              style={{
-                                fontSize: '1.3rem',
-                                fontWeight: 900,
-                                color: isOccupied ? 'var(--accent-cyan)' : '#f8fafc',
-                              }}
-                            >
-                              {table.number}
-                            </span>
-                            <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
-                              {table.section} · Cap {table.capacity}
-                            </div>
-                          </div>
-                          <span
-                            className={`status-chip ${
-                              activeOrder?.status === 'READY'
-                                ? 'chip-green'
-                                : isOccupied
-                                ? 'chip-blue'
-                                : 'chip-purple'
-                            }`}
-                          >
-                            {activeOrder?.status === 'READY'
-                              ? 'READY'
-                              : needsCleaning
-                              ? 'OCCUPIED / CLEAN'
-                              : isOccupied
-                              ? 'ORDER ACTIVE'
-                              : 'AVAILABLE'}
-                          </span>
-                        </div>
-
-                        {session ? (
-                          <div style={{ marginTop: '12px' }}>
-                            <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>
-                              ⏱ Seated {session.openedAt}
-                            </div>
-                            {activeOrder && (
-                              <div style={{ fontSize: '0.82rem', fontWeight: 700, color: 'var(--accent-amber)', marginTop: '4px' }}>
-                                Order {activeOrder.displayId} · {formatPaise(activeOrder.totalPaise)}
-                              </div>
-                            )}
-                          </div>
-                        ) : (
-                          <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '12px' }}>
-                            Ready for walk-in or QR scan
-                          </div>
-                        )}
-
-                        <div
-                          style={{
-                            marginTop: '14px',
-                            paddingTop: '10px',
-                            borderTop: '1px solid var(--border-light)',
-                            display: 'flex',
-                            justifyContent: 'space-between',
-                            alignItems: 'center',
-                          }}
-                        >
-                          <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-                            Token v{table.qrTokenVersion}
-                          </span>
-                          <span style={{ fontSize: '0.78rem', color: 'var(--accent-cyan)', fontWeight: 700 }}>
-                            Manage Table →
-                          </span>
-                        </div>
-                      </div>
-                    );
-                  })}
-              </div>
-            )}
-          </div>
+        {(activeTab === 'TABLES' || activeView === 'FLOOR') && (
+          <FloorMapView
+            currentOutlet={currentOutlet}
+            onSelectTable={(table) => setSelectedTable(table)}
+            onMarkTableCleaned={handleMarkTableCleaned}
+            onSelectOutlet={(outletId) => setSelectedOutletId(outletId)}
+          />
         )}
 
         {/* TAB 3: 86 STOCK AVAILABILITY MANAGEMENT */}
@@ -2358,17 +1903,11 @@ export default function StaffWebApp() {
               >
                 <div style={{ fontSize: '48px', marginBottom: '16px' }}>📋</div>
                 <h3 style={{ fontSize: '1.25rem', fontWeight: 700, marginBottom: '8px' }}>
-                  No Menu Configured in {currentOutlet.shortName}
+                  No Menu Configured in {currentOutlet.shortName || currentOutlet.name}
                 </h3>
-                <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', marginBottom: '24px' }}>
-                  Menu items can be created or cloned from Indiranagar Flagship in the Owner Cockpit.
+                <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
+                  Menu items and categories can be created and managed in the Owner Cockpit.
                 </p>
-                <button
-                  onClick={() => setSelectedOutletId('b0000000-0000-0000-0000-000000000001')}
-                  className="btn-primary"
-                >
-                  Manage Stock in Indiranagar Flagship
-                </button>
               </div>
             ) : (
               <div
@@ -2565,265 +2104,21 @@ export default function StaffWebApp() {
         )}
 
         {/* TAB 5: MORE / CASHIER & POS SETTLEMENT */}
-        {(activeTab === 'POS' || activeTab === 'MORE') && (
-          <div style={{ padding: '20px 24px', maxWidth: '1000px', margin: '0 auto' }}>
-            {/* Sub-nav */}
-            <div style={{ display: 'flex', gap: '10px', marginBottom: '24px' }}>
-              {(['PAYMENTS', 'STAFF', 'SETTINGS'] as const).map((sub) => (
-                <button
-                  key={sub}
-                  onClick={() => setMoreSubTab(sub)}
-                  style={{
-                    padding: '8px 18px',
-                    borderRadius: 'var(--radius-sm)',
-                    fontSize: '0.85rem',
-                    fontWeight: 800,
-                    background: moreSubTab === sub ? 'var(--accent-cyan)' : 'var(--bg-surface)',
-                    color: moreSubTab === sub ? '#000' : 'var(--text-secondary)',
-                    border: '1px solid var(--border-light)',
-                  }}
-                >
-                  {sub === 'PAYMENTS' ? '💳 Cashier & POS Settle' : sub === 'STAFF' ? '👥 Staff Directory' : '⚙️ Station Settings'}
-                </button>
-              ))}
-            </div>
-
-            {moreSubTab === 'PAYMENTS' && (
-              <div>
-                <div style={{ marginBottom: '20px' }}>
-                  <h2 style={{ fontSize: '1.4rem', fontWeight: 800 }}>Daily Cashier Settle & Reconciliation</h2>
-                  <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
-                    Record payments for {currentOutlet.name}
-                  </p>
-                </div>
-
-                <div className="owner-metric-grid" style={{ marginBottom: '24px' }}>
-                  <div className="owner-metric-card">
-                    <span style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', fontWeight: 700 }}>
-                      TODAY&apos;S BILLED SALES
-                    </span>
-                    <div style={{ fontSize: '1.8rem', fontWeight: 900, color: 'var(--accent-cyan)', marginTop: '4px' }}>
-                      {formatPaise(branchData.payments.reduce((acc, p) => acc + p.amountPaise, 0))}
-                    </div>
-                    <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '4px' }}>
-                      {branchData.payments.length} settled transactions
-                    </span>
-                  </div>
-
-                  <div className="owner-metric-card">
-                    <span style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', fontWeight: 700 }}>
-                      UPI DIRECT TO RESTAURANT
-                    </span>
-                    <div style={{ fontSize: '1.8rem', fontWeight: 900, color: '#10b981', marginTop: '4px' }}>
-                      {formatPaise(branchData.payments.filter((p) => p.method === 'UPI' || p.method === 'DIRECT_UPI_STAFF').reduce((acc, p) => acc + p.amountPaise, 0))}
-                    </div>
-                    <span style={{ fontSize: '0.75rem', color: '#10b981', marginTop: '4px' }}>
-                      Zero gateway MDR deduction
-                    </span>
-                  </div>
-
-                  <div className="owner-metric-card">
-                    <span style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', fontWeight: 700 }}>
-                      CASH DRAWER TILL
-                    </span>
-                    <div style={{ fontSize: '1.8rem', fontWeight: 900, color: 'var(--accent-amber)', marginTop: '4px' }}>
-                      {formatPaise(branchData.payments.filter((p) => p.method === 'CASH').reduce((acc, p) => acc + p.amountPaise, 0))}
-                    </div>
-                    <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '4px' }}>
-                      Ready for shift closing count
-                    </span>
-                  </div>
-                </div>
-
-                {/* Settle Table list */}
-                <div className="data-table-container">
-                  <div style={{ padding: '16px 20px', borderBottom: '1px solid var(--border-light)', fontWeight: 800 }}>
-                    Settled Transactions Log (Today)
-                  </div>
-                  {branchData.payments.length === 0 ? (
-                    <div style={{ padding: '40px', textAlign: 'center', color: 'var(--text-muted)' }}>
-                      No payments recorded yet for this outlet today.
-                    </div>
-                  ) : (
-                    <table className="data-table">
-                      <thead>
-                        <tr>
-                          <th>Order ID</th>
-                          <th>Table</th>
-                          <th>Customer</th>
-                          <th>Method</th>
-                          <th>Amount</th>
-                          <th>Time</th>
-                          <th>Action</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {branchData.payments.map((p) => (
-                          <tr key={p.id}>
-                            <td style={{ fontWeight: 700 }}>{p.displayId}</td>
-                            <td>
-                              <span style={{ fontWeight: 800, color: 'var(--accent-cyan)' }}>{p.tableNumber}</span>
-                            </td>
-                            <td>{p.customerName}</td>
-                            <td>
-                              <span className="status-chip chip-blue">{p.method}</span>
-                            </td>
-                            <td style={{ fontWeight: 800, color: '#10b981' }}>{formatPaise(p.amountPaise)}</td>
-                            <td style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>{p.timestamp}</td>
-                            <td>
-                              <button
-                                style={{
-                                  background: 'rgba(255, 255, 255, 0.06)',
-                                  border: '1px solid var(--border-light)',
-                                  padding: '4px 10px',
-                                  borderRadius: '4px',
-                                  fontSize: '0.78rem',
-                                  color: '#fff',
-                                }}
-                              >
-                                🖨 Reprint KOT
-                              </button>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  )}
-                </div>
-              </div>
-            )}
-
-            {moreSubTab === 'STAFF' && (
-              <div className="data-table-container">
-                <div style={{ padding: '16px 20px', borderBottom: '1px solid var(--border-light)', fontWeight: 800 }}>
-                  Staff Members for {currentOutlet.shortName}
-                </div>
-                <table className="data-table">
-                  <thead>
-                    <tr>
-                      <th>Staff Member</th>
-                      <th>Role</th>
-                      <th>Phone</th>
-                      <th>PIN Quick Access</th>
-                      <th>Status</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {branchData.staffMembers.map((s) => (
-                      <tr key={s.id}>
-                        <td style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                          <span style={{ fontSize: '20px' }}>{s.avatar}</span>
-                          <div>
-                            <div style={{ fontWeight: 700 }}>{s.name}</div>
-                            <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>{s.email}</div>
-                          </div>
-                        </td>
-                        <td>
-                          <span className="status-chip chip-purple">{s.role}</span>
-                        </td>
-                        <td>{s.phone}</td>
-                        <td style={{ fontFamily: 'monospace', letterSpacing: '2px', color: 'var(--accent-cyan)' }}>
-                          ••••
-                        </td>
-                        <td>
-                          <span className="status-chip chip-green">ACTIVE ON SHIFT</span>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </div>
+        {(activeTab === 'POS' || activeTab === 'MORE' || activeView === 'CASHIER') && (
+          <CashierPosView
+            currentOutlet={currentOutlet}
+            currentUser={currentUser}
+            staffMembers={branchData.staffMembers}
+            onSettleOrder={(order) => setCollectPaymentOrder(order)}
+          />
         )}
       </main>
 
       {/* ========================================================
-          PERSISTENT TABLET BOTTOM NAVIGATION
+          ROLE-DIFFERENTIATED TABLET & DESKTOP NAVIGATION
+          Extracted to StaffSidebar wired to useStaffStore
           ======================================================== */}
-      {/* ========================================================
-          ROLE-DIFFERENTIATED TABLET BOTTOM NAVIGATION
-          ======================================================== */}
-      <nav className="staff-bottom-nav">
-        {roleConfig.allowedTabs.includes('ORDERS') && (
-          <button
-            onClick={() => setActiveTab('ORDERS')}
-            className={`staff-nav-item ${activeTab === 'ORDERS' ? 'active' : ''}`}
-          >
-            <span style={{ fontSize: '20px', position: 'relative' }}>
-              🍳
-              {pendingOrdersCount > 0 && <span className="nav-badge-count">{pendingOrdersCount}</span>}
-            </span>
-            <span>Kitchen KDS</span>
-          </button>
-        )}
-
-        {roleConfig.allowedTabs.includes('TABLES') && (
-          <button
-            onClick={() => setActiveTab('TABLES')}
-            className={`staff-nav-item ${activeTab === 'TABLES' ? 'active' : ''}`}
-          >
-            <span style={{ fontSize: '20px' }}>🪑</span>
-            <span>Tables ({tables.length})</span>
-          </button>
-        )}
-
-        {roleConfig.allowedTabs.includes('PASS') && (
-          <button
-            onClick={() => setActiveTab('PASS')}
-            className={`staff-nav-item ${activeTab === 'PASS' ? 'active' : ''}`}
-          >
-            <span style={{ fontSize: '20px', position: 'relative' }}>
-              🍽️
-              {readyOrdersCount > 0 && <span className="nav-badge-count pulse-glow">{readyOrdersCount}</span>}
-            </span>
-            <span>Food Pass{readyOrdersCount > 0 ? ` (${readyOrdersCount})` : ''}</span>
-          </button>
-        )}
-
-        {roleConfig.allowedTabs.includes('STOCK') && (
-          <button
-            onClick={() => setActiveTab('STOCK')}
-            className={`staff-nav-item ${activeTab === 'STOCK' ? 'active' : ''}`}
-          >
-            <span style={{ fontSize: '20px' }}>📋</span>
-            <span>86 Stock ({stock.filter((i) => !i.isAvailable).length} off)</span>
-          </button>
-        )}
-
-        {roleConfig.allowedTabs.includes('MENU') && (
-          <button
-            onClick={() => setActiveTab('MENU')}
-            className={`staff-nav-item ${activeTab === 'MENU' ? 'active' : ''}`}
-          >
-            <span style={{ fontSize: '20px' }}>🍴</span>
-            <span>Menu Editor</span>
-          </button>
-        )}
-
-        {roleConfig.allowedTabs.includes('CALLS') && (
-          <button
-            onClick={() => setActiveTab('CALLS')}
-            className={`staff-nav-item ${activeTab === 'CALLS' ? 'active' : ''}`}
-          >
-            <span style={{ fontSize: '20px', position: 'relative' }}>
-              🔔
-              {pendingCallsCount > 0 && <span className="nav-badge-count pulse-glow">{pendingCallsCount}</span>}
-            </span>
-            <span>Bells</span>
-          </button>
-        )}
-
-        {roleConfig.allowedTabs.includes('POS') && (
-          <button
-            onClick={() => setActiveTab('POS')}
-            className={`staff-nav-item ${activeTab === 'POS' || activeTab === 'MORE' ? 'active' : ''}`}
-          >
-            <span style={{ fontSize: '20px' }}>💳</span>
-            <span>Cashier / POS</span>
-          </button>
-        )}
-      </nav>
+      <StaffSidebar currentRole={currentRole} />
 
       {/* ========================================================
           PIN LOCK SCREEN OVERLAY (Auto-idle or manual lock)
@@ -3049,11 +2344,60 @@ export default function StaffWebApp() {
             {/* Session info */}
             {(() => {
               const session = sessions.find((s) => s.tableId === selectedTable.id && s.status === 'OPEN');
-              const activeOrder = orders.find((o) => o.tableNumber === selectedTable.number);
+              const activeOrders = orders.filter(
+                (o) =>
+                  o.status !== 'CANCELLED' &&
+                  o.status !== 'BILLED' &&
+                  (o.tableNumber === selectedTable.number ||
+                    (selectedTable.id && o.tableId === selectedTable.id) ||
+                    o.items?.some((it) => it.targetTableNumber === selectedTable.number)),
+              );
+              activeOrders.sort(
+                (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
+              );
+              const combinedTotalPaise = activeOrders.reduce((sum, o) => sum + (o.totalPaise || 0), 0);
+              const upcomingRes = reservations.find(
+                (r) => r.tableNumber === selectedTable.number && (r.status === 'CONFIRMED' || !r.status),
+              );
 
               if (session) {
+                const heldOrders = activeOrders.filter((o) =>
+                  o.items.some((it) => it.holdStatus === 'SERVE_LATER_HOLD'),
+                );
+                const hasPrompt = Boolean(
+                  serveLaterPrompts.some(
+                    (p) =>
+                      activeOrders.some((o) => p.orderId === o.id) ||
+                      p.tableNumber === selectedTable.number,
+                  ),
+                );
+                const showServeLaterCheckIn = Boolean(heldOrders.length > 0 || hasPrompt);
+
                 return (
                   <div>
+                    {upcomingRes && (
+                      <div
+                        style={{
+                          background: 'rgba(59, 130, 246, 0.15)',
+                          border: '1px solid rgba(59, 130, 246, 0.4)',
+                          borderRadius: '8px',
+                          padding: '8px 12px',
+                          marginBottom: '12px',
+                          fontSize: '0.8rem',
+                          color: '#93c5fd',
+                          fontWeight: 700,
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '6px',
+                        }}
+                      >
+                        <span>📅</span>
+                        <span>
+                          Upcoming Reservation: {new Date(upcomingRes.reservedFor).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} · {upcomingRes.guestCount} Pax {upcomingRes.customerName ? `(${upcomingRes.customerName})` : ''}
+                        </span>
+                      </div>
+                    )}
+
                     <div style={{ background: 'rgba(255,255,255,0.03)', padding: '12px', borderRadius: '8px', marginBottom: '14px' }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px' }}>
                         <span style={{ color: 'var(--text-secondary)' }}>Guests:</span>
@@ -3069,26 +2413,102 @@ export default function StaffWebApp() {
                       </div>
                     </div>
 
-                    {activeOrder && (
-                      <div style={{ marginBottom: '18px' }}>
+                    {/* Serve-Later Check-In Banner in Table Detail Drawer */}
+                    {showServeLaterCheckIn && heldOrders.length > 0 && (
+                      <div
+                        style={{
+                          background: 'linear-gradient(135deg, rgba(168, 85, 247, 0.22), rgba(126, 34, 206, 0.32))',
+                          border: '1.5px solid #c084fc',
+                          borderRadius: '8px',
+                          padding: '10px 12px',
+                          marginBottom: '14px',
+                          boxShadow: '0 0 12px rgba(192, 132, 252, 0.3)',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: '8px',
+                        }}
+                      >
+                        <div style={{ fontSize: '0.82rem', fontWeight: 800, color: '#f3e8ff', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                          <span>🍨</span> Serve-Later Check-In Ready!
+                        </div>
+                        <div style={{ fontSize: '0.75rem', color: '#e9d5ff' }}>
+                          Desserts &amp; beverages are on hold. Check with diner and fire when ready.
+                        </div>
+                        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                          {heldOrders.map((hOrd) => (
+                            <button
+                              key={hOrd.id}
+                              type="button"
+                              disabled={releasingHeldOrderId === hOrd.id}
+                              onClick={() => void handleStaffFireHeldItems(hOrd.id)}
+                              style={{
+                                flex: 1,
+                                minWidth: '140px',
+                                padding: '7px 10px',
+                                borderRadius: '6px',
+                                background: 'linear-gradient(135deg, #a855f7, #7c3aed)',
+                                color: '#fff',
+                                fontSize: '0.78rem',
+                                fontWeight: 800,
+                                border: 'none',
+                                cursor: 'pointer',
+                              }}
+                            >
+                              🔥 Fire Held Items ({hOrd.displayId})
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {activeOrders.map((activeOrder, ordIdx) => (
+                      <div key={activeOrder.id} style={{ marginBottom: '18px', background: 'rgba(255,255,255,0.02)', padding: '10px 12px', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.06)' }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-                          <h4 style={{ fontSize: '0.9rem', fontWeight: 800 }}>Active Order {activeOrder.displayId}</h4>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <h4 style={{ fontSize: '0.9rem', fontWeight: 800, margin: 0 }}>
+                              Order #{ordIdx + 1}: {activeOrder.displayId}
+                            </h4>
+                            {activeOrder.dinerLabel && (
+                              <span
+                                style={{
+                                  background: 'rgba(56, 189, 248, 0.15)',
+                                  border: '1px solid rgba(56, 189, 248, 0.35)',
+                                  color: '#38bdf8',
+                                  padding: '1px 6px',
+                                  borderRadius: '4px',
+                                  fontSize: '0.72rem',
+                                  fontWeight: 700,
+                                }}
+                              >
+                                👤 {activeOrder.dinerLabel}
+                              </span>
+                            )}
+                          </div>
                           <span style={{ fontSize: '0.74rem', color: 'var(--text-secondary)' }}>🕒 {activeOrder.createdAt}</span>
                         </div>
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', fontSize: '0.85rem' }}>
                           {activeOrder.items.map((i) => {
                             const isReady = i.status === 'READY';
                             const isServed = i.status === 'SERVED';
-                            const isCooking = !i.status || i.status === 'PREPARING' || i.status === 'PENDING';
+                            const isHeld = i.holdStatus === 'SERVE_LATER_HOLD' || i.holdStatus === 'SCHEDULED_WAIT';
+                            const isCooking = !isHeld && i.status === 'PREPARING';
+                            const isQueued = !isHeld && !isReady && !isServed && !isCooking;
 
                             return (
                               <div key={i.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', padding: '6px 0', borderBottom: '1px dashed rgba(255,255,255,0.06)' }}>
                                 <div style={{ flex: 1, minWidth: 0 }}>
                                   <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
                                     <span style={{ fontWeight: 700 }}>{i.quantity}× {i.name}</span>
-                                    {isReady && <span style={{ fontSize: '0.68rem', padding: '1px 5px', borderRadius: '4px', background: 'rgba(16, 185, 129, 0.2)', color: '#10b981', fontWeight: 800 }}>ON PASS</span>}
-                                    {isServed && <span style={{ fontSize: '0.68rem', padding: '1px 5px', borderRadius: '4px', background: 'rgba(255, 255, 255, 0.08)', color: 'var(--text-muted)' }}>SERVED</span>}
-                                    {isCooking && <span style={{ fontSize: '0.68rem', padding: '1px 5px', borderRadius: '4px', background: 'rgba(245, 158, 11, 0.2)', color: '#fbbf24' }}>COOKING</span>}
+                                    {i.dinerLabel && (
+                                      <span style={{ fontSize: '0.68rem', padding: '1px 5px', borderRadius: '4px', background: 'rgba(56, 189, 248, 0.12)', color: '#38bdf8', fontWeight: 700 }}>
+                                        👤 {i.dinerLabel}
+                                      </span>
+                                    )}
+                                    {isReady && <span style={{ fontSize: '0.68rem', padding: '1px 5px', borderRadius: '4px', background: 'rgba(16, 185, 129, 0.2)', color: '#10b981', fontWeight: 800 }}>🍽️ ON PASS</span>}
+                                    {isServed && <span style={{ fontSize: '0.68rem', padding: '1px 5px', borderRadius: '4px', background: 'rgba(255, 255, 255, 0.08)', color: 'var(--text-muted)' }}>✓ SERVED</span>}
+                                    {isCooking && <span style={{ fontSize: '0.68rem', padding: '1px 5px', borderRadius: '4px', background: 'rgba(245, 158, 11, 0.2)', color: '#fbbf24' }}>🔥 COOKING</span>}
+                                    {isHeld && <span style={{ fontSize: '0.68rem', padding: '1px 5px', borderRadius: '4px', background: 'rgba(168, 85, 247, 0.2)', color: '#c084fc', fontWeight: 800 }}>⏳ ON HOLD</span>}
+                                    {isQueued && <span style={{ fontSize: '0.68rem', padding: '1px 5px', borderRadius: '4px', background: 'rgba(255, 255, 255, 0.08)', color: '#94a3b8', fontWeight: 700 }}>📋 QUEUED (Waiting for Chef)</span>}
                                   </div>
                                   <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
                                     🕒 {i.createdAt || activeOrder.createdAt}
@@ -3096,6 +2516,26 @@ export default function StaffWebApp() {
                                 </div>
                                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
                                   <span>{formatPaise(i.pricePaise * i.quantity)}</span>
+                                  {isHeld && (
+                                    <button
+                                      type="button"
+                                      disabled={releasingHeldOrderId === activeOrder.id}
+                                      onClick={() => void handleStaffFireHeldItems(activeOrder.id, i.id)}
+                                      style={{
+                                        padding: '4px 8px',
+                                        borderRadius: '4px',
+                                        background: 'linear-gradient(135deg, #a855f7, #7c3aed)',
+                                        color: '#fff',
+                                        fontSize: '0.72rem',
+                                        fontWeight: 800,
+                                        border: 'none',
+                                        cursor: 'pointer',
+                                        whiteSpace: 'nowrap',
+                                      }}
+                                    >
+                                      🔥 Fire Dish
+                                    </button>
+                                  )}
                                   {isReady && (
                                     <button
                                       type="button"
@@ -3111,22 +2551,31 @@ export default function StaffWebApp() {
                             );
                           })}
                           <div style={{ borderTop: '1px solid var(--border-light)', paddingTop: '6px', display: 'flex', justifyContent: 'space-between', fontWeight: 800 }}>
-                            <span>Total Bill:</span>
-                            <span style={{ color: 'var(--accent-cyan)' }}>{formatPaise(activeOrder.totalPaise)}</span>
+                            <span>Order Total:</span>
+                            <span style={{ color: 'var(--accent-amber)' }}>{formatPaise(activeOrder.totalPaise)}</span>
                           </div>
                         </div>
                       </div>
+                    ))}
+
+                    {activeOrders.length > 1 && (
+                      <div style={{ background: 'rgba(6, 182, 212, 0.1)', border: '1px solid rgba(6, 182, 212, 0.3)', borderRadius: '8px', padding: '10px 12px', marginBottom: '14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontWeight: 900 }}>
+                        <span style={{ color: '#fff' }}>Combined Table Total ({activeOrders.length} Orders):</span>
+                        <span style={{ color: 'var(--accent-cyan)', fontSize: '1.05rem' }}>{formatPaise(combinedTotalPaise)}</span>
+                      </div>
                     )}
 
-                    {activeOrder && (activeOrder.status === 'READY' || activeOrder.items.some((it) => it.status === 'READY')) && (
+                    {activeOrders.some((ord) => ord.status === 'READY' || ord.items.some((it) => it.status === 'READY')) && (
                       <button
                         onClick={async () => {
-                          const readyItems = activeOrder.items.filter((it) => it.status === 'READY');
-                          for (const it of readyItems) {
-                            void transitionItem(activeOrder.id, it.id, 'SERVED');
-                          }
-                          if (activeOrder.status === 'READY') {
-                            void transitionOrder(activeOrder.id, 'SERVED');
+                          for (const ord of activeOrders) {
+                            const readyItems = ord.items.filter((it) => it.status === 'READY');
+                            for (const it of readyItems) {
+                              void transitionItem(ord.id, it.id, 'SERVED');
+                            }
+                            if (ord.status === 'READY') {
+                              void transitionOrder(ord.id, 'SERVED');
+                            }
                           }
                         }}
                         style={{
@@ -3174,10 +2623,10 @@ export default function StaffWebApp() {
                           : `🧹 Mark Table ${selectedTable.number} Cleaned & Ready`}
                       </button>
                       <div style={{ display: 'flex', gap: '8px' }}>
-                        {activeOrder && (
+                        {activeOrders.length > 0 && (
                           <button
                             onClick={() => {
-                              setCollectPaymentOrder(activeOrder);
+                              setCollectPaymentOrder(activeOrders[0] ?? null);
                               setSelectedTable(null);
                             }}
                             className="btn-primary"
@@ -3200,6 +2649,29 @@ export default function StaffWebApp() {
 
               return (
                 <div style={{ textAlign: 'center', padding: '20px 0' }}>
+                  {upcomingRes && (
+                    <div
+                      style={{
+                        background: 'rgba(59, 130, 246, 0.15)',
+                        border: '1px solid rgba(59, 130, 246, 0.4)',
+                        borderRadius: '8px',
+                        padding: '8px 12px',
+                        marginBottom: '16px',
+                        fontSize: '0.82rem',
+                        color: '#93c5fd',
+                        fontWeight: 700,
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        gap: '6px',
+                      }}
+                    >
+                      <span>📅</span>
+                      <span>
+                        Upcoming Reservation: {new Date(upcomingRes.reservedFor).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} · {upcomingRes.guestCount} Pax {upcomingRes.customerName ? `(${upcomingRes.customerName})` : ''}
+                      </span>
+                    </div>
+                  )}
                   <p style={{ color: 'var(--text-secondary)', marginBottom: '16px' }}>
                     Table {selectedTable.number} is currently vacant and ready for seating.
                   </p>
