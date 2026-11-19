@@ -65,6 +65,76 @@ export class ConsolePaymentsController {
   }
 
   /**
+   * GET /console/payments
+   * Lists payments for org and optional outlet.
+   */
+  @Get()
+  @Require(Permission.PAYMENT_READ)
+  listPayments(
+    @CurrentUser() user: StaffJwtPayload,
+    @Query('outlet_id') outletId?: string,
+    @Query('status') status?: string,
+  ) {
+    const scopedOutlet = outletId || user.outletId;
+    return this.paymentsService.listPayments(user.org, scopedOutlet, status);
+  }
+
+  /**
+   * GET /console/payments/invoices
+   * Lists tax invoices for org and optional outlet.
+   */
+  @Get('invoices')
+  @Require(Permission.PAYMENT_READ)
+  listInvoices(
+    @CurrentUser() user: StaffJwtPayload,
+    @Query('outlet_id') outletId?: string,
+  ) {
+    const scopedOutlet = outletId || user.outletId;
+    return this.paymentsService.listInvoices(user.org, scopedOutlet);
+  }
+
+  /**
+   * GET /console/payments/invoices/:id
+   * Get tax invoice by id.
+   */
+  @Get('invoices/:id')
+  @Require(Permission.PAYMENT_READ)
+  getInvoice(
+    @CurrentUser() user: StaffJwtPayload,
+    @Param('id') id: string,
+  ) {
+    return this.paymentsService.getInvoice(user.org, id);
+  }
+
+  /**
+   * GET /console/payments/reconciliation-flags
+   * Lists payment reconciliation flags (e.g. late webhooks after order expiry)
+   */
+  @Get('reconciliation-flags')
+  @Require(Permission.PAYMENT_READ)
+  listReconciliationFlags(
+    @CurrentUser() user: StaffJwtPayload,
+    @Query('outlet_id') outletId?: string,
+    @Query('status') status?: string,
+  ) {
+    return this.paymentsService.listReconciliationFlags(user.org, outletId || user.outletId, status);
+  }
+
+  /**
+   * POST /console/payments/reconciliation-flags/:id/resolve
+   * Marks a reconciliation flag resolved after staff handles manual cash/counter refund.
+   */
+  @Post('reconciliation-flags/:id/resolve')
+  @Require(Permission.PAYMENT_REFUND)
+  @HttpCode(HttpStatus.OK)
+  resolveReconciliationFlag(
+    @CurrentUser() user: StaffJwtPayload,
+    @Param('id') id: string,
+  ) {
+    return this.paymentsService.resolveReconciliationFlag(user.org, id, user.sub);
+  }
+
+  /**
    * GET /console/payments/:id
    */
   @Get(':id')
