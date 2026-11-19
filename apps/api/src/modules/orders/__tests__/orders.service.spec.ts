@@ -30,8 +30,8 @@ describe('OrdersService', () => {
   describe('updateItemStatus', () => {
     it('updates item status within authenticated tenant context and writes audit events', async () => {
       queryMock
-        .mockResolvedValueOnce({ rows: [{ status: 'PENDING', order_id: orderId }] }) // select item
-        .mockResolvedValueOnce({ rows: [] }) // update order_items
+        .mockResolvedValueOnce({ rows: [{ status: 'PENDING', order_id: orderId, payment_status: 'PAID' }] }) // select item + paid order
+        .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // update order_items
         .mockResolvedValueOnce({ rows: [{ status: 'PREPARING' }] }) // select all items
         .mockResolvedValueOnce({ rows: [{ status: 'CONFIRMED' }] }) // select order status
         .mockResolvedValueOnce({ rows: [] }) // update orders
