@@ -1,14 +1,24 @@
 'use client';
 
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
-import { useOrderStore } from '../store/useOrderStore';
+import { useOrderStore, computeCouponDiscountPaise } from '../store/useOrderStore';
+import type { AvailableCoupon } from '../types';
 import { SquareItemCard, FALLBACK_DISH_IMG } from '../components/menu/SquareItemCard';
+import { resolveDishImageUrl } from '../components/menu/menu-image.utils';
 import { DineInCheckoutModal, DineInBillBreakdown } from '../components/checkout/DineInCheckoutModal';
 import { CartDrawer } from '../components/cart/CartDrawer';
 import { ItemCustomizerModal } from '../components/modals/ItemCustomizerModal';
 import { MenuGrid } from '../components/menu/MenuGrid';
 import { DEFAULT_CATEGORIES } from '../components/menu/menu-constants';
 import { OrdersHistoryView } from '../components/orders/OrdersHistoryView';
+import { CustomerServeLaterModal } from '../components/orders/CustomerServeLaterModal';
+import { ServeLaterPromptModal } from '../components/modals/ServeLaterPromptModal';
+import {
+  flattenPlates,
+  filterPlatesByTab,
+  deduplicateOrders,
+} from '../components/orders/orders-utils';
+import { BookingFlowModal } from '../components/booking/BookingFlowModal';
 import { CustomerAuthModal } from '../components/modals/CustomerAuthModal';
 import { TableModal, getLiveTableValidation as validateLiveTable } from '../components/modals/TableModal';
 import { TopNavBar } from '../components/layout/TopNavBar';
@@ -180,6 +190,12 @@ interface TableOrderRecord {
   payment_status?: 'PAID' | 'PENDING' | 'FAILED' | 'AUTHORIZED' | 'REFUNDED' | null;
   payment_method?: string | null;
   payment_settled_at?: string | null;
+  order_type?: 'DINE_IN' | 'PRE_BOOK_DINE_IN' | 'TAKEAWAY';
+  scheduled_for?: string | null;
+  guest_count?: number | null;
+  paid_at?: string | null;
+  main_course_served_at?: string | null;
+  serve_later_prompt_sent_at?: string | null;
   items: Array<{
     id: string;
     name_snapshot: string;
@@ -191,6 +207,12 @@ interface TableOrderRecord {
     created_at?: string;
     target_table_id?: string | null;
     target_table_number?: string | null;
+    course_sequence?: number;
+    prep_time_minutes?: number;
+    target_fire_at?: string | null;
+    hold_status?: 'ACTIVE' | 'SCHEDULED_WAIT' | 'SERVE_LATER_HOLD' | 'RELEASED';
+    is_combo_item?: boolean;
+    combo_name?: string | null;
     modifiers?: Array<{
       modifier_id?: string;
       name: string;
@@ -226,6 +248,15 @@ interface FlattenedPlateItem {
   rawNotes?: string;
   isOnHold?: boolean;
   itemStatus?: string;
+  courseSequence?: number;
+  prepTimeMinutes?: number;
+  targetFireAt?: string | null;
+  holdStatus?: 'ACTIVE' | 'SCHEDULED_WAIT' | 'SERVE_LATER_HOLD' | 'RELEASED';
+  isScheduledWait?: boolean;
+  isComboItem?: boolean;
+  comboName?: string | null;
+  orderType?: string;
+  scheduledFor?: string | null;
 }
 
 function formatOrderDateTime(iso?: string | null): string {
@@ -604,493 +635,6 @@ const getComboPlatePortionDelta = (
   }
 };
 
-// Curated 10% Discounted Chef's Value Combos
-const COMBO_OFFERS: ComboOffer[] = [
-  {
-    id: 'cb000000-0000-4000-8000-000000000001',
-    name: 'Solo Executive Biryani Box',
-    tag: '⚡ SOLO LUNCH',
-    badge: '10% OFF · SAVE ₹61',
-    comboPricePaise: 56900,
-    originalPricePaise: 63000,
-    savingsPaise: 6100,
-    discountPercent: 10,
-    vegType: 'NON_VEG',
-    prepTimeMinutes: 15,
-    rating: 4.9,
-    imageUrl: 'https://images.unsplash.com/photo-1563379091339-03b21ab4a4f8?auto=format&fit=crop&w=600&q=80',
-    description: '1× Chicken Dum Biryani, 1× Burani Garlic Raita & Salan, 1× Masala Chaas, and 1× Warm Gulab Jamun.',
-    components: [
-      { id: 'c1-biryani', name: 'Hyderabadi Chicken Dum Biryani', categoryType: 'RICE', includedQty: 1, extraPlatePricePaise: 26000, defaultPortion: 'FULL', allowPortionSwitch: true, fullPricePaise: 32000, halfPricePaise: 20000, modifierId: 'dd000000-0000-4000-8000-000000000011', options: ['Hyderabadi Chicken Dum Biryani', 'Royal Veg Dum Biryani'], spiceChoice: true },
-      { id: 'c1-raita', name: 'Burani Garlic Raita & Mirchi Salan', categoryType: 'MAIN', includedQty: 1, extraPlatePricePaise: 4000 },
-      { id: 'c1-drink', name: 'Chilled Masala Chaas', categoryType: 'BEVERAGE', includedQty: 1, extraPlatePricePaise: 7900, modifierId: 'dd000000-0000-4000-8000-000000000018', options: ['Masala Chaas', 'Fresh Lime Soda', 'Filter Coffee'] },
-      { id: 'c1-sweet', name: 'Warm Gulab Jamun (1 pc)', categoryType: 'DESSERT', includedQty: 1, extraPlatePricePaise: 6000, modifierId: 'dd000000-0000-4000-8000-000000000019' },
-    ],
-  },
-  {
-    id: 'cb000000-0000-4000-8000-000000000002',
-    name: 'Delhi Highway Veg Thali Combo',
-    tag: '🌿 PURE VEG SPECIAL',
-    badge: '10% OFF · SAVE ₹91',
-    comboPricePaise: 84900,
-    originalPricePaise: 94000,
-    savingsPaise: 9100,
-    discountPercent: 10,
-    vegType: 'VEG',
-    prepTimeMinutes: 15,
-    rating: 4.8,
-    imageUrl: 'https://images.unsplash.com/photo-1546833999-b9f581a1996d?auto=format&fit=crop&w=600&q=80',
-    description: '1× Dal Makhani (slow-cooked 24 hrs), 1× Paneer Butter Masala, 2× Butter Naan, and 1× Masala Chaas.',
-    components: [
-      { id: 'c2-dal', name: 'Dal Makhani Bukhara', categoryType: 'MAIN', includedQty: 1, extraPlatePricePaise: 26000, defaultPortion: 'HALF', allowPortionSwitch: true, fullPricePaise: 29000, halfPricePaise: 18000, modifierId: 'dd000000-0000-4000-8000-000000000012' },
-      { id: 'c2-paneer', name: 'Paneer Butter Masala', categoryType: 'MAIN', includedQty: 1, extraPlatePricePaise: 31000, defaultPortion: 'HALF', allowPortionSwitch: true, fullPricePaise: 34000, halfPricePaise: 21000, modifierId: 'dd000000-0000-4000-8000-000000000013', spiceChoice: true },
-      { id: 'c2-bread', name: 'Clay Oven Butter Naan', categoryType: 'BREAD', includedQty: 2, extraPlatePricePaise: 6000, modifierId: 'dd000000-0000-4000-8000-000000000017', options: ['Butter Naan', 'Garlic Naan (+₹20)', 'Tandoori Roti'] },
-      { id: 'c2-drink', name: 'Chilled Masala Chaas', categoryType: 'BEVERAGE', includedQty: 1, extraPlatePricePaise: 7900, modifierId: 'dd000000-0000-4000-8000-000000000018', options: ['Masala Chaas', 'Fresh Lime Soda', 'Mango Lassi (+₹30)'] },
-    ],
-  },
-  {
-    id: 'cb000000-0000-4000-8000-000000000003',
-    name: 'Classic North Indian Curry Duo (Couple Feast)',
-    tag: '❤️ COUPLE FEAST (2 PAX)',
-    badge: '10% OFF · SAVE ₹131',
-    comboPricePaise: 116900,
-    originalPricePaise: 130000,
-    savingsPaise: 13100,
-    discountPercent: 10,
-    vegType: 'NON_VEG',
-    prepTimeMinutes: 20,
-    rating: 4.9,
-    imageUrl: 'https://images.unsplash.com/photo-1588166524941-3bf61a9c41db?auto=format&fit=crop&w=600&q=80',
-    description: '1× Velvety Butter Chicken, 1× Dal Makhani, 2× Butter Naan, 2× Refreshing Beverages, and 2× Warm Gulab Jamuns.',
-    components: [
-      { id: 'c3-chicken', name: 'Butter Chicken Velvety Gravy', categoryType: 'MAIN', includedQty: 1, extraPlatePricePaise: 37000, defaultPortion: 'FULL', allowPortionSwitch: true, fullPricePaise: 42000, halfPricePaise: 26000, modifierId: 'dd000000-0000-4000-8000-000000000014', spiceChoice: true },
-      { id: 'c3-dal', name: 'Dal Makhani Bukhara', categoryType: 'MAIN', includedQty: 1, extraPlatePricePaise: 26000, defaultPortion: 'FULL', allowPortionSwitch: true, fullPricePaise: 29000, halfPricePaise: 18000, modifierId: 'dd000000-0000-4000-8000-000000000012' },
-      { id: 'c3-bread', name: 'Tandoori Butter Naan', categoryType: 'BREAD', includedQty: 2, extraPlatePricePaise: 6000, modifierId: 'dd000000-0000-4000-8000-000000000017', options: ['Butter Naan', 'Garlic Naan (+₹20)'] },
-      { id: 'c3-drinks', name: 'Refreshing Beverages (2x)', categoryType: 'BEVERAGE', includedQty: 2, extraPlatePricePaise: 7900, modifierId: 'dd000000-0000-4000-8000-000000000018', options: ['Masala Chaas', 'Fresh Lime Soda', 'Filter Coffee'] },
-      { id: 'c3-sweets', name: 'Warm Gulab Jamun (2 pcs)', categoryType: 'DESSERT', includedQty: 1, extraPlatePricePaise: 12000, modifierId: 'dd000000-0000-4000-8000-000000000019' },
-    ],
-  },
-  {
-    id: 'cb000000-0000-4000-8000-000000000004',
-    name: 'Royal Nawabi Biryani Feast (2-3 Pax)',
-    tag: '👑 BIRYANI LOVERS (2-3 PAX)',
-    badge: '10% OFF · SAVE ₹161',
-    comboPricePaise: 141900,
-    originalPricePaise: 158000,
-    savingsPaise: 16100,
-    discountPercent: 10,
-    vegType: 'NON_VEG',
-    prepTimeMinutes: 25,
-    rating: 4.9,
-    imageUrl: 'https://images.unsplash.com/photo-1633945274405-b6c8069047b0?auto=format&fit=crop&w=600&q=80',
-    description: '1× Chicken Dum Biryani, 1× Awadhi Mutton Biryani, 1× Chicken Tikka starter, 2× Burani Raitas & Salan, and 2× Masala Chaas.',
-    components: [
-      { id: 'c4-cbiryani', name: 'Hyderabadi Chicken Dum Biryani', categoryType: 'RICE', includedQty: 1, extraPlatePricePaise: 34000, defaultPortion: 'FULL', allowPortionSwitch: true, fullPricePaise: 32000, halfPricePaise: 20000, modifierId: 'dd000000-0000-4000-8000-000000000011', spiceChoice: true },
-      { id: 'c4-mbiryani', name: 'Awadhi Gosht / Mutton Biryani', categoryType: 'RICE', includedQty: 1, extraPlatePricePaise: 42000, defaultPortion: 'FULL', allowPortionSwitch: true, fullPricePaise: 46000, halfPricePaise: 29000, modifierId: 'dd000000-0000-4000-8000-000000000015', spiceChoice: true },
-      { id: 'c4-starter', name: 'Tandoori Chicken Tikka starter', categoryType: 'STARTER', includedQty: 1, extraPlatePricePaise: 31000, defaultPortion: 'HALF', allowPortionSwitch: true, fullPricePaise: 35000, halfPricePaise: 22000, modifierId: 'dd000000-0000-4000-8000-000000000016', spiceChoice: true },
-      { id: 'c4-raita', name: 'Burani Garlic Raita & Double Salan', categoryType: 'MAIN', includedQty: 2, extraPlatePricePaise: 4000 },
-      { id: 'c4-drinks', name: 'Masala Chaas (2x)', categoryType: 'BEVERAGE', includedQty: 2, extraPlatePricePaise: 7900, modifierId: 'dd000000-0000-4000-8000-000000000018', options: ['Masala Chaas', 'Fresh Lime Soda', 'Filter Coffee'] },
-    ],
-  },
-  {
-    id: 'cb000000-0000-4000-8000-000000000005',
-    name: 'Shahi Family Grand Feast (4-5 Pax)',
-    tag: '👨‍👩‍👧‍👦 FAMILY FEAST (4-5 PAX)',
-    badge: '10% OFF · SAVE ₹311',
-    comboPricePaise: 278900,
-    originalPricePaise: 310000,
-    savingsPaise: 31100,
-    discountPercent: 10,
-    vegType: 'NON_VEG',
-    prepTimeMinutes: 25,
-    rating: 4.9,
-    imageUrl: 'https://images.unsplash.com/photo-1555939594-58d7cb561ad1?auto=format&fit=crop&w=600&q=80',
-    description: '1× Paneer Tikka, 1× Chicken Tikka, 1× Butter Chicken, 1× Dal Makhani, 1× Chicken Biryani, 4× Butter Naan, 4× Drinks, and 4× Sweets.',
-    components: [
-      { id: 'c5-starters', name: 'Tandoori Starters (Paneer & Chicken Tikka)', categoryType: 'STARTER', includedQty: 2, extraPlatePricePaise: 28000, defaultPortion: 'FULL', allowPortionSwitch: true, fullPricePaise: 32000, halfPricePaise: 20000, modifierId: 'dd000000-0000-4000-8000-000000000016' },
-      { id: 'c5-curries', name: 'Royal Curries (Butter Chicken & Dal Makhani)', categoryType: 'MAIN', includedQty: 2, extraPlatePricePaise: 34000, defaultPortion: 'FULL', allowPortionSwitch: true, fullPricePaise: 42000, halfPricePaise: 26000, modifierId: 'dd000000-0000-4000-8000-000000000014' },
-      { id: 'c5-biryani', name: 'Hyderabadi Chicken Dum Biryani', categoryType: 'RICE', includedQty: 1, extraPlatePricePaise: 34000, defaultPortion: 'FULL', allowPortionSwitch: true, fullPricePaise: 32000, halfPricePaise: 20000, modifierId: 'dd000000-0000-4000-8000-000000000011' },
-      { id: 'c5-breads', name: 'Tandoori Butter Naan (4 pcs)', categoryType: 'BREAD', includedQty: 4, extraPlatePricePaise: 6000, modifierId: 'dd000000-0000-4000-8000-000000000017' },
-      { id: 'c5-drinks', name: 'Refreshing Beverages (4 drinks)', categoryType: 'BEVERAGE', includedQty: 4, extraPlatePricePaise: 7900, modifierId: 'dd000000-0000-4000-8000-000000000018' },
-      { id: 'c5-sweets', name: 'Mithai Platter (2 Gulab Jamun + 2 Rasmalai)', categoryType: 'DESSERT', includedQty: 4, extraPlatePricePaise: 6000, modifierId: 'dd000000-0000-4000-8000-000000000019' },
-    ],
-  },
-  {
-    id: 'cb000000-0000-4000-8000-000000000006',
-    name: 'Kebab & Curry Speed Lunch',
-    tag: '🍢 KEBAB & CURRY LUNCH',
-    badge: '10% OFF · SAVE ₹91',
-    comboPricePaise: 80900,
-    originalPricePaise: 90000,
-    savingsPaise: 9100,
-    discountPercent: 10,
-    vegType: 'NON_VEG',
-    prepTimeMinutes: 15,
-    rating: 4.8,
-    imageUrl: 'https://images.unsplash.com/photo-1599488615731-7e5c2823ff28?auto=format&fit=crop&w=600&q=80',
-    description: '1× Charcoal Grilled Chicken Tikka, 1× Dal Makhani, 2× Tandoori Roti, and 1× Fresh Lime Soda.',
-    components: [
-      { id: 'c6-kebab', name: 'Chicken Tikka (Clay Tandoor Char)', categoryType: 'STARTER', includedQty: 1, extraPlatePricePaise: 31000, defaultPortion: 'HALF', allowPortionSwitch: true, fullPricePaise: 35000, halfPricePaise: 22000, modifierId: 'dd000000-0000-4000-8000-000000000016', spiceChoice: true },
-      { id: 'c6-dal', name: 'Dal Makhani Bukhara', categoryType: 'MAIN', includedQty: 1, extraPlatePricePaise: 26000, defaultPortion: 'HALF', allowPortionSwitch: true, fullPricePaise: 29000, halfPricePaise: 18000, modifierId: 'dd000000-0000-4000-8000-000000000012' },
-      { id: 'c6-breads', name: 'Tandoori Roti (2 pcs)', categoryType: 'BREAD', includedQty: 2, extraPlatePricePaise: 4000, modifierId: 'dd000000-0000-4000-8000-000000000017' },
-      { id: 'c6-drink', name: 'Fresh Lime Soda', categoryType: 'BEVERAGE', includedQty: 1, extraPlatePricePaise: 7900, modifierId: 'dd000000-0000-4000-8000-000000000018', options: ['Fresh Lime Soda', 'Masala Chaas', 'Filter Coffee'] },
-    ],
-  },
-];
-
-// Pilot Menu with authentic Awadhi & Indian gastronomy + verified appetizing images
-const PILOT_MENU: MenuItem[] = [
-  // ── Combos & Feasts (First Category) ──
-  ...COMBO_OFFERS.map((c) => ({
-    id: c.id,
-    name: c.name,
-    description: c.description,
-    category: 'Combos' as const,
-    pricePaise: c.comboPricePaise,
-    dietaryTag: c.vegType,
-    spiceLevel: 'MEDIUM' as const,
-    cuisine: 'NORTH_INDIAN' as const,
-    isHealthy: false,
-    isAvailable: true,
-    rating: c.rating,
-    ordersCount: 850,
-    prepTimeMinutes: c.prepTimeMinutes,
-    imageUrl: c.imageUrl,
-  })),
-  // ── Starters ──
-  {
-    id: 'item-st-01',
-    name: 'Paneer Tikka Charcoal Char',
-    description: 'Fresh malai cottage cheese cubes marinated in Kashmiri deghi mirch, hung yogurt & yellow mustard, roasted on clay tandoor.',
-    category: 'Starters',
-    pricePaise: 28000,
-    dietaryTag: 'VEG',
-    spiceLevel: 'MEDIUM',
-    cuisine: 'NORTH_INDIAN',
-    isHealthy: false,
-    isAvailable: true,
-    rating: 4.8,
-    ordersCount: 420,
-    prepTimeMinutes: 15,
-    imageUrl: 'https://images.unsplash.com/photo-1567184109411-b28f27034344?auto=format&fit=crop&w=600&q=80',
-    modifiers: [
-      { id: 'mod-mint', name: 'Extra Mint Chutney', pricePaise: 2000 },
-      { id: 'mod-cheese', name: 'Melted Cheese Melt', pricePaise: 4000 },
-    ],
-  },
-  {
-    id: 'item-st-02',
-    name: 'Murgh Malai Kebab',
-    description: 'Tender chicken morsels infused with green cardamom, clotted cream, white pepper, and roasted cashew paste.',
-    category: 'Starters',
-    pricePaise: 34000,
-    dietaryTag: 'NON_VEG',
-    spiceLevel: 'MILD',
-    cuisine: 'NORTH_INDIAN',
-    isHealthy: false,
-    isAvailable: true,
-    rating: 4.9,
-    ordersCount: 680,
-    prepTimeMinutes: 18,
-    imageUrl: 'https://images.unsplash.com/photo-1599488615731-7e5c2823ff28?auto=format&fit=crop&w=600&q=80',
-    modifiers: [
-      { id: 'mod-garlic', name: 'Garlic Butter Brush', pricePaise: 2500 },
-      { id: 'mod-lemon', name: 'Spicy Masala Onions', pricePaise: 1500 },
-    ],
-  },
-  {
-    id: 'item-st-03',
-    name: 'Crispy Corn Salt & Pepper',
-    description: 'Golden sweet corn kernel tossed with scallions, crushed black pepper, toasted curry leaves, and bell pepper confetti.',
-    category: 'Starters',
-    pricePaise: 22000,
-    dietaryTag: 'VEG',
-    spiceLevel: 'MEDIUM',
-    cuisine: 'OTHER',
-    isHealthy: true,
-    isAvailable: true,
-    rating: 4.7,
-    ordersCount: 310,
-    prepTimeMinutes: 12,
-    imageUrl: 'https://images.unsplash.com/photo-1551782450-a2132b4ba21d?auto=format&fit=crop&w=600&q=80',
-    modifiers: [
-      { id: 'mod-lime', name: 'Extra Chaat Lime', pricePaise: 1000 },
-    ],
-  },
-  {
-    id: 'item-st-04',
-    name: 'Tandoori Jumbo Prawns',
-    description: 'Fresh coastal prawns marinated in yellow mustard, carom seeds, lime zest, and cooked over glowing charcoal.',
-    category: 'Starters',
-    pricePaise: 45000,
-    dietaryTag: 'NON_VEG',
-    spiceLevel: 'HOT',
-    cuisine: 'NORTH_INDIAN',
-    isHealthy: true,
-    isAvailable: true,
-    rating: 4.9,
-    ordersCount: 290,
-    prepTimeMinutes: 20,
-    imageUrl: 'https://images.unsplash.com/photo-1559737558-2f5a35f4523b?auto=format&fit=crop&w=600&q=80',
-    modifiers: [
-      { id: 'mod-butter', name: 'Herbed Garlic Butter', pricePaise: 3500 },
-    ],
-  },
-  {
-    id: 'item-st-05',
-    name: 'Awadhi Dahi Ke Kebab',
-    description: 'Silky melt-in-mouth hung yogurt patties stuffed with pomegranate gems, fresh mint, and mild green chili.',
-    category: 'Starters',
-    pricePaise: 27000,
-    dietaryTag: 'VEG',
-    spiceLevel: 'MILD',
-    cuisine: 'NORTH_INDIAN',
-    isHealthy: true,
-    isAvailable: true,
-    rating: 4.8,
-    ordersCount: 340,
-    prepTimeMinutes: 14,
-    imageUrl: 'https://images.unsplash.com/photo-1540420773420-3366772f4999?auto=format&fit=crop&w=600&q=80',
-  },
-
-  // ── Main Course ──
-  {
-    id: 'item-mc-01',
-    name: 'Dal Makhani Bukhara',
-    description: 'Slow-simmered black lentils cooked overnight for 18 hours with vine-ripened tomatoes and churned white butter.',
-    category: 'Main Course',
-    pricePaise: 26000,
-    dietaryTag: 'VEG',
-    spiceLevel: 'MILD',
-    cuisine: 'NORTH_INDIAN',
-    isHealthy: false,
-    isAvailable: true,
-    rating: 5.0,
-    ordersCount: 950,
-    prepTimeMinutes: 10,
-    imageUrl: 'https://images.unsplash.com/photo-1546833999-b9f581a1996d?auto=format&fit=crop&w=600&q=80',
-    modifiers: [
-      { id: 'mod-cream', name: 'Extra Clotted Cream', pricePaise: 3000 },
-    ],
-  },
-  {
-    id: 'item-mc-02',
-    name: 'Old Delhi Butter Chicken',
-    description: 'Smoked pulled chicken tikka simmered in silky tomato-fenugreek gravy finished with honey and homemade white butter.',
-    category: 'Main Course',
-    pricePaise: 38000,
-    dietaryTag: 'NON_VEG',
-    spiceLevel: 'MILD',
-    cuisine: 'NORTH_INDIAN',
-    isHealthy: false,
-    isAvailable: true,
-    rating: 4.9,
-    ordersCount: 1100,
-    prepTimeMinutes: 15,
-    imageUrl: 'https://images.unsplash.com/photo-1603894584373-5ac82b2ae398?auto=format&fit=crop&w=600&q=80',
-    modifiers: [
-      { id: 'mod-boneless', name: '100% Boneless Cuts', pricePaise: 4000 },
-      { id: 'mod-gravy', name: 'Extra Velvet Gravy', pricePaise: 5000 },
-    ],
-  },
-  {
-    id: 'item-mc-03',
-    name: 'Paneer Butter Masala',
-    description: 'Diced malai paneer simmered in velvety makhani gravy enriched with cashew paste and fragrant Kasuri methi.',
-    category: 'Main Course',
-    pricePaise: 31000,
-    dietaryTag: 'VEG',
-    spiceLevel: 'MEDIUM',
-    cuisine: 'NORTH_INDIAN',
-    isHealthy: false,
-    isAvailable: true,
-    rating: 4.8,
-    ordersCount: 520,
-    prepTimeMinutes: 15,
-    imageUrl: 'https://images.unsplash.com/photo-1631452180519-c014fe946bc7?auto=format&fit=crop&w=600&q=80',
-  },
-  {
-    id: 'item-mc-04',
-    name: 'Mutton Rogan Josh',
-    description: 'Tender baby mutton shanks braised in aromatic Kashmiri chili, cockscomb flower extract, and dried ginger.',
-    category: 'Main Course',
-    pricePaise: 44000,
-    dietaryTag: 'NON_VEG',
-    spiceLevel: 'HOT',
-    cuisine: 'NORTH_INDIAN',
-    isHealthy: false,
-    isAvailable: true,
-    rating: 4.9,
-    ordersCount: 480,
-    prepTimeMinutes: 20,
-    imageUrl: 'https://images.unsplash.com/photo-1589302168068-964664d93dc0?auto=format&fit=crop&w=600&q=80',
-  },
-  {
-    id: 'item-mc-05',
-    name: 'Chettinad Pepper Curry',
-    description: 'Robust South Indian style spiced curry freshly ground with black peppercorns, star anise, curry leaves & coconut.',
-    category: 'Main Course',
-    pricePaise: 36000,
-    dietaryTag: 'NON_VEG',
-    spiceLevel: 'HOT',
-    cuisine: 'SOUTH_INDIAN',
-    isHealthy: true,
-    isAvailable: true,
-    rating: 4.8,
-    ordersCount: 290,
-    prepTimeMinutes: 16,
-    imageUrl: 'https://images.unsplash.com/photo-1610057099443-fde8c4d50f91?auto=format&fit=crop&w=600&q=80',
-  },
-
-  // ── Biryani & Rice ──
-  {
-    id: 'item-br-01',
-    name: 'Dum Biryani Hyderabadi',
-    description: 'Fragrant aged Basmati rice layered with spiced marinated meat, saffron milk, and caramelized shallots cooked in sealed clay handi.',
-    category: 'Biryani & Rice',
-    pricePaise: 39000,
-    dietaryTag: 'NON_VEG',
-    spiceLevel: 'HOT',
-    cuisine: 'SOUTH_INDIAN',
-    isHealthy: false,
-    isAvailable: true,
-    rating: 5.0,
-    ordersCount: 1250,
-    prepTimeMinutes: 18,
-    imageUrl: 'https://images.unsplash.com/photo-1563379091339-03b21ab4a4f8?auto=format&fit=crop&w=600&q=80',
-    modifiers: [
-      { id: 'mod-salan', name: 'Extra Mirchi Ka Salan', pricePaise: 3000 },
-      { id: 'mod-raita', name: 'Burani Garlic Raita', pricePaise: 4000 },
-    ],
-  },
-  {
-    id: 'item-br-02',
-    name: 'Subz Nizami Biryani',
-    description: 'Garden vegetables, baby potatoes, and paneer cubes cooked in dum with fresh mint, coriander, and organic rose water.',
-    category: 'Biryani & Rice',
-    pricePaise: 29000,
-    dietaryTag: 'VEG',
-    spiceLevel: 'MEDIUM',
-    cuisine: 'SOUTH_INDIAN',
-    isHealthy: true,
-    isAvailable: true,
-    rating: 4.7,
-    ordersCount: 460,
-    prepTimeMinutes: 15,
-    imageUrl: 'https://images.unsplash.com/photo-1642821373181-696a54913e9a?auto=format&fit=crop&w=600&q=80',
-    modifiers: [
-      { id: 'mod-veg-raita', name: 'Cucumber Mint Raita', pricePaise: 3000 },
-    ],
-  },
-
-  // ── Breads ──
-  {
-    id: 'item-bd-01',
-    name: 'Butter Garlic Naan',
-    description: 'Soft tandoor-baked leavened bread generously topped with minced garlic, fresh cilantro, and melted dairy butter.',
-    category: 'Breads',
-    pricePaise: 8000,
-    dietaryTag: 'VEG',
-    spiceLevel: 'NONE',
-    cuisine: 'NORTH_INDIAN',
-    isHealthy: false,
-    isAvailable: true,
-    rating: 4.9,
-    ordersCount: 880,
-    prepTimeMinutes: 8,
-    imageUrl: 'https://images.unsplash.com/photo-1601050690597-df0568f70950?auto=format&fit=crop&w=600&q=80',
-  },
-  {
-    id: 'item-bd-02',
-    name: 'Cheese & Chili Naan',
-    description: 'Crisp artisan naan stuffed with sharp cheddar, mozzarella, and green chilies, toasted to golden blistered perfection.',
-    category: 'Breads',
-    pricePaise: 12000,
-    dietaryTag: 'VEG',
-    spiceLevel: 'MEDIUM',
-    cuisine: 'NORTH_INDIAN',
-    isHealthy: false,
-    isAvailable: true,
-    rating: 4.8,
-    ordersCount: 540,
-    prepTimeMinutes: 10,
-    imageUrl: 'https://images.unsplash.com/photo-1565557623262-b51c2513a641?auto=format&fit=crop&w=600&q=80',
-  },
-
-  // ── Desserts ──
-  {
-    id: 'item-ds-01',
-    name: 'Gulab Jamun with Kesar Rabri',
-    description: 'Warm fried milk dumplings served on a bed of chilled saffron-infused reduced milk and toasted pistachios.',
-    category: 'Desserts',
-    pricePaise: 14000,
-    dietaryTag: 'VEG',
-    spiceLevel: 'NONE',
-    cuisine: 'NORTH_INDIAN',
-    isHealthy: false,
-    isAvailable: true,
-    rating: 5.0,
-    ordersCount: 790,
-    prepTimeMinutes: 5,
-    imageUrl: 'https://images.unsplash.com/photo-1589119908995-c6837fa14848?auto=format&fit=crop&w=600&q=80',
-    modifiers: [
-      { id: 'mod-rabri', name: 'Extra Kesar Rabri', pricePaise: 4000 },
-      { id: 'mod-nuts', name: 'Extra Roasted Pistachios', pricePaise: 3000 },
-    ],
-  },
-
-  // ── Beverages ──
-  {
-    id: 'item-bv-01',
-    name: 'Alphonso Mango Lassi',
-    description: 'Thick churned artisanal yogurt blended with pure Ratnagiri Alphonso mango pulp and green cardamom.',
-    category: 'Beverages',
-    pricePaise: 12000,
-    dietaryTag: 'VEG',
-    spiceLevel: 'NONE',
-    cuisine: 'NORTH_INDIAN',
-    isHealthy: true,
-    isAvailable: true,
-    rating: 4.9,
-    ordersCount: 620,
-    prepTimeMinutes: 5,
-    imageUrl: 'https://images.unsplash.com/photo-1543339308-43e59d6b73a6?auto=format&fit=crop&w=600&q=80',
-    modifiers: [
-      { id: 'mod-mango-float', name: 'Fresh Mango Pulp Float', pricePaise: 3000 },
-      { id: 'mod-malai', name: 'Dollop of Clotted Malai', pricePaise: 2500 },
-    ],
-  },
-  {
-    id: 'item-bv-02',
-    name: 'Fresh Mint Lime Soda',
-    description: 'Sparkling mineral water with freshly squeezed key limes, rock salt, crushed mint, and roasted cumin.',
-    category: 'Beverages',
-    pricePaise: 9000,
-    dietaryTag: 'VEG',
-    spiceLevel: 'NONE',
-    cuisine: 'OTHER',
-    isHealthy: true,
-    isAvailable: true,
-    rating: 4.7,
-    ordersCount: 450,
-    prepTimeMinutes: 4,
-    imageUrl: 'https://images.unsplash.com/photo-1513558161293-cdaf765ed2fd?auto=format&fit=crop&w=600&q=80',
-    modifiers: [
-      { id: 'mod-jeera', name: 'Roasted Cumin & Black Salt', pricePaise: 1500 },
-    ],
-  },
-];
-
-const CATEGORIES_LIST = [
-  'Combos',
-  'Starters',
-  'Main Course',
-  'Biryani & Rice',
-  'Breads',
-  'Desserts',
-  'Beverages',
-] as const;
-
 // Category-intelligent kitchen instruction & preparation presets
 const CATEGORY_COOK_NOTE_CHIPS: Record<string, string[]> = {
   Beverages: [
@@ -1360,149 +904,6 @@ interface HeroSlideItem {
   btnText: string;
 }
 
-const HERO_SLIDES: HeroSlideItem[] = [
-  {
-    tag: 'ROYAL DUM BIRYANI',
-    title: 'Hyderabadi Chicken Dum Biryani',
-    subtitle: 'Fragrant aged basmati rice slow dum-cooked with royal saffron, roasted spices & tender chicken.',
-    img: 'https://images.unsplash.com/photo-1563379091339-03b21ab4a4f8?auto=format&fit=crop&w=1200&q=80',
-    categoryTarget: 'Biryani & Rice',
-    dishTarget: 'biryani',
-    btnText: 'Explore Biryani & Rice →',
-  },
-  {
-    tag: 'TANDOORI & CURRIES',
-    title: 'Old Delhi Butter Chicken',
-    subtitle: 'Smoky charcoal-roasted tandoori chicken simmered in rich velvety creamy tomato makhani gravy.',
-    img: 'https://images.unsplash.com/photo-1603894584373-5ac82b2ae398?auto=format&fit=crop&w=1200&q=80',
-    categoryTarget: 'Main Course',
-    dishTarget: 'butter chicken',
-    btnText: 'View Main Course →',
-  },
-  {
-    tag: "CHEF'S SPECIALTY",
-    title: 'Paneer Tikka Charcoal Char',
-    subtitle: 'Fresh cottage cheese cubes marinated in spiced hung curd & roasted to perfection over live coals.',
-    img: 'https://images.unsplash.com/photo-1567184109411-b28f27034344?auto=format&fit=crop&w=1200&q=80',
-    categoryTarget: 'Starters',
-    dishTarget: 'paneer tikka',
-    btnText: 'Explore Starters →',
-  },
-  {
-    tag: 'FESTIVE OFFER',
-    title: 'Flat 15% OFF Dining',
-    subtitle: 'Enjoy 15% instant savings on your dining feast today for orders above ₹500 with code ROYAL15.',
-    img: 'https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?auto=format&fit=crop&w=1200&q=80',
-    couponCode: 'ROYAL15',
-    btnText: 'Apply ROYAL15 Coupon',
-  },
-];
-
-interface AvailableCoupon {
-  code: string;
-  tag: string;
-  title: string;
-  description: string;
-  minOrderPaise: number;
-  type: 'PERCENT' | 'FIXED';
-  percent?: number;
-  fixedPaise?: number;
-}
-
-const AVAILABLE_COUPONS: AvailableCoupon[] = [
-  {
-    code: 'ROYAL15',
-    tag: 'POPULAR · 15% OFF',
-    title: 'Flat 15% Off Your Feast',
-    description: 'Get 15% instant discount on dine-in orders above ₹500.',
-    minOrderPaise: 50000,
-    type: 'PERCENT',
-    percent: 15,
-  },
-  {
-    code: 'DINEFIRST',
-    tag: 'FIRST DINE-IN',
-    title: '₹100 Welcome Discount',
-    description: 'Welcome gift of ₹100 off on dining bills above ₹300.',
-    minOrderPaise: 30000,
-    type: 'FIXED',
-    fixedPaise: 10000,
-  },
-  {
-    code: 'AWADHI50',
-    tag: 'BIRYANI SPECIAL',
-    title: '₹50 Biryani Delight',
-    description: 'Flat ₹50 savings on any authentic handi biryani or feast above ₹400.',
-    minOrderPaise: 40000,
-    type: 'FIXED',
-    fixedPaise: 5000,
-  },
-  {
-    code: 'FEAST20',
-    tag: 'GRAND GATHERINGS',
-    title: '20% Mega Savings',
-    description: 'Enjoy 20% savings for family gatherings and table bills above ₹1,500.',
-    minOrderPaise: 150000,
-    type: 'PERCENT',
-    percent: 20,
-  },
-  {
-    code: 'ROYAL200',
-    tag: 'CHEF VIP',
-    title: 'Flat ₹200 Off Royal Banquet',
-    description: 'Flat ₹200 deduction on lavish banquet dining above ₹2,000.',
-    minOrderPaise: 200000,
-    type: 'FIXED',
-    fixedPaise: 20000,
-  },
-];
-
-function computeCouponDiscountPaise(coupon: AvailableCoupon, subtotalPaise: number): number {
-  if (subtotalPaise < coupon.minOrderPaise) return 0;
-  if (coupon.type === 'PERCENT' && coupon.percent) {
-    return Math.round((subtotalPaise * coupon.percent) / 100);
-  }
-  if (coupon.type === 'FIXED' && coupon.fixedPaise) {
-    return Math.min(coupon.fixedPaise, subtotalPaise);
-  }
-  return 0;
-}
-
-const OFFERS_DATA = [
-  {
-    id: 'off-01',
-    code: 'ROYAL15',
-    title: 'Flat 15% OFF',
-    discountDesc: 'On orders above ₹500',
-    validity: 'Valid today on dine-in',
-    discountPaise: 15, // percent
-  },
-  {
-    id: 'off-02',
-    code: 'CHEFGIFT',
-    title: 'Free Rabri Jamun',
-    discountDesc: 'On orders above ₹1,000',
-    validity: 'Complimentary dessert',
-    discountPaise: 0,
-  },
-  {
-    id: 'off-03',
-    code: 'DINEFIRST',
-    title: '₹100 Instant Off',
-    discountDesc: 'Welcome offer for new diners',
-    validity: 'First dine-in order',
-    discountPaise: 10000,
-  },
-  {
-    id: 'off-04',
-    code: 'AWADHI50',
-    title: '₹50 Off on Biryani',
-    discountDesc: 'On any authentic handi biryani',
-    validity: 'Valid till midnight',
-    discountPaise: 5000,
-  },
-];
-
 // ============================================================================
 // Main Component
 // ============================================================================
@@ -1555,7 +956,7 @@ export default function CustomerDineInPage() {
   const [wishlist, setWishlist] = useState<Set<string>>(new Set());
 
   // Menu Navigation & Search
-  const [activeCategory, setActiveCategory] = useState<string>('Starters');
+  const [activeCategory, setActiveCategory] = useState<string>('Combos');
   const [searchQuery, setSearchQuery] = useState('');
   const [dietaryFilter, setDietaryFilter] = useState<'ALL' | 'VEG' | 'NON_VEG'>('ALL');
   const [sortOption, setSortOption] = useState<'POPULAR' | 'PRICE_ASC' | 'PRICE_DESC' | 'RATING' | 'PREP_TIME'>('POPULAR');
@@ -1568,7 +969,123 @@ export default function CustomerDineInPage() {
   const [filterAvailableOnly, setFilterAvailableOnly] = useState(false);
 
   // Menu items list
-  const [menuItems, setMenuItems] = useState<MenuItem[]>(PILOT_MENU);
+  const [menuItems, setMenuItems] = useState<MenuItem[]>([]);
+  const [categories, setCategories] = useState<string[]>([]);
+  const [availableCoupons, setAvailableCoupons] = useState<AvailableCoupon[]>([]);
+
+  // Dynamically derived hero slides from live DB coupons and menu items
+  const heroSlides = useMemo<HeroSlideItem[]>(() => {
+    const slides: HeroSlideItem[] = [];
+    if (availableCoupons.length > 0) {
+      const topCoupon = availableCoupons[0]!;
+      slides.push({
+        tag: 'SPECIAL OFFER',
+        title: topCoupon.title || `${topCoupon.code} Special`,
+        subtitle: topCoupon.description || `Use code ${topCoupon.code}`,
+        img: 'https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?auto=format&fit=crop&w=1200&q=80',
+        couponCode: topCoupon.code,
+        btnText: `Apply ${topCoupon.code} →`,
+      });
+    }
+    const featured = menuItems.filter((m) => m.isAvailable && m.imageUrl).slice(0, 3);
+    for (const dish of featured) {
+      slides.push({
+        tag: dish.category.toUpperCase(),
+        title: dish.name,
+        subtitle: dish.description || `${dish.name} - freshly prepared`,
+        img: dish.imageUrl,
+        categoryTarget: dish.category,
+        dishTarget: dish.name.toLowerCase(),
+        btnText: `Explore ${dish.category} →`,
+      });
+    }
+    return slides;
+  }, [availableCoupons, menuItems]);
+
+  // Dynamically derived combo offers from database menu items
+  const combos: ComboOffer[] = useMemo(() => {
+    return menuItems
+      .filter((m) => m.category === 'Combos')
+      .map((m) => ({
+        id: m.id,
+        name: m.name,
+        tag: m.dietaryTag === 'VEG' ? '🌿 PURE VEG SPECIAL' : '⚡ CHEF FEAST',
+        badge: 'SPECIAL VALUE',
+        comboPricePaise: m.pricePaise,
+        originalPricePaise: Math.round(m.pricePaise * 1.1),
+        savingsPaise: Math.round(m.pricePaise * 0.1),
+        discountPercent: 10,
+        vegType: m.dietaryTag === 'VEG' ? 'VEG' : 'NON_VEG',
+        prepTimeMinutes: m.prepTimeMinutes || 15,
+        rating: m.rating || 4.8,
+        imageUrl: m.imageUrl,
+        description: m.description,
+        components: [],
+      }));
+  }, [menuItems]);
+
+  // Dynamically derived promotional offers from database coupons
+  const offersData = useMemo(() => {
+    return availableCoupons.map((c) => ({
+      id: c.code,
+      code: c.code,
+      title: c.tag || c.code,
+      discountDesc: `On orders above ₹${Math.ceil(c.minOrderPaise / 100)}`,
+      validity: 'Valid today on dine-in',
+      discountPaise: c.fixedPaise || (c.percent ? c.percent : 0),
+    }));
+  }, [availableCoupons]);
+
+  const categoriesToDisplay = useMemo(() => {
+    const raw = categories.length > 0 ? categories : (DEFAULT_CATEGORIES as unknown as string[]);
+    const hasCombos = raw.some((c) => c.toLowerCase() === 'combos');
+    if (!hasCombos) return raw;
+    const withoutCombos = raw.filter((c) => c.toLowerCase() !== 'combos');
+    const combosName = raw.find((c) => c.toLowerCase() === 'combos') || 'Combos';
+    return [combosName, ...withoutCombos];
+  }, [categories]);
+
+  const fetchLiveCoupons = useCallback(async (outletId?: string, orgId?: string) => {
+    try {
+      const qs = new URLSearchParams();
+      if (outletId) qs.set('outlet_id', outletId);
+      if (orgId) qs.set('org_id', orgId);
+      const url = qs.toString() ? `/api/v1/public/coupons?${qs.toString()}` : '/api/v1/public/coupons';
+      const res = await fetch(url);
+      if (!res.ok) return;
+      const data = await res.json();
+      if (Array.isArray(data)) {
+        const mapped: AvailableCoupon[] = data.map((c: any) => {
+          const type = (c.type || 'FLAT').toUpperCase() as 'PERCENT' | 'PERCENTAGE' | 'FIXED' | 'FLAT';
+          const isPercent = type === 'PERCENT' || type === 'PERCENTAGE';
+          const valNum = Number(c.discountValue ?? c.discount_value ?? c.value ?? 0);
+          const minPaise = Number(c.minOrderPaise ?? c.min_order_paise ?? 0);
+          const maxPaise = c.maxDiscountPaise ?? c.max_discount_paise ? Number(c.maxDiscountPaise ?? c.max_discount_paise) : undefined;
+          return {
+            id: c.id,
+            code: c.code,
+            type,
+            value: valNum,
+            discountValue: valNum,
+            percent: isPercent ? (valNum > 100 ? Math.round(valNum / 100) : valNum) : undefined,
+            fixedPaise: !isPercent ? valNum : undefined,
+            discountPaise: !isPercent ? valNum : 0,
+            maxDiscountPaise: maxPaise,
+            minOrderPaise: minPaise,
+            tag: c.tag || (isPercent ? `${Math.round(valNum / 100)}% OFF` : `₹${Math.round(valNum / 100)} OFF`),
+            title: c.title || (isPercent ? `Flat ${Math.round(valNum / 100)}% Off Your Feast` : `₹${Math.round(valNum / 100)} Instant Savings`),
+            description: c.description || (minPaise > 0 ? `Valid on orders above ₹${Math.ceil(minPaise / 100)}` : 'No minimum order required'),
+            validity: c.validity || 'Valid today on dine-in',
+            isActive: c.isActive ?? c.is_active ?? true,
+          };
+        });
+        setAvailableCoupons(mapped);
+        useOrderStore.getState().setCoupons(mapped);
+      }
+    } catch {
+      // Keep previous coupons
+    }
+  }, []);
 
   // Cart & Line Items (with robust localStorage persistence and SSR hydration safety via Zustand)
   const [isMounted, setIsMounted] = useState(false);
@@ -1652,25 +1169,18 @@ export default function CustomerDineInPage() {
   });
   const [expandedPlateKeys, setExpandedPlateKeys] = useState<Record<string, boolean>>({});
 
+  // Clean released holds cache when session changes
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.removeItem('dineflow_released_holds');
+      } catch {}
+    }
+    setReleasedHoldPlateKeys({});
+  }, [activeSessionId]);
+
   const handleReleaseHold = async (plateKeys: string[], itemName?: string) => {
-    // 1. Optimistically update state & persist to localStorage immediately
-    setReleasedHoldPlateKeys((prev) => {
-      const next = { ...prev };
-      plateKeys.forEach((k) => {
-        next[k] = true;
-      });
-      if (typeof window !== 'undefined') {
-        try {
-          localStorage.setItem('dineflow_released_holds', JSON.stringify(next));
-        } catch {}
-      }
-      return next;
-    });
-
-    setToastMessage(`🍳 Sent to kitchen! Chef will start preparing ${itemName || 'your item'} now.`);
-    setTimeout(() => setToastMessage(null), 4000);
-
-    // 2. Persist to PostgreSQL database via backend API for each plate's item
+    // 1. Persist to PostgreSQL database via backend API for each plate's item
     const pairs = new Set<string>();
     plateKeys.forEach((k) => {
       // Plate key format: `${ord.id}-${it.id}-${pIdx}`
@@ -1682,29 +1192,137 @@ export default function CustomerDineInPage() {
       }
     });
 
+    let anySuccess = false;
     for (const pair of pairs) {
       const [orderId, itemId] = pair.split('::');
       if (orderId && itemId) {
         try {
-          await customerApiFetch(
+          const res = await customerApiFetch(
             `/api/v1/customer/orders/${encodeURIComponent(orderId)}/items/${encodeURIComponent(itemId)}/release-hold`,
             {
-              method: 'PATCH',
+              method: 'POST',
               headers: { 'Content-Type': 'application/json' },
             },
             { preferToken: loadCustomerAuth() ? 'customer' : 'guest' },
           );
+          if (res.ok) {
+            anySuccess = true;
+          } else {
+            const errData = await res.json().catch(() => ({}));
+            setToastMessage(errData.detail || errData.message || 'Could not fire dish to kitchen');
+            setTimeout(() => setToastMessage(null), 4000);
+          }
         } catch (err) {
           console.error('Failed to notify backend of hold release:', err);
+          setToastMessage('Network error while firing dish to kitchen. Please retry.');
+          setTimeout(() => setToastMessage(null), 4000);
         }
       }
     }
 
-    // 3. Re-sync live session orders from backend
-    if (activeSessionId) {
-      void fetchSessionOrders(activeSessionId);
+    if (anySuccess) {
+      setReleasedHoldPlateKeys((prev) => {
+        const next = { ...prev };
+        plateKeys.forEach((k) => {
+          next[k] = true;
+        });
+        if (typeof window !== 'undefined') {
+          try {
+            localStorage.setItem('dineflow_released_holds', JSON.stringify(next));
+          } catch {}
+        }
+        return next;
+      });
+
+      setToastMessage(`🍳 Sent to kitchen! Chef will start preparing ${itemName || 'your item'} now.`);
+      setTimeout(() => setToastMessage(null), 4000);
+
+      // Re-sync live session orders from backend
+      if (activeSessionId) {
+        await fetchSessionOrders(activeSessionId);
+      }
     }
   };
+
+  // ── Smart Kitchen Serve-Later Auto-Prompt State & Actions ──
+  const serveLaterDismissedUntil = useOrderStore((s) => s.serveLaterDismissedUntil);
+  const setServeLaterDismissedUntil = useOrderStore((s) => s.setServeLaterDismissedUntil);
+  const serveLaterPrompt = useOrderStore((s) => s.serveLaterPrompt);
+  const setServeLaterPrompt = useOrderStore((s) => s.setServeLaterPrompt);
+  const isBookingModalOpen = useOrderStore((s) => s.isBookingModalOpen);
+  const setIsBookingModalOpen = useOrderStore((s) => s.setIsBookingModalOpen);
+  const storeOrderType = useOrderStore((s) => s.orderType);
+  const setOrderType = useOrderStore((s) => s.setOrderType);
+  const [serveLaterModalDismissed, setServeLaterModalDismissed] = useState(false);
+
+  const activeServeLaterOrder = useMemo(() => {
+    if (serveLaterModalDismissed) return null;
+    if (serveLaterDismissedUntil && Date.now() < serveLaterDismissedUntil) {
+      return null;
+    }
+
+    return sessionOrders.find((ord) => {
+      if (ord.payment_status !== 'PAID') return false;
+      const hasHeldItems = ord.items.some((it) => {
+        const plateKey = `${ord.id}-${it.id}-1`;
+        const isReleased =
+          Boolean(releasedHoldPlateKeys[plateKey]) ||
+          Boolean(it.notes?.includes('[RELEASED_TO_KITCHEN]')) ||
+          it.hold_status === 'RELEASED';
+        return (
+          !isReleased &&
+          (it.hold_status === 'SERVE_LATER_HOLD' ||
+            (!it.hold_status &&
+              isDessertOrPostMealItem(it.name_snapshot, it.notes) &&
+              it.status !== 'SERVED' &&
+              it.status !== 'CANCELLED'))
+        );
+      });
+      if (!hasHeldItems) return false;
+
+      // Trigger if backend marked prompt sent or main courses served >= 15m
+      if (ord.serve_later_prompt_sent_at) return true;
+      if (ord.main_course_served_at) {
+        const elapsedMs = Date.now() - new Date(ord.main_course_served_at).getTime();
+        if (elapsedMs >= 15 * 60 * 1000) return true;
+      }
+      return false;
+    }) ?? null;
+  }, [sessionOrders, serveLaterDismissedUntil, serveLaterModalDismissed, releasedHoldPlateKeys]);
+
+  const handleSnoozeServeLater = async (orderId: string, minutes: number = 10) => {
+    setServeLaterDismissedUntil(Date.now() + minutes * 60 * 1000);
+    try {
+      await customerApiFetch(
+        `/api/v1/customer/orders/${encodeURIComponent(orderId)}/serve-later/snooze`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ minutes }),
+        },
+        { preferToken: loadCustomerAuth() ? 'customer' : 'guest' },
+      );
+      showToast(`⏰ Reminding you in ${minutes} minutes. Enjoy your meal!`);
+    } catch {
+      showToast(`⏰ Snoozed for ${minutes} minutes.`);
+    }
+  };
+
+  useEffect(() => {
+    if (!activeServeLaterOrder) return;
+    const itemNames = activeServeLaterOrder.items
+      .filter(
+        (it) =>
+          it.hold_status === 'SERVE_LATER_HOLD' ||
+          (!it.hold_status && isDessertOrPostMealItem(it.name_snapshot, it.notes) && it.status !== 'SERVED' && it.status !== 'CANCELLED')
+      )
+      .map((it) => it.name_snapshot);
+    setServeLaterPrompt({
+      orderId: activeServeLaterOrder.id,
+      itemNames: itemNames.length > 0 ? itemNames : ['Desserts & Beverages'],
+      promptedAt: activeServeLaterOrder.serve_later_prompt_sent_at || new Date().toISOString(),
+    });
+  }, [activeServeLaterOrder, setServeLaterPrompt]);
 
   // Customer Authentication & Profile State (isAuthModalOpen sourced from Zustand store)
   const isAuthModalOpen = useOrderStore((s) => s.isAuthModalOpen);
@@ -1801,11 +1419,12 @@ export default function CustomerDineInPage() {
 
   // ── 1. Hero Carousel Auto-Rotation ─────────────────────────────────────────
   useEffect(() => {
+    if (heroSlides.length <= 1) return;
     const timer = setInterval(() => {
-      setHeroIndex((prev) => (prev + 1) % HERO_SLIDES.length);
+      setHeroIndex((prev) => (prev + 1) % heroSlides.length);
     }, 4500);
     return () => clearInterval(timer);
-  }, []);
+  }, [heroSlides.length]);
 
   // ── 2. Table Directory, Manual / NFC / Signed QR Session & Drawers ──────────
   const [activeSlug, setActiveSlug] = useState<string | undefined>(undefined);
@@ -2028,15 +1647,32 @@ export default function CustomerDineInPage() {
       if (!active) return;
 
       if (remote?.active && remote.session) {
-        applyActiveGuestSession(remote.session, slugParam || undefined);
-        void fetchSessionOrders(remote.session.sessionId);
-        return;
+        if (remote.session.orgId === 'a0000000-0000-0000-0000-000000000001') {
+          clearGuestSession();
+          const isDev = process.env.NODE_ENV === 'development' || process.env.NODE_ENV !== 'production';
+          useOrderStore.getState().setSessionDetails({
+            sessionId: '',
+            tableId: '',
+            orgId: isDev ? DEFAULT_DEV_ORG_ID : '',
+            outletId: isDev ? DEFAULT_DEV_OUTLET_ID : '',
+          });
+          useOrderStore.getState().setSelectedTable('--');
+          useOrderStore.getState().setIsTableVerified(false);
+        } else {
+          applyActiveGuestSession(remote.session, slugParam || undefined);
+          void fetchSessionOrders(remote.session.sessionId);
+          return;
+        }
       }
 
       if (remote?.dissolved) {
+        clearGuestSession();
+        const isDev = process.env.NODE_ENV === 'development' || process.env.NODE_ENV !== 'production';
         useOrderStore.getState().setSessionDetails({
           sessionId: '',
           tableId: '',
+          orgId: isDev ? DEFAULT_DEV_ORG_ID : '',
+          outletId: isDev ? DEFAULT_DEV_OUTLET_ID : '',
         });
         useOrderStore.getState().setSelectedTable('--');
         useOrderStore.getState().setIsTableVerified(false);
@@ -2092,29 +1728,33 @@ export default function CustomerDineInPage() {
   useEffect(() => {
     async function fetchLiveMenu() {
       const tenant = resolveTenantIds(loadGuestSession());
-      const orgToFetch = activeOrgId || tenant.orgId;
-      const outletToFetch = activeOutletId || tenant.outletId;
+      let orgToFetch = activeOrgId || tenant.orgId;
+      let outletToFetch = activeOutletId || tenant.outletId;
+      if (orgToFetch === 'a0000000-0000-0000-0000-000000000001') {
+        orgToFetch = DEFAULT_DEV_ORG_ID;
+        outletToFetch = DEFAULT_DEV_OUTLET_ID;
+      }
       if (!orgToFetch) return;
+
+      void fetchLiveCoupons(outletToFetch, orgToFetch);
+
       try {
         const query = outletToFetch ? `?outlet_id=${encodeURIComponent(outletToFetch)}` : '';
         const res = await fetch(`/api/v1/public/menu/${encodeURIComponent(orgToFetch)}${query}`);
         if (res.ok) {
           const data = await res.json();
-          if (data && data.items && data.items.length > 0) {
-            const catMap: Record<string, any> = {};
-            if (data.categories) {
+          if (data && data.items && Array.isArray(data.items)) {
+            const catMap: Record<string, string> = {};
+            if (Array.isArray(data.categories) && data.categories.length > 0) {
+              const catNames = data.categories.map((c: any) => c.name as string);
+              setCategories(catNames);
               data.categories.forEach((c: any) => {
                 catMap[c.id] = c.name;
               });
             }
 
-            const mapped: MenuItem[] = data.items.map((it: any, idx: number) => {
-              const itLower = (it.name || '').toLowerCase();
-              const matchedPilot = PILOT_MENU.find((p) => {
-                const pLower = p.name.toLowerCase();
-                return pLower === itLower || pLower.includes(itLower) || itLower.includes(pLower.split(' ')[0]);
-              });
-              let cat = (it.category_name || catMap[it.category_id] || matchedPilot?.category || 'Main Course') as any;
+            const mapped: MenuItem[] = data.items.map((it: any) => {
+              let cat = (it.category_name || catMap[it.category_id] || 'Main Course') as any;
               if (cat === 'Biryani' || cat === 'Rice & Biryani' || cat === 'Rice') {
                 cat = 'Biryani & Rice';
               }
@@ -2124,11 +1764,10 @@ export default function CustomerDineInPage() {
                 if (it.spice_level !== undefined && it.spice_level !== null) {
                   derivedSpice = it.spice_level === 0 ? 'NONE' : it.spice_level > 1 ? 'HOT' : 'MEDIUM';
                 } else {
-                  derivedSpice = matchedPilot?.spiceLevel || 'MILD';
+                  derivedSpice = 'MILD';
                 }
               }
 
-              // Read dynamic modifier groups from database if present, preserving SINGLE/MULTIPLE selection types
               const liveModifierGroups: ModifierGroup[] =
                 Array.isArray(it.modifier_groups) && it.modifier_groups.length > 0
                   ? it.modifier_groups.map((mg: any) => {
@@ -2139,7 +1778,7 @@ export default function CustomerDineInPage() {
                       const selType =
                         mg.selection_type === 'SINGLE' || mg.max === 1 ? 'SINGLE' : 'MULTIPLE';
                       return {
-                        id: mg.group_id,
+                        id: mg.group_id || mg.id,
                         name: grpName,
                         selectionType: selType as 'SINGLE' | 'MULTIPLE',
                         minSelections: mg.min ?? 0,
@@ -2152,103 +1791,65 @@ export default function CustomerDineInPage() {
                               ? m.name?.en || Object.values(m.name)[0] || ''
                               : m.name || '',
                           pricePaise: m.price_paise ?? 0,
-                          groupId: mg.group_id,
+                          groupId: mg.group_id || mg.id,
                           groupName: grpName,
                         })),
                       };
                     })
-                  : matchedPilot?.modifierGroups || [];
+                  : [];
 
               const liveModifiers: ModifierOption[] =
                 liveModifierGroups.length > 0
                   ? liveModifierGroups.flatMap((g) => g.modifiers)
-                  : matchedPilot?.modifiers || [];
+                  : [];
 
-              const coffeeImg = 'https://images.unsplash.com/photo-1514432324607-a09d9b4aefdd?auto=format&fit=crop&w=600&q=80';
-              let resolvedImage = matchedPilot?.imageUrl || PILOT_MENU[idx % PILOT_MENU.length]?.imageUrl || '';
-              if (itLower.includes('coffee')) {
-                resolvedImage = coffeeImg;
-              } else if (itLower.includes('mutton') || itLower.includes('gosht')) {
-                resolvedImage = 'https://images.unsplash.com/photo-1633945274405-b6c8069047b0?auto=format&fit=crop&w=600&q=80';
-              } else if (itLower.includes('prawn')) {
-                resolvedImage = 'https://images.unsplash.com/photo-1555939594-58d7cb561ad1?auto=format&fit=crop&w=600&q=80';
-              } else if (itLower.includes('egg') || itLower.includes('ande')) {
-                resolvedImage = 'https://images.unsplash.com/photo-1589302168068-964664d93dc0?auto=format&fit=crop&w=600&q=80';
-              } else if (itLower.includes('paneer') && itLower.includes('biryani')) {
-                resolvedImage = 'https://images.unsplash.com/photo-1567184109411-b28f27034344?auto=format&fit=crop&w=600&q=80';
-              } else if (itLower.includes('veg') && itLower.includes('biryani')) {
-                resolvedImage = 'https://images.unsplash.com/photo-1642821373181-696a54913e9a?auto=format&fit=crop&w=600&q=80';
-              } else if (itLower.includes('biryani')) {
-                resolvedImage = 'https://images.unsplash.com/photo-1563379091339-03b21ab4a4f8?auto=format&fit=crop&w=600&q=80';
-              } else if (itLower.includes('jeera')) {
-                resolvedImage = 'https://images.unsplash.com/photo-1512058564366-18510be2db19?auto=format&fit=crop&w=600&q=80';
-              } else if (itLower.includes('steamed') && itLower.includes('rice')) {
-                resolvedImage = 'https://images.unsplash.com/photo-1516684732162-798a0062be99?auto=format&fit=crop&w=600&q=80';
-              }
-              if (typeof it.image_url === 'string' && it.image_url.trim().length > 0) {
-                resolvedImage = it.image_url.trim();
-              }
+              const rawDbImageUrl =
+                typeof it.image_url === 'string' && it.image_url.trim().length > 0
+                  ? it.image_url.trim()
+                  : null;
+              const resolvedImage = rawDbImageUrl ? resolveDishImageUrl(rawDbImageUrl) : '';
+
+              const desc =
+                it.description ||
+                (it.description_i18n
+                  ? it.description_i18n.en || Object.values(it.description_i18n)[0]
+                  : '') ||
+                '';
 
               return {
                 id: it.id,
                 name: it.name,
-                description: it.description || it.description_i18n?.en || matchedPilot?.description || '',
+                description: typeof desc === 'string' ? desc : '',
                 category: cat,
-                pricePaise: it.price_paise,
-                dietaryTag: it.veg_type === 'VEG' ? 'VEG' : 'NON_VEG',
+                pricePaise: Number(it.price_paise),
+                dietaryTag: it.veg_type === 'VEG' ? 'VEG' : it.veg_type === 'EGG' ? 'EGG' : 'NON_VEG',
                 spiceLevel: derivedSpice,
-                cuisine: matchedPilot?.cuisine || (idx % 3 === 0 ? 'SOUTH_INDIAN' : 'NORTH_INDIAN'),
-                isHealthy: matchedPilot?.isHealthy || false,
+                cuisine: it.cuisine || 'NORTH_INDIAN',
+                isHealthy: Boolean(it.is_healthy),
                 isAvailable: it.is_available !== false,
-                rating: it.rating !== undefined && it.rating !== null ? parseFloat(it.rating) : (matchedPilot?.rating || 4.8),
-                ordersCount: it.orders_count !== undefined && it.orders_count !== null ? Number(it.orders_count) : (matchedPilot?.ordersCount || 350),
-                prepTimeMinutes: it.prep_time_min !== undefined && it.prep_time_min !== null ? Number(it.prep_time_min) : (matchedPilot?.prepTimeMinutes || 15),
+                rating:
+                  it.rating !== undefined && it.rating !== null
+                    ? parseFloat(it.rating)
+                    : 4.8,
+                ordersCount:
+                  it.orders_count !== undefined && it.orders_count !== null
+                    ? Number(it.orders_count)
+                    : 0,
+                prepTimeMinutes:
+                  it.prep_time_min !== undefined && it.prep_time_min !== null
+                    ? Number(it.prep_time_min)
+                    : 15,
                 imageUrl: resolvedImage,
                 modifiers: liveModifiers,
                 modifierGroups: liveModifierGroups,
               };
             });
 
-            // Defensive deduplication by normalized item name (preferring items with modifier groups if duplicates exist)
-            const seen = new Map<string, MenuItem>();
-            for (const item of mapped) {
-              const key = item.name.trim().toLowerCase();
-              const existing = seen.get(key);
-              if (!existing) {
-                seen.set(key, item);
-              } else {
-                const itemHasLivePhoto =
-                  typeof item.imageUrl === 'string' && item.imageUrl.trim().length > 0;
-                const existingHasLivePhoto =
-                  typeof existing.imageUrl === 'string' && existing.imageUrl.trim().length > 0;
-                const chosenImg = itemHasLivePhoto
-                  ? item.imageUrl
-                  : existingHasLivePhoto
-                  ? existing.imageUrl
-                  : item.imageUrl || existing.imageUrl;
-
-                const chosenModGroups =
-                  (item.modifierGroups?.length || 0) >= (existing.modifierGroups?.length || 0)
-                    ? item.modifierGroups
-                    : existing.modifierGroups;
-                const chosenModifiers =
-                  (item.modifiers?.length || 0) >= (existing.modifiers?.length || 0)
-                    ? item.modifiers
-                    : existing.modifiers;
-
-                seen.set(key, {
-                  ...((item.modifierGroups?.length || 0) >= (existing.modifierGroups?.length || 0) ? item : existing),
-                  imageUrl: chosenImg,
-                  modifierGroups: chosenModGroups,
-                  modifiers: chosenModifiers,
-                });
-              }
-            }
-            setMenuItems(Array.from(seen.values()));
+            setMenuItems(mapped);
           }
         }
       } catch {
-        // Fallback cleanly to PILOT_MENU
+        // Keep current live menu on network error
       }
     }
     fetchLiveMenu();
@@ -2277,7 +1878,7 @@ export default function CustomerDineInPage() {
       if (res.ok) {
         const data = await res.json();
         if (Array.isArray(data)) {
-          setSessionOrders(data);
+          setSessionOrders(deduplicateOrders(data));
         }
       }
     } catch {}
@@ -2486,12 +2087,12 @@ export default function CustomerDineInPage() {
 
   const discountPaise = useMemo(() => {
     if (!appliedCoupon) return 0;
-    const found = AVAILABLE_COUPONS.find((c) => c.code === appliedCoupon);
+    const found = availableCoupons.find((c) => c.code.toUpperCase() === appliedCoupon.toUpperCase());
     if (found) {
       return computeCouponDiscountPaise(found, cartSubtotalPaise);
     }
     return 0;
-  }, [appliedCoupon, cartSubtotalPaise]);
+  }, [appliedCoupon, availableCoupons, cartSubtotalPaise]);
 
   const netSubtotalPaise = Math.max(0, cartSubtotalPaise - discountPaise);
   const gstPaise = Math.round(netSubtotalPaise * 0.05);
@@ -2500,93 +2101,7 @@ export default function CustomerDineInPage() {
   // ── Flatten Session Orders into Individual Plates with Customisations & Note to Kitchen ──
   // Rule: Only PAID orders are visible in this section. If an order is not paid, it remains in the cart only.
   const flattenedPlates: FlattenedPlateItem[] = useMemo(() => {
-    const list: FlattenedPlateItem[] = [];
-
-    sessionOrders.forEach((ord) => {
-      const isPaid =
-        ord.payment_status === 'PAID' ||
-        ord.status === 'CONFIRMED' ||
-        ord.status === 'PREPARING' ||
-        ord.status === 'READY' ||
-        ord.status === 'SERVED' ||
-        ord.status === 'BILLED';
-      // Strict rule: Only paid orders are visible in this section. Unpaid/pending remain in the cart only.
-      if (!isPaid) return;
-
-      const orderNumber = ord.id.slice(0, 6).toUpperCase();
-
-      ord.items.forEach((it) => {
-        const qty = Math.max(1, it.quantity || 1);
-        const parsed = parseOrderItemNotes(it.notes, it.name_snapshot);
-        const itemModifiers = Array.isArray(it.modifiers) ? it.modifiers : [];
-        const modsTotalPaise = itemModifiers.reduce((sum, m) => sum + (Number(m.price_paise) || 0), 0);
-        const isPostMeal = isDessertOrPostMealItem(it.name_snapshot, it.notes);
-
-        // Calculate minor unit base price per plate
-        const basePricePaise = it.unit_price_paise || (it.line_total_paise ? Math.round(it.line_total_paise / qty) : 0);
-        const plateTotalPaise = basePricePaise + modsTotalPaise;
-
-        for (let pIdx = 1; pIdx <= qty; pIdx++) {
-          let resolvedPlateName: string;
-          if (parsed.plateName) {
-            resolvedPlateName = qty > 1 && !parsed.plateName.includes(`${pIdx}`)
-              ? `${parsed.plateName} (Plate ${pIdx})`
-              : parsed.plateName;
-          } else {
-            resolvedPlateName = `Plate ${pIdx}`;
-          }
-
-          const plateKey = `${ord.id}-${it.id}-${pIdx}`;
-          const isReleased =
-            Boolean(releasedHoldPlateKeys[plateKey]) ||
-            Boolean(it.notes && it.notes.includes('[RELEASED_TO_KITCHEN]'));
-          const plateItemStatus = (it as { status?: string }).status || ord.status;
-          const isPlateServed = plateItemStatus === 'SERVED' || ord.status === 'SERVED' || ord.status === 'BILLED';
-          const isPlateCancelled = plateItemStatus === 'CANCELLED' || ord.status === 'CANCELLED';
-          const isOnHold =
-            isPaid &&
-            isPostMeal &&
-            !isReleased &&
-            !isPlateServed &&
-            !isPlateCancelled &&
-            (plateItemStatus === 'PENDING' ||
-              plateItemStatus === 'CONFIRMED' ||
-              ord.status === 'CONFIRMED' ||
-              ord.status === 'PREPARING');
-
-          list.push({
-            plateKey,
-            orderId: ord.id,
-            orderNumber,
-            tableId: it.target_table_id || null,
-            tableNumber: it.target_table_number || ord.table_number || selectedTable || '--',
-            orderCreatedAt: ord.created_at,
-            itemCreatedAt: it.created_at || ord.created_at,
-            orderStatus: isPlateServed ? 'SERVED' : isPlateCancelled ? 'CANCELLED' : ord.status,
-            isPaid,
-            paymentMethod: ord.payment_method || (isPaid ? 'UPI' : null),
-            paymentSettledAt: ord.payment_settled_at || (isPaid ? ord.created_at : null),
-            itemId: it.id,
-            itemName: it.name_snapshot,
-            plateName: resolvedPlateName,
-            portion: parsed.portion,
-            plateIndex: pIdx,
-            totalPlatesForLine: qty,
-            basePricePaise,
-            modifiers: itemModifiers,
-            modifiersTotalPaise: modsTotalPaise,
-            plateTotalPaise,
-            spiceLevel: parsed.spiceLevel,
-            kitchenNote: parsed.kitchenNote,
-            rawNotes: it.notes,
-            isOnHold,
-            itemStatus: plateItemStatus,
-          });
-        }
-      });
-    });
-
-    return list;
+    return flattenPlates(sessionOrders, selectedTable, releasedHoldPlateKeys);
   }, [sessionOrders, selectedTable, releasedHoldPlateKeys]);
 
   // Keep Zustand store activeOrderCount in sync with flattened active plates
@@ -2596,33 +2111,22 @@ export default function CustomerDineInPage() {
 
   // Four distinct order sections: PREPARING (Cooking), ON_HOLD (Serve Later), SERVED, CANCELLED
   const onHoldPlates = useMemo(
-    () => flattenedPlates.filter((p) => p.isOnHold),
+    () => filterPlatesByTab(flattenedPlates, 'ON_HOLD'),
     [flattenedPlates],
   );
 
   const preparingPlates = useMemo(
-    () =>
-      flattenedPlates.filter(
-        (p) =>
-          !p.isOnHold &&
-          (p.orderStatus === 'PREPARING' ||
-            p.orderStatus === 'CONFIRMED' ||
-            p.orderStatus === 'READY' ||
-            p.orderStatus === 'PENDING'),
-      ),
+    () => filterPlatesByTab(flattenedPlates, 'PREPARING'),
     [flattenedPlates],
   );
 
   const servedPlates = useMemo(
-    () =>
-      flattenedPlates.filter(
-        (p) => p.orderStatus === 'SERVED' || p.orderStatus === 'BILLED',
-      ),
+    () => filterPlatesByTab(flattenedPlates, 'SERVED'),
     [flattenedPlates],
   );
 
   const cancelledPlates = useMemo(
-    () => flattenedPlates.filter((p) => p.orderStatus === 'CANCELLED'),
+    () => filterPlatesByTab(flattenedPlates, 'CANCELLED'),
     [flattenedPlates],
   );
 
@@ -2717,10 +2221,12 @@ export default function CustomerDineInPage() {
 
   // Accordion Open / Configure
   const handleOpenAccordion = (item: MenuItem) => {
-    if (item.category === 'Combos' || COMBO_OFFERS.some((c) => c.id === item.id)) {
-      const combo = COMBO_OFFERS.find((c) => c.id === item.id) || COMBO_OFFERS[0]!;
-      openComboCustomizer(combo);
-      return;
+    if (item.category === 'Combos' || combos.some((c) => c.id === item.id)) {
+      const combo = combos.find((c) => c.id === item.id);
+      if (combo && combo.components && combo.components.length > 0) {
+        openComboCustomizer(combo);
+        return;
+      }
     }
 
     setExpandedAccordionItemId(item.id);
@@ -3351,10 +2857,9 @@ export default function CustomerDineInPage() {
   const handleAddComboToCart = () => {
     if (!activeComboOffer) return;
 
-    // Find live matching MenuItem from menuItems (or fallback to PILOT_MENU)
+    // Find live matching MenuItem from menuItems
     const matchingItem =
-      menuItems.find((m) => m.id === activeComboOffer.id) ||
-      PILOT_MENU.find((p) => p.id === activeComboOffer.id) || {
+      menuItems.find((m) => m.id === activeComboOffer.id) || {
         id: activeComboOffer.id,
         name: activeComboOffer.name,
         description: activeComboOffer.description,
@@ -3366,7 +2871,7 @@ export default function CustomerDineInPage() {
         isHealthy: false,
         isAvailable: true,
         rating: activeComboOffer.rating,
-        ordersCount: 850,
+        ordersCount: 50,
         prepTimeMinutes: activeComboOffer.prepTimeMinutes,
         imageUrl: activeComboOffer.imageUrl,
       };
@@ -3503,31 +3008,68 @@ export default function CustomerDineInPage() {
     setCartLines((prev) => prev.filter((c) => c.cartLineId !== cartLineId));
   };
 
-  // Apply Coupon
-  const handleApplyCoupon = (code: string) => {
+  // Apply Coupon (database-validated with customer auth requirement)
+  const handleApplyCoupon = async (code: string, overrideToken?: string, overrideCustomerId?: string) => {
     const trimmed = (code || '').trim().toUpperCase();
     if (!trimmed) {
       setCouponError('Please enter a coupon code.');
       return;
     }
-    const found = AVAILABLE_COUPONS.find((c) => c.code.toUpperCase() === trimmed);
-    if (!found) {
-      setCouponError(`Coupon code "${trimmed}" is not valid.`);
-      setAppliedCoupon(null);
+    const tenant = resolveTenantIds(loadGuestSession());
+    const isDev = process.env.NODE_ENV === 'development' || process.env.NODE_ENV !== 'production';
+    const targetOutlet = activeOutletId || tenant.outletId || (isDev ? DEFAULT_DEV_OUTLET_ID : '');
+
+    const token = overrideToken || customerToken || loadCustomerAuth()?.accessToken;
+    const cid = overrideCustomerId || customerId || loadCustomerAuth()?.customerId;
+
+    // Requirement 2: Must be authenticated to apply coupons
+    if (!token) {
+      useOrderStore.getState().setPendingCouponCode(trimmed);
+      useOrderStore.getState().setIsAuthModalOpen(true);
+      setCouponError(`Log in or sign up to apply coupon ${trimmed}`);
+      showToast(`Please log in or sign up to apply coupon ${trimmed}`);
       return;
     }
-    if (cartSubtotalPaise < found.minOrderPaise) {
-      const deficit = found.minOrderPaise - cartSubtotalPaise;
-      setCouponError(
-        `Minimum order of ₹${(found.minOrderPaise / 100).toFixed(0)} required for ${found.code} (add ₹${(deficit / 100).toFixed(0)} more).`,
-      );
-      setAppliedCoupon(null);
-      return;
+
+    try {
+      const res = await fetch('/api/v1/customer/coupons/apply', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          code: trimmed,
+          subtotalPaise: cartSubtotalPaise,
+          outletId: targetOutlet,
+          customerId: cid,
+        }),
+      });
+
+      if (res.status === 401) {
+        useOrderStore.getState().setPendingCouponCode(trimmed);
+        useOrderStore.getState().setIsAuthModalOpen(true);
+        setCouponError(`Please log in or sign up to apply coupon ${trimmed}`);
+        showToast('Please log in or sign up to apply coupons');
+        return;
+      }
+
+      const data = await res.json();
+      if (!res.ok || !data.valid) {
+        setCouponError(data.reason || data.detail || `Coupon code "${trimmed}" is not valid.`);
+        setAppliedCoupon(null);
+        useOrderStore.getState().setAppliedCouponDiscountPaise(null);
+        return;
+      }
+
+      setCouponError(null);
+      setAppliedCoupon(trimmed);
+      setCouponInput(trimmed);
+      useOrderStore.getState().setAppliedCouponDiscountPaise(data.discountPaise);
+      showToast(`Coupon ${trimmed} applied! Saved ₹${Math.round(data.discountPaise / 100)} 🎉`);
+    } catch (err: any) {
+      setCouponError(err?.message || `Failed to apply coupon ${trimmed}`);
     }
-    setCouponError(null);
-    setAppliedCoupon(found.code);
-    setCouponInput(found.code);
-    showToast(`Coupon ${found.code} applied! 🎉`);
   };
 
   // ── 10. Real Order Placement with Cook Notes & Modifiers ────────────────────
@@ -3612,24 +3154,43 @@ export default function CustomerDineInPage() {
 
     // If user closed the top table prompt earlier without choosing a table, require & save at checkout.
     if (!currentSessionId || !guestSession?.guestSessionToken) {
+      const currentOrderType = useOrderStore.getState().orderType;
+      const isTakeaway = currentOrderType === 'TAKEAWAY';
+      const isPreBook = currentOrderType === 'PRE_BOOK_DINE_IN';
+      const allocatedTables = useOrderStore.getState().allocatedTableNumbers;
+
       const tenant = resolveTenantIds(guestSession);
       const targetOutlet = activeOutletId || tenant.outletId || undefined;
-      if (!cartCheckoutTableValidation.matched) {
-        showToast('Please enter a valid hotel table number in the checkout box below before paying.');
-        return;
+
+      if (isTakeaway || (isPreBook && allocatedTables.length > 0)) {
+        const tableNum = (isPreBook && allocatedTables[0]) ? allocatedTables[0] : (outletTables[0]?.table_number || 'T01');
+        const created = await establishManualTableSession(
+          targetOutlet,
+          tableNum,
+          useOrderStore.getState().guestCount || tablePax,
+        );
+        if (!created) return;
+        guestSession = created;
+        currentSessionId = created.sessionId;
+      } else {
+        if (!cartCheckoutTableValidation.matched) {
+          showToast('Please enter a valid hotel table number in the checkout box below before paying.');
+          return;
+        }
+        const created = await establishManualTableSession(
+          targetOutlet,
+          cartCheckoutTableValidation.matched.table_number,
+          tablePax,
+        );
+        if (!created) return;
+        guestSession = created;
+        currentSessionId = created.sessionId;
+        setCartCheckoutTableDigits('');
       }
-      const created = await establishManualTableSession(
-        targetOutlet,
-        cartCheckoutTableValidation.matched.table_number,
-        tablePax,
-      );
-      if (!created) return;
-      guestSession = created;
-      currentSessionId = created.sessionId;
-      setCartCheckoutTableDigits('');
     }
 
     setIsPlacingOrder(true);
+    useOrderStore.getState().resetCheckoutState();
 
     try {
       const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -3680,10 +3241,19 @@ export default function CustomerDineInPage() {
         return;
       }
 
+      const storeOrderType = useOrderStore.getState().orderType;
+      const storeScheduledFor = useOrderStore.getState().scheduledFor;
+      const storeGuestCount = useOrderStore.getState().guestCount;
+      const storeReservationId = useOrderStore.getState().reservationId;
+
       const orderBody = {
         session_id: currentSessionId,
         idempotency_key: crypto.randomUUID(),
         items: itemsPayload,
+        order_type: storeOrderType || 'DINE_IN',
+        scheduled_for: storeScheduledFor || null,
+        guest_count: storeGuestCount || tablePax || null,
+        reservation_id: storeReservationId || null,
       };
 
       const res = await customerApiFetch(
@@ -3698,44 +3268,9 @@ export default function CustomerDineInPage() {
 
       if (res.ok) {
         const orderData = await res.json();
-        setSessionOrders((prev) => {
-          if (prev.some((o) => o.id === orderData.id)) return prev;
-          const optimisticOrd: TableOrderRecord = {
-            id: orderData.id,
-            table_number: selectedTable,
-            status: 'PENDING',
-            subtotal_paise: orderData.subtotal_paise || cartSubtotalPaise,
-            tax_paise: orderData.tax_paise || gstPaise,
-            total_paise: orderData.total_paise || cartGrandTotalPaise,
-            created_at: orderData.created_at || new Date().toISOString(),
-            payment_status: 'PENDING',
-            payment_method: selectedPaymentMethod,
-            items: (orderData.items && orderData.items.length > 0)
-              ? orderData.items.map((it: any) => ({
-                  id: it.id,
-                  name_snapshot: it.name_snapshot,
-                  unit_price_paise: it.unit_price_paise,
-                  quantity: it.quantity,
-                  line_total_paise: it.line_total_paise,
-                  notes: it.notes,
-                  target_table_id: it.target_table_id || null,
-                  target_table_number: it.target_table_number || null,
-                  modifiers: it.modifiers || [],
-                }))
-              : cartLines.map((c, cIdx) => ({
-                  id: `opt-item-${cIdx}-${Date.now()}`,
-                  name_snapshot: c.item.name,
-                  unit_price_paise: c.item.pricePaise,
-                  quantity: c.quantity,
-                  line_total_paise: c.item.pricePaise * c.quantity,
-                  notes: c.notes,
-                  target_table_id: c.targetTableId || null,
-                  target_table_number: c.targetTableNumber || null,
-                  modifiers: (c.selectedModifiers || []).map((m) => ({ name: m.name, price_paise: m.pricePaise })),
-                })),
-          };
-          return [optimisticOrd, ...prev];
-        });
+        if (orderData && orderData.id) {
+          setSessionOrders((prev) => deduplicateOrders([orderData, ...prev]));
+        }
 
         try {
           const payRes = await customerApiFetch(
@@ -3838,6 +3373,14 @@ export default function CustomerDineInPage() {
     await fetchCustomerDinerProfiles(data.customerId, data.accessToken);
     void fetchSessionOrders(undefined, data.accessToken);
     setIsAuthModalOpen(false);
+
+    // Auto-apply pending coupon upon successful login/signup
+    const pendingCode = useOrderStore.getState().pendingCouponCode;
+    if (pendingCode) {
+      useOrderStore.getState().setPendingCouponCode(null);
+      void handleApplyCoupon(pendingCode, data.accessToken, data.customerId);
+    }
+
     showToast(
       data.displayName
         ? `Signed in as ${data.displayName}!`
@@ -3868,6 +3411,7 @@ export default function CustomerDineInPage() {
 
   // ── 12. Payment Settlement Flow ───────────────────────────────────────────
   const handleInitiatePayment = async () => {
+    useOrderStore.getState().resetCheckoutState();
     if (cartLines.length > 0) {
       await handlePlaceOrder();
       return;
@@ -4214,7 +3758,7 @@ export default function CustomerDineInPage() {
   };
 
   // Deep link action from Hero Carousel
-  const handleHeroAction = (slide: (typeof HERO_SLIDES)[0]) => {
+  const handleHeroAction = (slide: HeroSlideItem) => {
     if (slide.couponCode) {
       navigator.clipboard.writeText(slide.couponCode);
       handleApplyCoupon(slide.couponCode);
@@ -4288,6 +3832,7 @@ export default function CustomerDineInPage() {
           <TopNavBar
             view="home"
             onOpenProfile={() => setIsProfileOpen(true)}
+            onOpenBookingModal={() => setIsBookingModalOpen(true)}
             customerToken={customerToken}
             customerDisplayName={customerProfile?.displayName}
             cartPulse={cartPulse}
@@ -4295,55 +3840,148 @@ export default function CustomerDineInPage() {
             showToast={showToast}
           />
 
+          {/* Omnichannel Ordering Mode Bar */}
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(3, 1fr)',
+              gap: '6px',
+              margin: '10px 0 14px',
+              padding: '4px',
+              background: 'rgba(255, 255, 255, 0.03)',
+              borderRadius: '12px',
+              border: '1px solid rgba(255, 255, 255, 0.08)',
+            }}
+          >
+            <button
+              type="button"
+              onClick={() => {
+                if (storeOrderType !== 'DINE_IN') {
+                  setOrderType('DINE_IN');
+                }
+                setIsTableModalOpen(true);
+              }}
+              style={{
+                padding: '8px 4px',
+                borderRadius: '8px',
+                border: storeOrderType === 'DINE_IN' ? '1px solid rgba(16, 185, 129, 0.5)' : 'none',
+                background: storeOrderType === 'DINE_IN' ? 'rgba(16, 185, 129, 0.15)' : 'transparent',
+                color: storeOrderType === 'DINE_IN' ? '#34d399' : '#94a3b8',
+                fontSize: '0.78rem',
+                fontWeight: 700,
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '4px',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+              }}
+              title={selectedTable ? `Table ${selectedTable}` : 'Select Table'}
+            >
+              <span>🪑</span>
+              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {selectedTable ? `Dine-In · Table ${selectedTable} ▾` : 'Dine-In · Select Table ▾'}
+              </span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setIsBookingModalOpen(true)}
+              style={{
+                padding: '8px 4px',
+                borderRadius: '8px',
+                border: storeOrderType === 'PRE_BOOK_DINE_IN' ? '1px solid rgba(251, 191, 36, 0.5)' : 'none',
+                background: storeOrderType === 'PRE_BOOK_DINE_IN' ? 'rgba(251, 191, 36, 0.15)' : 'transparent',
+                color: storeOrderType === 'PRE_BOOK_DINE_IN' ? '#fbbf24' : '#94a3b8',
+                fontSize: '0.78rem',
+                fontWeight: 700,
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '4px',
+              }}
+            >
+              <span>📅</span>
+              <span>Pre-Book</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setIsBookingModalOpen(true)}
+              style={{
+                padding: '8px 4px',
+                borderRadius: '8px',
+                border: storeOrderType === 'TAKEAWAY' ? '1px solid rgba(56, 189, 248, 0.5)' : 'none',
+                background: storeOrderType === 'TAKEAWAY' ? 'rgba(56, 189, 248, 0.15)' : 'transparent',
+                color: storeOrderType === 'TAKEAWAY' ? '#38bdf8' : '#94a3b8',
+                fontSize: '0.78rem',
+                fontWeight: 700,
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '4px',
+              }}
+            >
+              <span>🛍️</span>
+              <span>Takeaway</span>
+            </button>
+          </div>
+
           {/* Active Order Tracker Banner */}
           <OrderTrackerBanner />
 
           {/* 2. Hero Section (Auto-rotating Banner Carousel) */}
-          <div className="hero-carousel-container">
-            <div className="hero-slide-wrapper">
-              {(() => {
-                const currentSlide = HERO_SLIDES[heroIndex]!;
-                let resolvedSlideImg = currentSlide.img;
-                if (currentSlide.dishTarget) {
-                  const match = menuItems.find((it) =>
-                    it.name.toLowerCase().includes(currentSlide.dishTarget!.toLowerCase()),
-                  );
-                  if (match?.imageUrl && match.imageUrl.trim().length > 0) {
-                    resolvedSlideImg = match.imageUrl;
-                  }
-                }
-                return (
-                  <img
-                    src={resolvedSlideImg}
-                    alt={currentSlide.title}
-                    className="hero-slide-img"
-                  />
-                );
-              })()}
-              <div className="hero-slide-gradient">
-                <span className="hero-slide-tag">{HERO_SLIDES[heroIndex]!.tag}</span>
-                <h1 className="hero-slide-title">{HERO_SLIDES[heroIndex]!.title}</h1>
-                <p className="hero-slide-subtitle">{HERO_SLIDES[heroIndex]!.subtitle}</p>
-                <button
-                  className="hero-action-btn"
-                  onClick={() => handleHeroAction(HERO_SLIDES[heroIndex]!)}
-                >
-                  {HERO_SLIDES[heroIndex]!.btnText}
-                </button>
+          {heroSlides.length > 0 && (
+            <>
+              <div className="hero-carousel-container">
+                <div className="hero-slide-wrapper">
+                  {(() => {
+                    const currentSlide = heroSlides[heroIndex % heroSlides.length]!;
+                    let resolvedSlideImg = currentSlide.img;
+                    if (currentSlide.dishTarget) {
+                      const match = menuItems.find((it) =>
+                        it.name.toLowerCase().includes(currentSlide.dishTarget!.toLowerCase()),
+                      );
+                      if (match?.imageUrl && match.imageUrl.trim().length > 0) {
+                        resolvedSlideImg = match.imageUrl;
+                      }
+                    }
+                    return (
+                      <img
+                        src={resolvedSlideImg}
+                        alt={currentSlide.title}
+                        className="hero-slide-img"
+                      />
+                    );
+                  })()}
+                  <div className="hero-slide-gradient">
+                    <span className="hero-slide-tag">{heroSlides[heroIndex % heroSlides.length]!.tag}</span>
+                    <h1 className="hero-slide-title">{heroSlides[heroIndex % heroSlides.length]!.title}</h1>
+                    <p className="hero-slide-subtitle">{heroSlides[heroIndex % heroSlides.length]!.subtitle}</p>
+                    <button
+                      className="hero-action-btn"
+                      onClick={() => handleHeroAction(heroSlides[heroIndex % heroSlides.length]!)}
+                    >
+                      {heroSlides[heroIndex % heroSlides.length]!.btnText}
+                    </button>
+                  </div>
+                </div>
               </div>
-            </div>
-          </div>
 
-          {/* Dots Indicator */}
-          <div className="hero-dots-container">
-            {HERO_SLIDES.map((_, idx) => (
-              <div
-                key={idx}
-                className={`hero-dot ${idx === heroIndex ? 'active' : ''}`}
-                onClick={() => setHeroIndex(idx)}
-              />
-            ))}
-          </div>
+              {/* Dots Indicator */}
+              <div className="hero-dots-container">
+                {heroSlides.map((_, idx) => (
+                  <div
+                    key={idx}
+                    className={`hero-dot ${idx === (heroIndex % heroSlides.length) ? 'active' : ''}`}
+                    onClick={() => setHeroIndex(idx)}
+                  />
+                ))}
+              </div>
+            </>
+          )}
 
           {/* 3. Offers and Coupons */}
           <section className="home-section">
@@ -4352,24 +3990,67 @@ export default function CustomerDineInPage() {
                 <span style={{ fontSize: '1.1rem' }}>🏷️</span>
                 <h2 className="section-heading">Offers & Coupons</h2>
               </div>
-              <button
-                className="section-see-all-btn"
-                onClick={() => toggleSectionExpand('offers')}
-              >
-                <span>{expandedSection === 'offers' ? 'Show less ▲' : 'See all →'}</span>
-              </button>
+              {offersData.length > 0 && (
+                <button
+                  className="section-see-all-btn"
+                  onClick={() => toggleSectionExpand('offers')}
+                >
+                  <span>{expandedSection === 'offers' ? 'Show less ▲' : 'See all →'}</span>
+                </button>
+              )}
             </div>
 
-            {expandedSection === 'offers' ? (
-              <div className="home-expanded-grid">
-                {OFFERS_DATA.map((off) => (
-                  <div key={off.id} className="offer-coupon-card" style={{ maxWidth: '100%' }}>
+            {offersData.length === 0 ? (
+              <div
+                style={{
+                  padding: '24px 16px',
+                  textAlign: 'center',
+                  color: '#94a3b8',
+                  fontSize: '0.9rem',
+                  fontStyle: 'italic',
+                }}
+              >
+                No active offers right now
+              </div>
+            ) : expandedSection === 'offers' ? (
+              <div
+                className="home-expanded-grid"
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))',
+                  gap: '14px',
+                  width: '100%',
+                }}
+              >
+                {offersData.map((off) => (
+                  <div
+                    key={off.id}
+                    className="offer-coupon-card"
+                    style={{
+                      maxWidth: '100%',
+                      minWidth: 0,
+                      width: '100%',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      justifyContent: 'space-between',
+                    }}
+                  >
                     <div>
                       <div className="offer-card-badge">{off.validity}</div>
                       <div className="offer-card-title">{off.title}</div>
                       <div className="offer-card-desc">{off.discountDesc}</div>
                     </div>
-                    <div className="offer-card-footer">
+                    <div
+                      className="offer-card-footer"
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        gap: '10px',
+                        flexWrap: 'wrap',
+                        marginTop: '12px',
+                      }}
+                    >
                       <span className="offer-code-chip">{off.code}</span>
                       <button
                         className="offer-apply-btn"
@@ -4386,14 +4067,24 @@ export default function CustomerDineInPage() {
               </div>
             ) : (
               <div className="home-horizontal-scroll">
-                {OFFERS_DATA.map((off) => (
+                {offersData.map((off) => (
                   <div key={off.id} className="offer-coupon-card">
                     <div>
                       <div className="offer-card-badge">{off.validity}</div>
                       <div className="offer-card-title">{off.title}</div>
                       <div className="offer-card-desc">{off.discountDesc}</div>
                     </div>
-                    <div className="offer-card-footer">
+                    <div
+                      className="offer-card-footer"
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        gap: '8px',
+                        flexWrap: 'wrap',
+                        marginTop: '12px',
+                      }}
+                    >
                       <span className="offer-code-chip">{off.code}</span>
                       <button
                         className="offer-apply-btn"
@@ -4402,7 +4093,7 @@ export default function CustomerDineInPage() {
                           handleApplyCoupon(off.code);
                         }}
                       >
-                        {appliedCoupon === off.code ? 'Applied ✓' : 'Copy'}
+                        {appliedCoupon === off.code ? 'Applied ✓' : 'Copy & Apply'}
                       </button>
                     </div>
                   </div>
@@ -4444,7 +4135,7 @@ export default function CustomerDineInPage() {
             </div>
 
             <div className="home-horizontal-scroll">
-              {COMBO_OFFERS.map((combo) => {
+              {combos.map((combo) => {
                 const liveComboItem = menuItems.find(
                   (m) => m.id === combo.id || m.name.toLowerCase() === combo.name.toLowerCase(),
                 );
@@ -4701,7 +4392,7 @@ export default function CustomerDineInPage() {
                 gap: '10px',
               }}
             >
-              {CATEGORIES_LIST.map((cat) => (
+              {categoriesToDisplay.map((cat) => (
                 <button
                   key={cat}
                   onClick={() => {
@@ -4755,6 +4446,7 @@ export default function CustomerDineInPage() {
             view="menu"
             onNavigateView={setCurrentView}
             onOpenFilterSheet={() => setIsFilterSheetOpen(true)}
+            onOpenBookingModal={() => setIsBookingModalOpen(true)}
             activeFilterCount={activeFilterCount}
             onOpenProfile={() => setIsProfileOpen(true)}
             customerToken={customerToken}
@@ -4764,6 +4456,95 @@ export default function CustomerDineInPage() {
             showToast={showToast}
           />
 
+          {/* Omnichannel Ordering Mode Bar */}
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(3, 1fr)',
+              gap: '6px',
+              margin: '8px 16px 12px 16px',
+              padding: '4px',
+              background: 'rgba(255, 255, 255, 0.03)',
+              borderRadius: '12px',
+              border: '1px solid rgba(255, 255, 255, 0.08)',
+            }}
+          >
+            <button
+              type="button"
+              onClick={() => {
+                if (storeOrderType !== 'DINE_IN') {
+                  setOrderType('DINE_IN');
+                }
+                setIsTableModalOpen(true);
+              }}
+              style={{
+                padding: '8px 4px',
+                borderRadius: '8px',
+                border: storeOrderType === 'DINE_IN' ? '1px solid rgba(16, 185, 129, 0.5)' : 'none',
+                background: storeOrderType === 'DINE_IN' ? 'rgba(16, 185, 129, 0.15)' : 'transparent',
+                color: storeOrderType === 'DINE_IN' ? '#34d399' : '#94a3b8',
+                fontSize: '0.78rem',
+                fontWeight: 700,
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '4px',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+              }}
+              title={selectedTable ? `Table ${selectedTable}` : 'Select Table'}
+            >
+              <span>🪑</span>
+              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {selectedTable ? `Dine-In · Table ${selectedTable} ▾` : 'Dine-In · Select Table ▾'}
+              </span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setIsBookingModalOpen(true)}
+              style={{
+                padding: '8px 4px',
+                borderRadius: '8px',
+                border: storeOrderType === 'PRE_BOOK_DINE_IN' ? '1px solid rgba(251, 191, 36, 0.5)' : 'none',
+                background: storeOrderType === 'PRE_BOOK_DINE_IN' ? 'rgba(251, 191, 36, 0.15)' : 'transparent',
+                color: storeOrderType === 'PRE_BOOK_DINE_IN' ? '#fbbf24' : '#94a3b8',
+                fontSize: '0.78rem',
+                fontWeight: 700,
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '4px',
+              }}
+            >
+              <span>📅</span>
+              <span>Pre-Book</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setIsBookingModalOpen(true)}
+              style={{
+                padding: '8px 4px',
+                borderRadius: '8px',
+                border: storeOrderType === 'TAKEAWAY' ? '1px solid rgba(56, 189, 248, 0.5)' : 'none',
+                background: storeOrderType === 'TAKEAWAY' ? 'rgba(56, 189, 248, 0.15)' : 'transparent',
+                color: storeOrderType === 'TAKEAWAY' ? '#38bdf8' : '#94a3b8',
+                fontSize: '0.78rem',
+                fontWeight: 700,
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '4px',
+              }}
+            >
+              <span>🛍️</span>
+              <span>Takeaway</span>
+            </button>
+          </div>
+
           {/* Active Order Tracker Banner */}
           <OrderTrackerBanner
             style={{ margin: '8px 16px 12px 16px' }}
@@ -4772,7 +4553,7 @@ export default function CustomerDineInPage() {
           {/* Phase 5 Extracted: Main Menu Browsing UI with Category Filters, Search, Dietary Chips, and Category Item Sections */}
           <MenuGrid
             menuItems={menuItems}
-            combos={COMBO_OFFERS}
+            combos={combos}
             onSelectItem={handleOpenAccordion}
             onQuickAdd={handleQuickAdd}
             onQuickDecrement={handleQuickDecrement}
@@ -5667,196 +5448,200 @@ export default function CustomerDineInPage() {
             </div>
 
             <div style={{ flex: 1, overflowY: 'auto', padding: '16px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
-              {AVAILABLE_COUPONS.map((coupon) => {
-                const isApplied = appliedCoupon === coupon.code;
-                const isEligible = cartSubtotalPaise >= coupon.minOrderPaise;
-                const estSavingsPaise = computeCouponDiscountPaise(coupon, cartSubtotalPaise);
-                const deficitPaise = coupon.minOrderPaise > cartSubtotalPaise ? coupon.minOrderPaise - cartSubtotalPaise : 0;
+              {availableCoupons.length === 0 ? (
+                <div style={{ padding: '32px 16px', textAlign: 'center', color: '#94a3b8', fontStyle: 'italic', fontSize: '0.9rem' }}>
+                  No active offers right now
+                </div>
+              ) : (
+                availableCoupons.map((coupon) => {
+                  const isApplied = appliedCoupon === coupon.code;
+                  const isEligible = cartSubtotalPaise >= coupon.minOrderPaise;
+                  const estSavingsPaise = computeCouponDiscountPaise(coupon, cartSubtotalPaise);
+                  const deficitPaise = coupon.minOrderPaise > cartSubtotalPaise ? coupon.minOrderPaise - cartSubtotalPaise : 0;
 
-                return (
-                  <div
-                    key={coupon.code}
-                    style={{
-                      borderRadius: '12px',
-                      padding: '14px',
-                      border: isApplied
-                        ? '1.5px solid #10b981'
-                        : isEligible
-                        ? '1.5px solid rgba(245, 158, 11, 0.45)'
-                        : '1px solid rgba(255, 255, 255, 0.08)',
-                      background: isApplied
-                        ? 'rgba(16, 185, 129, 0.08)'
-                        : isEligible
-                        ? 'rgba(245, 158, 11, 0.04)'
-                        : 'rgba(255, 255, 255, 0.02)',
-                      opacity: isEligible || isApplied ? 1 : 0.72,
-                      display: 'flex',
-                      flexDirection: 'column',
-                      gap: '10px',
-                      transition: 'all 0.2s ease',
-                    }}
-                  >
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '6px' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                        <span
-                          style={{
-                            fontFamily: 'monospace',
-                            fontWeight: 900,
-                            fontSize: '0.92rem',
-                            padding: '4px 8px',
-                            borderRadius: '6px',
-                            background: isApplied ? 'rgba(16, 185, 129, 0.25)' : 'rgba(245, 158, 11, 0.18)',
-                            color: isApplied ? '#34d399' : '#fbbf24',
-                            border: `1px solid ${isApplied ? '#10b981' : 'rgba(245, 158, 11, 0.4)'}`,
-                            letterSpacing: '0.5px',
-                          }}
-                        >
-                          {coupon.code}
-                        </span>
-                        <span
-                          style={{
-                            fontSize: '0.72rem',
-                            fontWeight: 800,
-                            padding: '3px 7px',
-                            borderRadius: '4px',
-                            background: 'rgba(255, 255, 255, 0.08)',
-                            color: '#cbd5e1',
-                          }}
-                        >
-                          {coupon.tag}
-                        </span>
-                      </div>
-
-                      {isApplied ? (
-                        <span style={{ color: '#10b981', fontSize: '0.78rem', fontWeight: 800 }}>
-                          ✓ Applied
-                        </span>
-                      ) : isEligible ? (
-                        <span style={{ color: '#34d399', fontSize: '0.76rem', fontWeight: 700 }}>
-                          ● Eligible
-                        </span>
-                      ) : (
-                        <span style={{ color: '#f59e0b', fontSize: '0.74rem', fontWeight: 700 }}>
-                          🔒 Min ₹{(coupon.minOrderPaise / 100).toFixed(0)}
-                        </span>
-                      )}
-                    </div>
-
-                    <div>
-                      <div style={{ fontSize: '0.86rem', fontWeight: 700, color: '#fff' }}>
-                        {coupon.title}
-                      </div>
-                      <div style={{ fontSize: '0.76rem', color: '#94a3b8', marginTop: '2px', lineHeight: 1.4 }}>
-                        {coupon.description}
-                      </div>
-                    </div>
-
-                    {/* Condition / Savings Note */}
+                  return (
                     <div
+                      key={coupon.code}
                       style={{
-                        fontSize: '0.74rem',
-                        padding: '6px 10px',
-                        borderRadius: '6px',
+                        borderRadius: '12px',
+                        padding: '14px',
+                        border: isApplied
+                          ? '1.5px solid #10b981'
+                          : isEligible
+                          ? '1.5px solid rgba(245, 158, 11, 0.45)'
+                          : '1px solid rgba(255, 255, 255, 0.08)',
                         background: isApplied
-                          ? 'rgba(16, 185, 129, 0.12)'
+                          ? 'rgba(16, 185, 129, 0.08)'
                           : isEligible
-                          ? 'rgba(245, 158, 11, 0.1)'
-                          : 'rgba(239, 68, 68, 0.1)',
-                        color: isApplied
-                          ? '#34d399'
-                          : isEligible
-                          ? '#fcd34d'
-                          : '#fca5a5',
+                          ? 'rgba(245, 158, 11, 0.04)'
+                          : 'rgba(255, 255, 255, 0.02)',
+                        opacity: isEligible || isApplied ? 1 : 0.72,
                         display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'space-between',
+                        flexDirection: 'column',
+                        gap: '10px',
+                        transition: 'all 0.2s ease',
                       }}
                     >
-                      <span>
-                        {isApplied
-                          ? `Saves ₹${(discountPaise / 100).toFixed(0)} on this order!`
-                          : isEligible
-                          ? `Eligible! Saves ₹${(estSavingsPaise / 100).toFixed(0)}`
-                          : `Add items worth ₹${(deficitPaise / 100).toFixed(0)} more to unlock`}
-                      </span>
-                      <span style={{ opacity: 0.75, fontSize: '0.7rem' }}>
-                        Min ₹{(coupon.minOrderPaise / 100).toFixed(0)}
-                      </span>
-                    </div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '6px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                          <span
+                            style={{
+                              fontFamily: 'monospace',
+                              fontWeight: 900,
+                              fontSize: '0.92rem',
+                              padding: '4px 8px',
+                              borderRadius: '6px',
+                              background: isApplied ? 'rgba(16, 185, 129, 0.25)' : 'rgba(245, 158, 11, 0.18)',
+                              color: isApplied ? '#34d399' : '#fbbf24',
+                              border: `1px solid ${isApplied ? '#10b981' : 'rgba(245, 158, 11, 0.4)'}`,
+                              letterSpacing: '0.5px',
+                            }}
+                          >
+                            {coupon.code}
+                          </span>
+                          <span
+                            style={{
+                              fontSize: '0.72rem',
+                              fontWeight: 800,
+                              padding: '3px 7px',
+                              borderRadius: '4px',
+                              background: 'rgba(255, 255, 255, 0.08)',
+                              color: '#cbd5e1',
+                            }}
+                          >
+                            {coupon.tag}
+                          </span>
+                        </div>
 
-                    {/* Action Button */}
-                    <div>
-                      {isApplied ? (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setAppliedCoupon(null);
-                            setCouponInput('');
-                            setCouponError(null);
-                            showToast(`Removed coupon ${coupon.code}`);
-                          }}
-                          style={{
-                            width: '100%',
-                            padding: '8px 12px',
-                            borderRadius: '8px',
-                            background: 'rgba(239, 68, 68, 0.15)',
-                            border: '1px solid rgba(239, 68, 68, 0.35)',
-                            color: '#f87171',
-                            fontWeight: 800,
-                            fontSize: '0.78rem',
-                            cursor: 'pointer',
-                          }}
-                        >
-                          ✕ Remove Coupon
-                        </button>
-                      ) : isEligible ? (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setAppliedCoupon(coupon.code);
-                            setCouponInput(coupon.code);
-                            setCouponError(null);
-                            setIsAvailableCouponsOpen(false);
-                            showToast(`✅ Applied coupon ${coupon.code}! Saved ₹${(estSavingsPaise / 100).toFixed(0)}`);
-                          }}
-                          style={{
-                            width: '100%',
-                            padding: '8px 12px',
-                            borderRadius: '8px',
-                            background: 'linear-gradient(135deg, #f59e0b, #d97706)',
-                            border: 'none',
-                            color: '#000',
-                            fontWeight: 900,
-                            fontSize: '0.8rem',
-                            cursor: 'pointer',
-                            boxShadow: '0 2px 8px rgba(245, 158, 11, 0.3)',
-                          }}
-                        >
-                          Apply Coupon (Save ₹{(estSavingsPaise / 100).toFixed(0)})
-                        </button>
-                      ) : (
-                        <button
-                          type="button"
-                          disabled
-                          style={{
-                            width: '100%',
-                            padding: '8px 12px',
-                            borderRadius: '8px',
-                            background: 'rgba(255, 255, 255, 0.05)',
-                            border: '1px solid rgba(255, 255, 255, 0.08)',
-                            color: '#64748b',
-                            fontWeight: 700,
-                            fontSize: '0.76rem',
-                            cursor: 'not-allowed',
-                          }}
-                        >
-                          🔒 Add ₹{(deficitPaise / 100).toFixed(0)} more to unlock
-                        </button>
-                      )}
+                        {isApplied ? (
+                          <span style={{ color: '#10b981', fontSize: '0.78rem', fontWeight: 800 }}>
+                            ✓ Applied
+                          </span>
+                        ) : isEligible ? (
+                          <span style={{ color: '#34d399', fontSize: '0.76rem', fontWeight: 700 }}>
+                            ● Eligible
+                          </span>
+                        ) : (
+                          <span style={{ color: '#f59e0b', fontSize: '0.74rem', fontWeight: 700 }}>
+                            🔒 Min ₹{(coupon.minOrderPaise / 100).toFixed(0)}
+                          </span>
+                        )}
+                      </div>
+
+                      <div>
+                        <div style={{ fontSize: '0.86rem', fontWeight: 700, color: '#fff' }}>
+                          {coupon.title}
+                        </div>
+                        <div style={{ fontSize: '0.76rem', color: '#94a3b8', marginTop: '2px', lineHeight: 1.4 }}>
+                          {coupon.description}
+                        </div>
+                      </div>
+
+                      {/* Condition / Savings Note */}
+                      <div
+                        style={{
+                          fontSize: '0.74rem',
+                          padding: '6px 10px',
+                          borderRadius: '6px',
+                          background: isApplied
+                            ? 'rgba(16, 185, 129, 0.12)'
+                            : isEligible
+                            ? 'rgba(245, 158, 11, 0.1)'
+                            : 'rgba(239, 68, 68, 0.1)',
+                          color: isApplied
+                            ? '#34d399'
+                            : isEligible
+                            ? '#fcd34d'
+                            : '#fca5a5',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                        }}
+                      >
+                        <span>
+                          {isApplied
+                            ? `Saves ₹${(discountPaise / 100).toFixed(0)} on this order!`
+                            : isEligible
+                            ? `Eligible! Saves ₹${(estSavingsPaise / 100).toFixed(0)}`
+                            : `Add items worth ₹${(deficitPaise / 100).toFixed(0)} more to unlock`}
+                        </span>
+                        <span style={{ opacity: 0.75, fontSize: '0.7rem' }}>
+                          Min ₹{(coupon.minOrderPaise / 100).toFixed(0)}
+                        </span>
+                      </div>
+
+                      {/* Action Button */}
+                      <div>
+                        {isApplied ? (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setAppliedCoupon(null);
+                              setCouponInput('');
+                              setCouponError(null);
+                              useOrderStore.getState().setAppliedCouponDiscountPaise(null);
+                              showToast(`Removed coupon ${coupon.code}`);
+                            }}
+                            style={{
+                              width: '100%',
+                              padding: '8px 12px',
+                              borderRadius: '8px',
+                              background: 'rgba(239, 68, 68, 0.15)',
+                              border: '1px solid rgba(239, 68, 68, 0.35)',
+                              color: '#f87171',
+                              fontWeight: 800,
+                              fontSize: '0.78rem',
+                              cursor: 'pointer',
+                            }}
+                          >
+                            ✕ Remove Coupon
+                          </button>
+                        ) : isEligible ? (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setIsAvailableCouponsOpen(false);
+                              void handleApplyCoupon(coupon.code);
+                            }}
+                            style={{
+                              width: '100%',
+                              padding: '8px 12px',
+                              borderRadius: '8px',
+                              background: 'linear-gradient(135deg, #f59e0b, #d97706)',
+                              border: 'none',
+                              color: '#000',
+                              fontWeight: 900,
+                              fontSize: '0.8rem',
+                              cursor: 'pointer',
+                              boxShadow: '0 2px 8px rgba(245, 158, 11, 0.3)',
+                            }}
+                          >
+                            Apply Coupon (Save ₹{(estSavingsPaise / 100).toFixed(0)})
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            disabled
+                            style={{
+                              width: '100%',
+                              padding: '8px 12px',
+                              borderRadius: '8px',
+                              background: 'rgba(255, 255, 255, 0.05)',
+                              border: '1px solid rgba(255, 255, 255, 0.08)',
+                              color: '#64748b',
+                              fontWeight: 700,
+                              fontSize: '0.76rem',
+                              cursor: 'not-allowed',
+                            }}
+                          >
+                            🔒 Add ₹{(deficitPaise / 100).toFixed(0)} more to unlock
+                          </button>
+                        )}
+                      </div>
                     </div>
-                  </div>
-                );
-              })}
+                  );
+                })
+              )}
             </div>
           </div>
         </div>
@@ -6950,7 +6735,7 @@ export default function CustomerDineInPage() {
                       const currentItem =
                         activeCustomizingItem ||
                         menuItems.find((m) => m.id === expandedAccordionItemId) ||
-                        PILOT_MENU.find((m) => m.id === expandedAccordionItemId);
+                        menuItems.find((m) => m.id === expandedAccordionItemId);
                       if (currentItem?.category === 'Beverages') {
                         const milkLabel = prefs?.milkPreference === 'OAT_MILK' ? 'Oat Milk' : prefs?.milkPreference === 'ALMOND_MILK' ? 'Almond Milk' : prefs?.milkPreference === 'NO_MILK' ? 'Black / No Milk' : 'Dairy Milk';
                         const sugarLabel = prefs?.sugarPreference === 'SUGAR_FREE' ? 'Sugar-Free' : prefs?.sugarPreference === 'LESS_SUGAR' ? 'Less Sugar' : prefs?.sugarPreference === 'JAGGERY' ? 'Jaggery' : 'Regular Sugar';
@@ -7495,6 +7280,7 @@ export default function CustomerDineInPage() {
         outletTables={outletTables}
         outletTablesLoaded={outletTablesLoaded}
         showToast={showToast}
+        onApplyCoupon={handleApplyCoupon}
       />
 
       {/* 2. Interactive MenuItem Customizer Modal */}
@@ -7526,7 +7312,8 @@ export default function CustomerDineInPage() {
         }}
         onPaymentInitiate={handleInitiatePayment}
         onPostponePayment={() => {
-          showToast('Payment postponed. All items saved in your cart.');
+          setSessionOrders((prev) => prev.filter((o) => o.payment_status === 'PAID' || o.payment_method === 'CASH_APPROVED'));
+          showToast('Payment not completed — your order was NOT sent to the kitchen. Items remain saved in your cart.');
         }}
         showToast={showToast}
       />
@@ -7567,9 +7354,34 @@ export default function CustomerDineInPage() {
         onMoveOrderPlateTable={handleMoveOrderPlateTable}
       />
 
-      {/* 5. Customer Authentication & Profile Modal */}
+      {/* 5. Smart Kitchen Serve-Later Auto-Prompt Dialog */}
+      <ServeLaterPromptModal
+        isOpen={activeServeLaterOrder !== null || serveLaterPrompt !== null}
+        order={activeServeLaterOrder}
+        onClose={() => {
+          setServeLaterModalDismissed(true);
+          setServeLaterPrompt(null);
+        }}
+        showToast={showToast}
+        onRefreshOrders={async () => {
+          if (activeSessionId) {
+            await fetchSessionOrders(activeSessionId);
+          }
+        }}
+      />
+
+      {/* 6. Customer Authentication & Profile Modal */}
       <CustomerAuthModal
         onAuthSuccess={applyAuthenticatedCustomer}
+      />
+
+      {/* 7. Omnichannel Booking Flow Modal (Pre-Book / Takeaway / Dine-In) */}
+      <BookingFlowModal
+        isOpen={isBookingModalOpen}
+        onClose={() => setIsBookingModalOpen(false)}
+        outletId={activeOutletId}
+        showToast={showToast}
+        onNavigateMenu={() => setCurrentView('menu')}
       />
     </div>
   );
