@@ -32,6 +32,16 @@ export function getDb(): AnyDrizzleDb {
   return drizzle(getPool()) as unknown as AnyDrizzleDb;
 }
 
+/**
+ * Cleanly closes the database connection pool on application shutdown.
+ */
+export async function closePool(): Promise<void> {
+  if (pool) {
+    await pool.end();
+    pool = undefined;
+  }
+}
+
 async function withClient<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
   const client = await getPool().connect();
   try {
@@ -59,8 +69,11 @@ export async function withTenantContext<T>(
   return withClient(async (client) => {
     await client.query('BEGIN');
     try {
-      // Transaction-local set — safe for pooled connections
-      await client.query(`SELECT set_config('app.org_id', $1, true)`, [orgId]);
+      // Transaction-local set — safe for pooled connections (PgBouncer/Supabase pooler)
+      await client.query(
+        `SELECT set_config('app.org_id', $1, true), set_config('app.current_org_id', $1, true)`,
+        [orgId],
+      );
       const db = drizzle(client) as unknown as AnyDrizzleDb;
       const result = await fn(db);
       await client.query('COMMIT');
@@ -85,7 +98,10 @@ export async function withTenantContextRaw<T>(
   return withClient(async (client) => {
     await client.query('BEGIN');
     try {
-      await client.query(`SELECT set_config('app.org_id', $1, true)`, [orgId]);
+      await client.query(
+        `SELECT set_config('app.org_id', $1, true), set_config('app.current_org_id', $1, true)`,
+        [orgId],
+      );
       const result = await fn(client);
       await client.query('COMMIT');
       return result;
