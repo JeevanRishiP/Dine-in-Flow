@@ -10,6 +10,7 @@ import type {
 } from '../../types';
 import { useOrderStore } from '../../store/useOrderStore';
 import { FALLBACK_DISH_IMG } from '../menu/SquareItemCard';
+import { resolveDishImageUrl } from '../menu/menu-image.utils';
 import {
   CATEGORY_COOK_NOTE_CHIPS,
   MUTUALLY_EXCLUSIVE_CHIP_CLUSTERS,
@@ -415,7 +416,7 @@ export function ItemCustomizerModal({
         {/* Banner / Header */}
         <div className="combo-drawer-banner">
           <img
-            src={item.imageUrl || FALLBACK_DISH_IMG}
+            src={resolveDishImageUrl(item.imageUrl)}
             alt={item.name}
             className="combo-drawer-banner-img"
             onError={(e) => {
@@ -641,32 +642,7 @@ export function ItemCustomizerModal({
               </div>
             )}
 
-            {/* Spice Level Preference: Shown if dish has NO spice modifier group and isn't dessert/beverage */}
-            {!hasSpiceModifierGroup && item.category !== 'Desserts' && item.category !== 'Beverages' && (
-              <div style={{ marginBottom: '16px' }}>
-                <div style={{ fontSize: '0.82rem', fontWeight: 700, color: '#f8fafc', marginBottom: '8px' }}>
-                  Spice Preference{isMultiPlate ? ` for ${activePlateDisplayName}` : ''}:
-                </div>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '6px' }}>
-                  {(['MILD', 'MEDIUM', 'HOT', 'NONE'] as const).map((sp) => {
-                    const isSpActive = activeSpice === sp;
-                    return (
-                      <button
-                        key={sp}
-                        type="button"
-                        className={`combo-option-pill ${isSpActive ? 'active' : ''}`}
-                        style={{ textAlign: 'center', padding: '8px 4px' }}
-                        onClick={() => onSelectSpice(sp)}
-                      >
-                        {sp === 'MILD' ? '🌿 Mild' : sp === 'MEDIUM' ? '🌶️ Medium' : sp === 'HOT' ? '🔥 Hot' : '🚫 Plain'}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
-            {/* Modifier Groups & Add-ons */}
+            {/* Database-Driven Modifier Groups & Options */}
             {groups.length > 0 && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', marginBottom: '16px' }}>
                 {groups.map((grp) => {

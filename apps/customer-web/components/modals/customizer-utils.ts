@@ -96,7 +96,7 @@ export function toggleChipInNotes(curNotes: string, chip: string): string {
 }
 
 export function resolveItemModifierGroups(item: MenuItem): ModifierGroup[] {
-  if (item.modifierGroups && item.modifierGroups.length > 0) {
+  if (item.modifierGroups !== undefined) {
     return item.modifierGroups;
   }
   if (!item.modifiers || item.modifiers.length === 0) {

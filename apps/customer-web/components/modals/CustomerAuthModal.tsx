@@ -46,6 +46,7 @@ export const CustomerAuthModal: React.FC<CustomerAuthModalProps> = ({
   const storeIsOpen = useOrderStore((s) => s.isAuthModalOpen);
   const storeSetIsOpen = useOrderStore((s) => s.setIsAuthModalOpen);
   const storeOrgId = useOrderStore((s) => s.activeOrgId);
+  const pendingCouponCode = useOrderStore((s) => s.pendingCouponCode);
 
   const activeIsOpen = isOpen !== undefined ? isOpen : storeIsOpen;
 
@@ -413,6 +414,27 @@ export const CustomerAuthModal: React.FC<CustomerAuthModalProps> = ({
             ✕
           </button>
         </div>
+
+        {pendingCouponCode && (
+          <div
+            style={{
+              background: 'rgba(245, 158, 11, 0.14)',
+              border: '1px solid rgba(245, 158, 11, 0.4)',
+              borderRadius: '8px',
+              padding: '10px 14px',
+              color: '#fbbf24',
+              fontSize: '0.84rem',
+              fontWeight: 700,
+              marginBottom: '14px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px',
+            }}
+          >
+            <span>🏷️</span>
+            <span>Log in or sign up to apply coupon <strong>{pendingCouponCode}</strong></span>
+          </div>
+        )}
 
         {authStep === 'PHONE' && (
           <>
