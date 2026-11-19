@@ -7,6 +7,9 @@ import {
   formatOrderDateTime,
   flattenPlates,
   filterPlatesByTab,
+  getCourseBadge,
+  getCourseSequenceLabel,
+  getDishStatusBadge,
   type OrdersFilterTab,
 } from './orders-utils';
 import type { OutletTableInfo } from '../../app/lib/guest-session';
@@ -77,6 +80,17 @@ export function OrdersHistoryView({
   const [ordersFilterTab, setOrdersFilterTab] = useState<OrdersFilterTab>('PREPARING');
   const [expandedPlateKeys, setExpandedPlateKeys] = useState<Record<string, boolean>>({});
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isReleasingHold, setIsReleasingHold] = useState(false);
+
+  const handleReleaseHoldClick = async (plateKeys: string[], itemName?: string) => {
+    if (isReleasingHold || !onReleaseHold) return;
+    setIsReleasingHold(true);
+    try {
+      await onReleaseHold(plateKeys, itemName);
+    } finally {
+      setIsReleasingHold(false);
+    }
+  };
 
   // Table Move inline editing state
   const [editingOrderPlateKey, setEditingOrderPlateKey] = useState<string | null>(null);
@@ -628,6 +642,9 @@ export function OrdersHistoryView({
                         ? '🍮'
                         : '🍨';
 
+                    const courseBadge = getCourseBadge(firstPlate.courseSequence);
+                    const isScheduledWait = firstPlate.holdStatus === 'SCHEDULED_WAIT';
+
                     return (
                       <div
                         key={itemId}
@@ -656,15 +673,41 @@ export function OrdersHistoryView({
                                   fontWeight: 800,
                                   fontSize: '0.95rem',
                                   color: '#f8fafc',
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  gap: '6px',
+                                  flexWrap: 'wrap',
                                 }}
                               >
-                                {totalQty > 1 ? `${totalQty}× ` : ''}
-                                {firstPlate.itemName}
+                                <span>
+                                  {totalQty > 1 ? `${totalQty}× ` : ''}
+                                  {firstPlate.itemName}
+                                </span>
+                                <span
+                                  style={{
+                                    background: courseBadge.bg,
+                                    color: courseBadge.color,
+                                    border: `1px solid ${courseBadge.border}`,
+                                    fontSize: '0.68rem',
+                                    fontWeight: 800,
+                                    padding: '1px 6px',
+                                    borderRadius: '6px',
+                                  }}
+                                >
+                                  {courseBadge.emoji} {courseBadge.code} {courseBadge.label}
+                                </span>
                               </div>
                               <div
-                                style={{ fontSize: '0.74rem', color: '#a78bfa', marginTop: '2px' }}
+                                style={{
+                                  fontSize: '0.74rem',
+                                  color: isScheduledWait ? '#38bdf8' : '#a78bfa',
+                                  marginTop: '2px',
+                                  fontWeight: 600,
+                                }}
                               >
-                                ⏳ Waiting for your signal — Chef will prepare fresh
+                                {isScheduledWait
+                                  ? `⏰ Scheduled fire for ${formatOrderDateTime(firstPlate.targetFireAt || firstPlate.scheduledFor)}`
+                                  : `⏳ On Hold — Chef will start cooking fresh when you tap below (~${firstPlate.prepTimeMinutes ?? 15}m prep)`}
                               </div>
                               <div
                                 style={{ fontSize: '0.72rem', color: '#94a3b8', marginTop: '3px' }}
@@ -735,21 +778,22 @@ export function OrdersHistoryView({
                                   {onReleaseHold && (
                                     <button
                                       type="button"
+                                      disabled={isReleasingHold}
                                       onClick={() =>
-                                        onReleaseHold([plate.plateKey], firstPlate.itemName)
+                                        void handleReleaseHoldClick([plate.plateKey], firstPlate.itemName)
                                       }
                                       style={{
-                                        background: 'rgba(139, 92, 246, 0.2)',
+                                        background: isReleasingHold ? 'rgba(139, 92, 246, 0.1)' : 'rgba(139, 92, 246, 0.2)',
                                         border: '1px solid rgba(139, 92, 246, 0.5)',
                                         borderRadius: '6px',
-                                        color: '#c4b5fd',
+                                        color: isReleasingHold ? '#8b5cf6' : '#c4b5fd',
                                         fontSize: '0.72rem',
                                         fontWeight: 700,
                                         padding: '3px 8px',
-                                        cursor: 'pointer',
+                                        cursor: isReleasingHold ? 'not-allowed' : 'pointer',
                                       }}
                                     >
-                                      Bring This Plate →
+                                      {isReleasingHold ? 'Firing...' : isScheduledWait ? 'Fire Ahead →' : 'Bring This Plate →'}
                                     </button>
                                   )}
                                 </div>
@@ -762,25 +806,38 @@ export function OrdersHistoryView({
                         {onReleaseHold && (
                           <button
                             type="button"
-                            onClick={() => onReleaseHold(allPlateKeys, firstPlate.itemName)}
+                            disabled={isReleasingHold}
+                            onClick={() => void handleReleaseHoldClick(allPlateKeys, firstPlate.itemName)}
                             style={{
                               width: '100%',
-                              background: 'linear-gradient(135deg, #7c3aed, #6d28d9)',
+                              background: isReleasingHold
+                                ? 'rgba(109, 40, 217, 0.4)'
+                                : isScheduledWait
+                                ? 'linear-gradient(135deg, #0284c7, #0369a1)'
+                                : 'linear-gradient(135deg, #7c3aed, #6d28d9)',
                               color: '#fff',
                               border: 'none',
                               borderRadius: '10px',
                               padding: '12px 16px',
                               fontWeight: 900,
                               fontSize: '0.9rem',
-                              cursor: 'pointer',
+                              cursor: isReleasingHold ? 'not-allowed' : 'pointer',
                               display: 'flex',
                               alignItems: 'center',
                               justifyContent: 'center',
                               gap: '8px',
-                              boxShadow: '0 4px 14px rgba(109, 40, 217, 0.4)',
+                              boxShadow: isScheduledWait
+                                ? '0 4px 14px rgba(3, 105, 161, 0.4)'
+                                : '0 4px 14px rgba(109, 40, 217, 0.4)',
                             }}
                           >
-                            <span>🍳 Send to Kitchen Now</span>
+                            <span>
+                              {isReleasingHold
+                                ? '⏳ Firing to Kitchen...'
+                                : isScheduledWait
+                                ? '⚡ Fire to Kitchen Ahead of Schedule'
+                                : '🍳 Fire to Kitchen Now'}
+                            </span>
                             {totalQty > 1 && (
                               <span style={{ opacity: 0.8, fontSize: '0.8rem' }}>
                                 ({totalQty} plates)
@@ -796,6 +853,9 @@ export function OrdersHistoryView({
                 /* Standard Plates List */
                 displayPlates.map((plate) => {
                   const isExpanded = Boolean(expandedPlateKeys[plate.plateKey]);
+                  const statusBadge = getDishStatusBadge(plate.itemStatus, plate.holdStatus);
+                  const isPlateServed = plate.itemStatus === 'SERVED';
+                  const displayOrderNumber = plate.displayId || `ORD-${String(plate.orderNumber).padStart(4, '0')}`;
 
                   return (
                     <div
@@ -845,6 +905,21 @@ export function OrdersHistoryView({
                           >
                             🍽️ {plate.plateName}
                           </span>
+                          {plate.courseSequence && (
+                            <span
+                              style={{
+                                background: getCourseBadge(plate.courseSequence).bg,
+                                border: `1px solid ${getCourseBadge(plate.courseSequence).border}`,
+                                color: getCourseBadge(plate.courseSequence).color,
+                                fontSize: '0.68rem',
+                                fontWeight: 800,
+                                padding: '2px 6px',
+                                borderRadius: '9999px',
+                              }}
+                            >
+                              {getCourseBadge(plate.courseSequence).emoji} {getCourseBadge(plate.courseSequence).code}
+                            </span>
+                          )}
                           {plate.portion === 'HALF' && (
                             <span
                               style={{
@@ -883,69 +958,48 @@ export function OrdersHistoryView({
 
                         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                           <span
-                            className={`status-badge ${
-                              plate.orderStatus === 'CANCELLED'
-                                ? 'cancelled'
-                                : plate.orderStatus === 'SERVED' || plate.orderStatus === 'BILLED'
-                                ? 'served'
-                                : 'cooking'
-                            }`}
-                            style={
-                              plate.orderStatus === 'CANCELLED'
-                                ? {
-                                    background: 'rgba(239, 68, 68, 0.15)',
-                                    color: '#f87171',
-                                    border: '1px solid rgba(239, 68, 68, 0.3)',
-                                  }
-                                : plate.orderStatus === 'SERVED' || plate.orderStatus === 'BILLED'
-                                ? {
-                                    background: 'rgba(16, 185, 129, 0.15)',
-                                    color: '#10b981',
-                                    border: '1px solid rgba(16, 185, 129, 0.3)',
-                                  }
-                                : {
-                                    background: 'rgba(245, 158, 11, 0.15)',
-                                    color: '#fbbf24',
-                                    border: '1px solid rgba(245, 158, 11, 0.3)',
-                                  }
-                            }
+                            className="status-badge"
+                            style={{
+                              background: statusBadge.bg,
+                              color: statusBadge.color,
+                              border: `1px solid ${statusBadge.border}`,
+                              fontWeight: 800,
+                              fontSize: '0.74rem',
+                              padding: '2px 8px',
+                              borderRadius: '9999px',
+                            }}
                           >
-                            {plate.orderStatus === 'CANCELLED'
-                              ? 'CANCELLED ✕'
-                              : plate.orderStatus === 'SERVED' || plate.orderStatus === 'BILLED'
-                              ? 'SERVED 🍽️'
-                              : 'PREPARING 🍳'}
+                            {statusBadge.label}
                           </span>
-                          {(plate.orderStatus === 'SERVED' || plate.orderStatus === 'BILLED') &&
-                            onReviewOrder && (
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  const parentOrder = sessionOrders.find(
-                                    (o) => o.id === plate.orderId
-                                  );
-                                  if (parentOrder) {
-                                    onReviewOrder(parentOrder);
-                                  }
-                                }}
-                                style={{
-                                  background: 'rgba(245, 158, 11, 0.18)',
-                                  border: '1px solid rgba(245, 158, 11, 0.5)',
-                                  borderRadius: '6px',
-                                  color: '#fbbf24',
-                                  fontSize: '0.72rem',
-                                  fontWeight: 800,
-                                  padding: '2px 8px',
-                                  cursor: 'pointer',
-                                  display: 'inline-flex',
-                                  alignItems: 'center',
-                                  gap: '4px',
-                                }}
-                              >
-                                ⭐ Rate Dish
-                              </button>
-                            )}
+                          {isPlateServed && onReviewOrder && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                const parentOrder = sessionOrders.find(
+                                  (o) => o.id === plate.orderId
+                                );
+                                if (parentOrder) {
+                                  onReviewOrder(parentOrder);
+                                }
+                              }}
+                              style={{
+                                background: 'rgba(245, 158, 11, 0.18)',
+                                border: '1px solid rgba(245, 158, 11, 0.5)',
+                                borderRadius: '6px',
+                                color: '#fbbf24',
+                                fontSize: '0.72rem',
+                                fontWeight: 800,
+                                padding: '2px 8px',
+                                cursor: 'pointer',
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '4px',
+                              }}
+                            >
+                              ⭐ Rate Dish
+                            </button>
+                          )}
                           <span
                             style={{ fontWeight: 800, color: '#fbbf24', fontSize: '0.92rem' }}
                           >
@@ -1029,7 +1083,24 @@ export function OrdersHistoryView({
                           🕒 {formatOrderDateTime(plate.itemCreatedAt || plate.orderCreatedAt)}
                         </span>
                         <span>·</span>
-                        <span>Order #{plate.orderNumber}</span>
+                        <span style={{ fontWeight: 700, color: '#e2e8f0' }}>{displayOrderNumber}</span>
+                        {plate.dinerLabel && (
+                          <>
+                            <span>·</span>
+                            <span
+                              style={{
+                                color: '#38bdf8',
+                                fontWeight: 700,
+                                background: 'rgba(56, 189, 248, 0.12)',
+                                border: '1px solid rgba(56, 189, 248, 0.3)',
+                                borderRadius: '999px',
+                                padding: '1px 7px',
+                              }}
+                            >
+                              👤 {plate.dinerLabel}
+                            </span>
+                          </>
+                        )}
                         <span>·</span>
                         <span
                           style={{
