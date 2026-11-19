@@ -16,12 +16,14 @@ import {
   CustomerPaymentsController,
   PublicPaymentsReturnController,
 } from './payments.controller.js';
+import { ConsoleReportsController } from './reports.controller.js';
 import { ReconciliationService } from './reconciliation.service.js';
 
 @Module({
   providers: [PaymentsService, ReconciliationService],
   controllers: [
     ConsolePaymentsController,
+    ConsoleReportsController,
     PublicWebhookController,
     CustomerPaymentsController,
     PublicPaymentsReturnController,
