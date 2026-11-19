@@ -16,6 +16,8 @@ const OrderLineSchema = z.object({
   portion: z.enum(['FULL', 'HALF']).optional().default('FULL'),
   notes: z.string().max(500).optional(),
   target_table_id: z.string().uuid().optional(),
+  diner_id: z.string().optional(),
+  diner_label: z.string().max(100).optional(),
 }).strict();
 
 // ─── Quote Order ──────────────────────────────────────────────────────────────
@@ -57,6 +59,12 @@ export const PlaceOrderSchema = z.object({
   price_fingerprint: z.string().optional(),
   tip_paise: z.number().int().min(0).optional().default(0),
   notes: z.string().max(1000).optional(),
+  order_type: z.enum(['DINE_IN', 'PRE_BOOK_DINE_IN', 'TAKEAWAY']).optional().default('DINE_IN'),
+  scheduled_for: z.string().datetime().optional().nullable(),
+  guest_count: z.number().int().min(1).max(100).optional().nullable(),
+  reservation_id: z.string().uuid().optional().nullable(),
+  diner_id: z.string().optional(),
+  diner_label: z.string().max(100).optional(),
 }).strict();
 
 export class PlaceOrderDto extends createZodDto(PlaceOrderSchema) {}
@@ -64,7 +72,7 @@ export class PlaceOrderDto extends createZodDto(PlaceOrderSchema) {}
 // ─── Update Order Status (staff) ─────────────────────────────────────────────
 
 export const UpdateOrderStatusSchema = z.object({
-  status: z.enum(['CONFIRMED', 'PREPARING', 'READY', 'SERVED', 'BILLED', 'CANCELLED']),
+  status: z.enum(['CONFIRMED', 'PREPARING', 'READY', 'SERVED', 'BILLED', 'COMPLETED', 'CANCELLED']),
   reason: z.string().max(500).optional(),  // required for CANCELLED
 }).strict().refine(
   (d) => d.status !== 'CANCELLED' || d.reason !== undefined,
@@ -76,7 +84,7 @@ export class UpdateOrderStatusDto extends createZodDto(UpdateOrderStatusSchema) 
 // ─── Update Item Status (KDS) ─────────────────────────────────────────────────
 
 export const UpdateItemStatusSchema = z.object({
-  status: z.enum(['PREPARING', 'READY', 'SERVED', 'CANCELLED']),
+  status: z.enum(['CONFIRMED', 'PREPARING', 'READY', 'SERVED', 'CANCELLED']),
 }).strict();
 
 export class UpdateItemStatusDto extends createZodDto(UpdateItemStatusSchema) {}
@@ -104,6 +112,7 @@ export const ReleaseHoldSchema = z
   .object({
     plate_keys: z.array(z.string().min(1)).optional(),
     item_id: z.string().uuid().optional(),
+    itemId: z.string().uuid().optional(),
   })
   .strict();
 
@@ -113,13 +122,97 @@ export class ReleaseHoldDto extends createZodDto(ReleaseHoldSchema) {}
 
 export const OrderQuerySchema = z.object({
   outlet_id: z.string().uuid().optional(),
-  status: z.enum(['PENDING','CONFIRMED','PREPARING','READY','SERVED','BILLED','CANCELLED']).optional(),
+  status: z.enum([
+    'AWAITING_PAYMENT',
+    'PENDING',
+    'CONFIRMED',
+    'PREPARING',
+    'READY',
+    'SERVED',
+    'BILLED',
+    'COMPLETED',
+    'CANCELLED',
+    'PAYMENT_FAILED',
+    'PAYMENT_CANCELLED',
+    'PAYMENT_EXPIRED',
+  ]).optional(),
   session_id: z.string().uuid().optional(),
   limit: z.coerce.number().int().min(1).max(100).default(50),
   offset: z.coerce.number().int().min(0).default(0),
 }).strict();
 
 export class OrderQueryDto extends createZodDto(OrderQuerySchema) {}
+
+// ─── Check Availability (Reservations) ────────────────────────────────────────
+
+export const CheckAvailabilitySchema = z.object({
+  outlet_id: z.string().uuid().optional(),
+  outletId: z.string().uuid().optional(),
+  guest_count: z.coerce.number().int().min(1).max(100).optional(),
+  guestCount: z.coerce.number().int().min(1).max(100).optional(),
+  reserved_for: z.string().optional(),
+  reservedFor: z.string().optional(),
+  duration_minutes: z.coerce.number().int().min(15).max(360).optional(),
+  durationMinutes: z.coerce.number().int().min(15).max(360).optional(),
+}).strict().transform((d) => {
+  const outlet_id = d.outlet_id ?? d.outletId;
+  const guest_count = d.guest_count ?? d.guestCount;
+  const reserved_for = d.reserved_for ?? d.reservedFor;
+  const duration_minutes = d.duration_minutes ?? d.durationMinutes ?? 90;
+
+  if (!outlet_id) throw new Error('outlet_id is required');
+  if (!guest_count) throw new Error('guest_count is required');
+  if (!reserved_for) throw new Error('reserved_for is required');
+
+  return { outlet_id, guest_count, reserved_for, duration_minutes };
+});
+
+export class CheckAvailabilityDto extends createZodDto(CheckAvailabilitySchema) {}
+
+// ─── Create Table Reservation ────────────────────────────────────────────────
+
+export const CreateReservationSchema = z.object({
+  outlet_id: z.string().uuid().optional(),
+  outletId: z.string().uuid().optional(),
+  guest_count: z.coerce.number().int().min(1).max(100).optional(),
+  guestCount: z.coerce.number().int().min(1).max(100).optional(),
+  reserved_for: z.string().optional(),
+  reservedFor: z.string().optional(),
+  duration_minutes: z.coerce.number().int().min(15).max(360).optional(),
+  durationMinutes: z.coerce.number().int().min(15).max(360).optional(),
+  table_ids: z.array(z.string().uuid()).optional(),
+  customer_name: z.string().max(100).optional(),
+  customer_phone: z.string().max(20).optional(),
+}).strict().transform((d) => {
+  const outlet_id = d.outlet_id ?? d.outletId;
+  const guest_count = d.guest_count ?? d.guestCount;
+  const reserved_for = d.reserved_for ?? d.reservedFor;
+  const duration_minutes = d.duration_minutes ?? d.durationMinutes ?? 90;
+
+  if (!outlet_id) throw new Error('outlet_id is required');
+  if (!guest_count) throw new Error('guest_count is required');
+  if (!reserved_for) throw new Error('reserved_for is required');
+
+  return {
+    outlet_id,
+    guest_count,
+    reserved_for,
+    duration_minutes,
+    table_ids: d.table_ids,
+    customer_name: d.customer_name,
+    customer_phone: d.customer_phone,
+  };
+});
+
+export class CreateReservationDto extends createZodDto(CreateReservationSchema) {}
+
+// ─── Snooze Serve-Later Prompt ───────────────────────────────────────────────
+
+export const SnoozeServeLaterSchema = z.object({
+  minutes: z.coerce.number().int().min(1).max(60).optional().default(10),
+}).strict();
+
+export class SnoozeServeLaterDto extends createZodDto(SnoozeServeLaterSchema) {}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
